@@ -37,16 +37,22 @@ Linear issue can become a dispatch candidate again after restart.
    [Harness engineering](https://openai.com/index/harness-engineering/).
 2. Get a new personal token in Linear via Settings → Security & access → Personal API keys, and
    set it as the `LINEAR_API_KEY` environment variable.
-3. Copy this directory's `WORKFLOW.md` to your repo.
+3. Copy this directory's `WORKFLOW.md` to your repo, or use a `WORKFLOWS.yml`
+   manifest and `mix workflow.bootstrap` to generate project-specific workflow
+   files from shared lifecycle doctrine.
 4. Optionally copy the `commit`, `push`, `pull`, `land`, and `linear` skills to your repo.
    - The `linear` skill expects Symphony's `linear_graphql` app-server tool for raw Linear GraphQL
      operations such as comment editing or upload flows.
-5. Customize the copied `WORKFLOW.md` file for your project.
+5. Customize the copied `WORKFLOW.md` file for your project, or add a project
+   entry to `WORKFLOWS.yml` and regenerate.
    - To get your project's slug, right-click the project and copy its URL. The slug is part of the
      URL.
    - When creating a workflow based on this repo, note that it depends on non-standard Linear
      issue statuses: "Rework", "Human Review", and "Merging". You can customize them in
      Team Settings → Workflow in Linear.
+   - For the `agent-dashboard` operating setup, use `../WORKFLOW.md` and follow
+     `../docs/agent-dashboard-linear-setup.md` for the Linear setup, issue template, minimal
+     labels, decomposition rules, and invariant-driven guardrails.
 6. Follow the instructions below to install the required runtime dependencies and start the service.
 
 ## Prerequisites
@@ -87,6 +93,19 @@ Optional flags:
 
 The `WORKFLOW.md` file uses YAML front matter for configuration, plus a Markdown body used as the
 Codex session prompt.
+
+For multiple Linear projects or repositories, keep the shared lifecycle prompt
+in a `WORKFLOWS.yml` manifest and generate concrete workflow files:
+
+```bash
+cd elixir
+mise exec -- mix workflow.bootstrap --manifest ../WORKFLOWS.yml
+mise exec -- mix workflow.bootstrap --manifest ../WORKFLOWS.yml --check
+```
+
+Each `workflows[].output_path` receives a runnable `WORKFLOW.md`. The runtime
+still accepts one workflow file at a time; the manifest is the bootstrap source
+of truth for keeping project-specific workflow files consistent.
 
 Minimal example:
 

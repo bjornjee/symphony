@@ -34,6 +34,10 @@ help with the setup:
 > Set up Symphony for my repository based on
 > https://github.com/openai/symphony/blob/main/elixir/README.md
 
+For teams running Symphony across more than one Linear project or repository,
+use a `WORKFLOWS.yml` bootstrap manifest to keep shared lifecycle doctrine in
+one place while generating concrete `WORKFLOW.md` files per project.
+
 ---
 
 ## License
