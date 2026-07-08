@@ -159,6 +159,20 @@ defmodule SymphonyElixir.Orchestrator do
     end
   end
 
+  def handle_info({:worker_completion_info, issue_id, completion_info}, %{running: running} = state)
+      when is_binary(issue_id) and is_map(completion_info) do
+    case Map.get(running, issue_id) do
+      nil ->
+        {:noreply, state}
+
+      running_entry ->
+        updated_running_entry = Map.put(running_entry, :completion_info, completion_info)
+
+        notify_dashboard()
+        {:noreply, %{state | running: Map.put(running, issue_id, updated_running_entry)}}
+    end
+  end
+
   def handle_info(
         {:codex_worker_update, issue_id, %{event: _, timestamp: _} = update},
         %{running: running} = state
@@ -210,15 +224,7 @@ defmodule SymphonyElixir.Orchestrator do
         :ok ->
           state
           |> complete_issue(issue_id)
-          |> schedule_issue_retry(issue_id, 1, %{
-            identifier: running_entry.identifier,
-            issue_url: running_entry.issue.url,
-            delay_type: :continuation,
-            worker_host: Map.get(running_entry, :worker_host),
-            workspace_path: Map.get(running_entry, :workspace_path),
-            audit_path: Map.get(running_entry, :audit_path),
-            audit_events_path: Map.get(running_entry, :audit_events_path)
-          })
+          |> maybe_schedule_completion_continuation_retry(issue_id, running_entry)
 
         {:error, reason} ->
           error = lifecycle_callback_error(:completed, reason)
@@ -237,6 +243,28 @@ defmodule SymphonyElixir.Orchestrator do
       retry_agent_down(state, issue_id, running_entry, session_id, reason)
     end
   end
+
+  defp maybe_schedule_completion_continuation_retry(%State{} = state, issue_id, running_entry) do
+    if completion_retry_needed?(Map.get(running_entry, :completion_info)) do
+      schedule_issue_retry(state, issue_id, 1, %{
+        identifier: running_entry.identifier,
+        issue_url: running_entry.issue.url,
+        delay_type: :continuation,
+        worker_host: Map.get(running_entry, :worker_host),
+        workspace_path: Map.get(running_entry, :workspace_path),
+        audit_path: Map.get(running_entry, :audit_path),
+        audit_events_path: Map.get(running_entry, :audit_events_path)
+      })
+    else
+      Logger.info("Agent reported completed continuation for issue_id=#{issue_id}; skipping active-state continuation retry")
+      release_issue_claim(state, issue_id)
+    end
+  end
+
+  defp completion_retry_needed?(%{continuation: :done}), do: false
+  defp completion_retry_needed?(%{"continuation" => "done"}), do: false
+  defp completion_retry_needed?(%{"continuation" => :done}), do: false
+  defp completion_retry_needed?(_completion_info), do: true
 
   defp block_input_required_agent_down(state, issue_id, running_entry, session_id, reason) do
     error = blocker_error(running_entry, "agent exited: #{inspect(reason)}")

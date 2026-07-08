@@ -775,6 +775,49 @@ defmodule SymphonyElixir.CoreTest do
     assert_due_after(due_at_ms, before_down_ms, 500, 1_100)
   end
 
+  test "normal worker exit skips continuation retry after agent reports inactive issue" do
+    issue_id = "issue-finished"
+    ref = make_ref()
+    orchestrator_name = Module.concat(__MODULE__, :FinishedContinuationOrchestrator)
+    {:ok, pid} = Orchestrator.start_link(name: orchestrator_name)
+
+    on_exit(fn ->
+      if Process.alive?(pid) do
+        Process.exit(pid, :normal)
+      end
+    end)
+
+    initial_state = :sys.get_state(pid)
+
+    running_entry = %{
+      pid: self(),
+      ref: ref,
+      identifier: "MT-559",
+      issue: %Issue{id: issue_id, identifier: "MT-559", state: "In Progress"},
+      completion_info: %{
+        continuation: :done,
+        issue_state: "Human Review",
+        issue_routable: false
+      },
+      started_at: DateTime.utc_now()
+    }
+
+    :sys.replace_state(pid, fn _ ->
+      initial_state
+      |> Map.put(:running, %{issue_id => running_entry})
+      |> Map.put(:claimed, MapSet.new([issue_id]))
+      |> Map.put(:retry_attempts, %{})
+    end)
+
+    send(pid, {:DOWN, ref, :process, self(), :normal})
+    Process.sleep(50)
+    state = :sys.get_state(pid)
+
+    refute Map.has_key?(state.running, issue_id)
+    assert MapSet.member?(state.completed, issue_id)
+    refute Map.has_key?(state.retry_attempts, issue_id)
+  end
+
   test "normal worker exit runs configured completed cleanup callback" do
     previous_memory_recipient = Application.get_env(:symphony_elixir, :memory_tracker_recipient)
 
@@ -1604,6 +1647,14 @@ defmodule SymphonyElixir.CoreTest do
                      500
 
       assert session_id == "thread-live-turn-live"
+
+      assert_receive {:worker_completion_info, "issue-live-updates",
+                      %{
+                        continuation: :done,
+                        issue_state: "Done",
+                        issue_active: false
+                      }},
+                     500
     after
       File.rm_rf(test_root)
     end

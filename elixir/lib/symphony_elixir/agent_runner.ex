@@ -65,7 +65,8 @@ defmodule SymphonyElixir.AgentRunner do
         RunAudit.append(workspace, issue, :before_run_hook_completed, %{phase: "workspace", status: "completed"})
         result = run_codex_turns(workspace, issue, codex_update_recipient, opts, worker_host)
         record_run_result(workspace, issue, result)
-        result
+        send_worker_completion_info(codex_update_recipient, issue, result)
+        normalize_run_result(result)
 
       {:error, reason} = error ->
         RunAudit.append(workspace, issue, :before_run_hook_failed, %{phase: "workspace", status: "failed", reason: reason})
@@ -77,11 +78,20 @@ defmodule SymphonyElixir.AgentRunner do
     RunAudit.append(workspace, issue, :run_completed, %{phase: "run", status: "completed"})
   end
 
+  defp record_run_result(workspace, issue, {:ok, _completion_info}) do
+    RunAudit.append(workspace, issue, :run_completed, %{phase: "run", status: "completed"})
+  end
+
   defp record_run_result(workspace, issue, {:error, reason}) do
     RunAudit.append(workspace, issue, :run_failed, %{phase: "run", status: "failed", reason: reason})
   end
 
   defp record_run_result(_workspace, _issue, _result), do: :ok
+
+  defp normalize_run_result(:ok), do: :ok
+  defp normalize_run_result({:ok, _completion_info}), do: :ok
+  defp normalize_run_result({:error, _reason} = error), do: error
+  defp normalize_run_result(result), do: result
 
   defp codex_message_handler(recipient, issue, workspace) do
     fn message ->
@@ -115,6 +125,14 @@ defmodule SymphonyElixir.AgentRunner do
   end
 
   defp send_worker_runtime_info(_recipient, _issue, _worker_host, _workspace, _audit_paths), do: :ok
+
+  defp send_worker_completion_info(recipient, %Issue{id: issue_id}, {:ok, completion_info})
+       when is_binary(issue_id) and is_pid(recipient) and is_map(completion_info) do
+    send(recipient, {:worker_completion_info, issue_id, completion_info})
+    :ok
+  end
+
+  defp send_worker_completion_info(_recipient, _issue, _result), do: :ok
 
   defp run_codex_turns(workspace, issue, codex_update_recipient, opts, worker_host) do
     max_turns = Keyword.get(opts, :max_turns, Config.settings!().agent.max_turns)
@@ -200,11 +218,11 @@ defmodule SymphonyElixir.AgentRunner do
             Logger.info("Reached agent.max_turns for #{issue_context(refreshed_issue)} with issue still active; returning control to orchestrator")
             RunAudit.append(workspace, refreshed_issue, :codex_max_turns_reached, %{phase: "codex_turn", status: "max_turns_reached", turn_number: turn_number})
 
-            :ok
+            {:ok, completion_info(refreshed_issue, :max_turns_reached)}
 
-          {:done, _refreshed_issue} ->
+          {:done, refreshed_issue} ->
             RunAudit.append(workspace, issue, :codex_continuation_check_completed, %{phase: "codex_turn", status: "done", turn_number: turn_number})
-            :ok
+            {:ok, completion_info(refreshed_issue, :done)}
 
           {:error, reason} ->
             RunAudit.append(workspace, issue, :codex_continuation_check_failed, %{phase: "codex_turn", status: "failed", reason: reason, turn_number: turn_number})
@@ -267,6 +285,16 @@ defmodule SymphonyElixir.AgentRunner do
   end
 
   defp continue_with_issue?(issue, _issue_state_fetcher), do: {:done, issue}
+
+  defp completion_info(%Issue{} = issue, continuation) when continuation in [:done, :max_turns_reached] do
+    %{
+      continuation: continuation,
+      issue_state: issue.state,
+      issue_active: active_issue_state?(issue.state),
+      issue_routable: issue_routable?(issue),
+      issue_labels: issue.labels
+    }
+  end
 
   defp active_issue_state?(state_name) when is_binary(state_name) do
     normalized_state = normalize_issue_state(state_name)
