@@ -797,6 +797,7 @@ defmodule SymphonyElixir.CoreTest do
       completion_info: %{
         continuation: :done,
         issue_state: "Human Review",
+        issue_active: false,
         issue_routable: false
       },
       started_at: DateTime.utc_now()
@@ -816,6 +817,46 @@ defmodule SymphonyElixir.CoreTest do
     refute Map.has_key?(state.running, issue_id)
     assert MapSet.member?(state.completed, issue_id)
     refute Map.has_key?(state.retry_attempts, issue_id)
+  end
+
+  test "normal worker exit keeps continuation retry when completion metadata is ambiguous" do
+    issue_id = "issue-ambiguous-finished"
+    ref = make_ref()
+    orchestrator_name = Module.concat(__MODULE__, :AmbiguousFinishedContinuationOrchestrator)
+    {:ok, pid} = Orchestrator.start_link(name: orchestrator_name)
+
+    on_exit(fn ->
+      if Process.alive?(pid) do
+        Process.exit(pid, :normal)
+      end
+    end)
+
+    initial_state = :sys.get_state(pid)
+
+    running_entry = %{
+      pid: self(),
+      ref: ref,
+      identifier: "MT-560",
+      issue: %Issue{id: issue_id, identifier: "MT-560", state: "In Progress"},
+      completion_info: %{continuation: :done},
+      started_at: DateTime.utc_now()
+    }
+
+    :sys.replace_state(pid, fn _ ->
+      initial_state
+      |> Map.put(:running, %{issue_id => running_entry})
+      |> Map.put(:claimed, MapSet.new([issue_id]))
+      |> Map.put(:retry_attempts, %{})
+    end)
+
+    before_down_ms = System.monotonic_time(:millisecond)
+    send(pid, {:DOWN, ref, :process, self(), :normal})
+    Process.sleep(50)
+    state = :sys.get_state(pid)
+
+    assert MapSet.member?(state.completed, issue_id)
+    assert %{attempt: 1, due_at_ms: due_at_ms} = state.retry_attempts[issue_id]
+    assert_due_after(due_at_ms, before_down_ms, 500, 1_100)
   end
 
   test "normal worker exit runs configured completed cleanup callback" do

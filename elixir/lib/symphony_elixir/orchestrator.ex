@@ -261,9 +261,15 @@ defmodule SymphonyElixir.Orchestrator do
     end
   end
 
-  defp completion_retry_needed?(%{continuation: :done}), do: false
-  defp completion_retry_needed?(%{"continuation" => "done"}), do: false
-  defp completion_retry_needed?(%{"continuation" => :done}), do: false
+  defp completion_retry_needed?(%{continuation: :done} = completion_info) do
+    completion_info[:issue_active] != false and completion_info[:issue_routable] != false
+  end
+
+  defp completion_retry_needed?(%{"continuation" => continuation} = completion_info)
+       when continuation in ["done", :done] do
+    completion_info["issue_active"] != false and completion_info["issue_routable"] != false
+  end
+
   defp completion_retry_needed?(_completion_info), do: true
 
   defp block_input_required_agent_down(state, issue_id, running_entry, session_id, reason) do
