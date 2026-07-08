@@ -28,6 +28,7 @@ defmodule SymphonyElixir.Linear.Client do
         }
         labels {
           nodes {
+            id
             name
           }
         }
@@ -73,6 +74,7 @@ defmodule SymphonyElixir.Linear.Client do
         }
         labels {
           nodes {
+            id
             name
           }
         }
@@ -460,6 +462,7 @@ defmodule SymphonyElixir.Linear.Client do
       assignee_id: assignee_field(assignee, "id"),
       blocked_by: extract_blockers(issue),
       labels: extract_labels(issue),
+      label_ids_by_name: extract_label_ids_by_name(issue),
       assigned_to_worker: assigned_to_worker?(assignee, assignee_filter),
       created_at: parse_datetime(issue["createdAt"]),
       updated_at: parse_datetime(issue["updatedAt"])
@@ -546,6 +549,24 @@ defmodule SymphonyElixir.Linear.Client do
   end
 
   defp extract_labels(_), do: []
+
+  defp extract_label_ids_by_name(%{"labels" => %{"nodes" => labels}}) when is_list(labels) do
+    Enum.reduce(labels, %{}, fn
+      %{"name" => name, "id" => id}, acc when is_binary(name) and is_binary(id) ->
+        Map.put(acc, normalize_label_name(name), id)
+
+      _, acc ->
+        acc
+    end)
+  end
+
+  defp extract_label_ids_by_name(_), do: %{}
+
+  defp normalize_label_name(name) when is_binary(name) do
+    name
+    |> String.trim()
+    |> String.downcase()
+  end
 
   defp extract_blockers(%{"inverseRelations" => %{"nodes" => inverse_relations}})
        when is_list(inverse_relations) do
