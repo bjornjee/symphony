@@ -22,7 +22,7 @@ tracker:
   required_labels: ["codex-ready"]
   terminal_states: ["Closed", "Cancelled", "Canceled", "Duplicate", "Done"]
 workspace:
-  root: "~/code/symphony-workspaces/agent-dashboard"
+  root: "~/Code/bjornjee/worktrees/agent-dashboard"
 ---
 
 You are working on Linear issue `{{ issue.identifier }}`.

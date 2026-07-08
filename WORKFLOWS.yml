@@ -18,6 +18,8 @@ defaults:
       - Done
   polling:
     interval_ms: 30000
+  workspace:
+    root: ~/Code/bjornjee/worktrees
   agent:
     max_concurrent_agents: 1
     max_turns: 12
@@ -205,15 +207,11 @@ workflows:
     output_path: workflows/agent-dashboard/WORKFLOW.md
     tracker:
       project_slug: d42b2f1089ce
-    workspace:
-      root: ~/code/symphony-workspaces/agent-dashboard
     repository:
       url: git@github.com:bjornjee/agent-dashboard.git
   - name: symphony
     output_path: workflows/symphony/WORKFLOW.md
     tracker:
       project_slug: 4c620c712be7
-    workspace:
-      root: ~/code/symphony-workspaces/symphony
     repository:
       url: git@github.com:bjornjee/symphony.git

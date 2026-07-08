@@ -82,7 +82,7 @@ defmodule SymphonyElixir.WorkflowBootstrap do
         config =
           defaults
           |> deep_merge(Map.delete(workflow, "name"))
-          |> deep_merge(derived_config(workflow))
+          |> deep_merge(derived_config(workflow, defaults))
           |> Map.delete("output_path")
 
         {:ok,
@@ -97,17 +97,46 @@ defmodule SymphonyElixir.WorkflowBootstrap do
 
   defp build_workflow(_workflow, _defaults, _prompt, _manifest_dir), do: {:error, :bootstrap_workflow_not_a_map}
 
-  defp derived_config(workflow) do
+  defp derived_config(workflow, defaults) do
     repository = Map.get(workflow, "repository", %{})
     hooks = Map.get(workflow, "hooks", %{})
 
+    %{}
+    |> maybe_put_after_create_hook(repository, hooks)
+    |> maybe_put_derived_workspace_root(workflow, defaults, repository)
+  end
+
+  defp maybe_put_after_create_hook(config, repository, hooks) do
     case {Map.get(repository, "url"), Map.get(hooks, "after_create")} do
       {repo_url, nil} when is_binary(repo_url) ->
-        %{"hooks" => %{"after_create" => "git clone #{shell_quote(repo_url)} ."}}
+        deep_merge(config, %{"hooks" => %{"after_create" => "git clone #{shell_quote(repo_url)} ."}})
 
       _ ->
-        %{}
+        config
     end
+  end
+
+  defp maybe_put_derived_workspace_root(config, workflow, defaults, repository) do
+    with nil <- get_in(workflow, ["workspace", "root"]),
+         root when is_binary(root) <- get_in(defaults, ["workspace", "root"]),
+         repo_url when is_binary(repo_url) <- Map.get(repository, "url"),
+         {:ok, repo_name} <- repository_name(repo_url) do
+      deep_merge(config, %{"workspace" => %{"root" => Path.join(root, repo_name)}})
+    else
+      _ -> config
+    end
+  end
+
+  defp repository_name(repo_url) when is_binary(repo_url) do
+    repo_name =
+      repo_url
+      |> String.trim()
+      |> String.trim_trailing("/")
+      |> String.replace_suffix(".git", "")
+      |> String.split(~r/[:\/]/)
+      |> List.last()
+
+    if present_string?(repo_name), do: {:ok, repo_name}, else: :error
   end
 
   defp write_generated_files(workflows) do
