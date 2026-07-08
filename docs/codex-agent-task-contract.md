@@ -80,3 +80,7 @@ Agents must:
 If the required workflow setup cannot be completed, stop and post one
 `## Agent Blocked` comment with the missing prerequisite and requested human
 action.
+
+Completed work must end with one `## Agent Handoff` comment before moving the
+issue to `Human Review`. Include the PR URL, or a clear no-PR reason, plus the
+verification run and exact reviewer action needed.
