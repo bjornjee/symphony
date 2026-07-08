@@ -174,3 +174,11 @@ workflows:
       root: ~/code/symphony-workspaces/agent-dashboard
     repository:
       url: git@github.com:bjornjee/agent-dashboard.git
+  - name: symphony
+    output_path: workflows/symphony/WORKFLOW.md
+    tracker:
+      project_slug: 4c620c712be7
+    workspace:
+      root: ~/code/symphony-workspaces/symphony
+    repository:
+      url: git@github.com:bjornjee/symphony.git
