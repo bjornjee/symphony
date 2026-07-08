@@ -1688,7 +1688,7 @@ defmodule SymphonyElixir.CoreTest do
                  issue_state_fetcher: fn [_issue_id] -> {:ok, [%{issue | state: "Done"}]} end
                )
 
-      workspace = Path.join(workspace_root, "MT-AUDIT")
+      assert {:ok, workspace} = SymphonyElixir.PathSafety.canonicalize(Path.join(workspace_root, "MT-AUDIT"))
       audit_jsonl = Path.join([workspace, ".symphony", "run-audit.jsonl"])
       audit_markdown = Path.join([workspace, ".symphony", "run-audit.md"])
 
