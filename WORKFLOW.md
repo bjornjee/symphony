@@ -6,10 +6,9 @@ codex:
   approval_policy: "never"
   command: "codex --config shell_environment_policy.inherit=all app-server"
   read_timeout_ms: 30000
-  thread_sandbox: "workspace-write"
+  thread_sandbox: "danger-full-access"
   turn_sandbox_policy:
-    networkAccess: true
-    type: "workspaceWrite"
+    type: "dangerFullAccess"
 hooks:
   after_create: "git clone 'git@github.com:bjornjee/agent-dashboard.git' ."
 polling:
@@ -17,6 +16,7 @@ polling:
 tracker:
   active_states: ["Todo", "In Progress", "Merging", "Rework"]
   api_key: "$LINEAR_API_KEY"
+  claim_state: "In Progress"
   kind: "linear"
   project_slug: "d42b2f1089ce"
   required_labels: ["codex-ready"]
@@ -44,17 +44,17 @@ No description provided.
 This is an unattended Symphony session. Symphony schedules the run; the
 agent-dashboard plugin provides the quality workflow inside Codex.
 
-## Codex Agent Task contract
+## Codex Agent Task v1
 
-Parse the Linear issue as a `Codex Agent Task`:
+Parse the Linear issue as `Codex Agent Task v1`:
 
 - `Goal`: one concrete outcome.
-- `Context`: links to Slack, PRs, docs, screenshots, logs, or previous issues.
+- `Context`: links to repo, PRs, docs, Slack thread, screenshots, logs, or prior issues.
 - `Scope`: explicit `In` and `Out` boundaries.
 - `Acceptance Criteria`: observable checklist items.
 - `Verification`: exact command, or "agent selects smallest sufficient proof".
 - `Risk`: `low`, `medium`, or `high`.
-- `Notes For Agent`: optional constraints or pitfalls.
+- `Notes For Agent`: optional constraints, preferred workflow, or known pitfalls.
 
 If `Goal`, `Acceptance Criteria`, or `Verification` is missing, do not
 implement. Add one concise `## Agent Question` Linear comment that names the
@@ -63,6 +63,26 @@ and add `codex-review` when Linear tooling permits labels.
 
 If the issue has `codex-decompose`, or if the scope is too broad for one PR and
 one focused proof command, decompose before implementation.
+
+## Agent execution conventions
+
+Symphony owns scheduling. The selected `agent-dashboard:*` workflow owns how
+you work inside the repository.
+
+You must:
+
+- select the smallest matching `agent-dashboard` workflow before editing
+- follow that workflow's branch, worktree, environment setup, planning, proof,
+  commit, PR, and cleanup gates exactly
+- use isolated git worktrees for `feature`, `fix`, and `refactor` work
+- copy and validate `.env*` files when the selected workflow's worktree setup
+  requires it
+- run environment setup through the selected workflow's sentinel rules
+- avoid replacing workflow gates with ad hoc prompt reasoning
+
+If the required workflow setup cannot be completed, stop and post one
+`## Agent Blocked` comment with the missing prerequisite and requested human
+action.
 
 ## Local workpad, quiet Linear
 
@@ -94,6 +114,10 @@ Choose the smallest matching agent-dashboard workflow from issue content:
 - docs, config, dependency, generated metadata, or mechanical change: `agent-dashboard:chore`
 - behavior-preserving structure change: `agent-dashboard:refactor`
 - PR finalization or release handoff: `agent-dashboard:pr`
+
+If the issue explicitly names `agent-dashboard:<workflow>`, Symphony will
+prepend the corresponding `$agent-dashboard:<workflow>` invocation before
+this prompt reaches Codex. Treat that as the selected plugin workflow.
 
 Record the selected workflow and reason in the local workpad, not Linear.
 

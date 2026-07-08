@@ -6,6 +6,8 @@ defmodule SymphonyElixir.PromptBuilder do
   alias SymphonyElixir.{Config, Workflow}
 
   @render_opts [strict_variables: true, strict_filters: true]
+  @agent_dashboard_workflow ~r/\$?agent-dashboard:(chore|feature|fix|refactor|pr|investigate|implement|rca)\b/i
+  @agent_dashboard_prompt_start ~r/^\$agent-dashboard:(chore|feature|fix|refactor|pr|investigate|implement|rca)\b/i
 
   @spec build_prompt(SymphonyElixir.Linear.Issue.t(), keyword()) :: String.t()
   def build_prompt(issue, opts \\ []) do
@@ -23,7 +25,30 @@ defmodule SymphonyElixir.PromptBuilder do
       @render_opts
     )
     |> IO.iodata_to_binary()
+    |> maybe_prepend_agent_dashboard_invocation(issue)
   end
+
+  defp maybe_prepend_agent_dashboard_invocation(prompt, issue) when is_binary(prompt) do
+    cond do
+      Regex.match?(@agent_dashboard_prompt_start, String.trim_leading(prompt)) ->
+        prompt
+
+      workflow = agent_dashboard_workflow(issue) ->
+        "$agent-dashboard:#{workflow}\n\n#{prompt}"
+
+      true ->
+        prompt
+    end
+  end
+
+  defp agent_dashboard_workflow(%{description: description}) when is_binary(description) do
+    case Regex.run(@agent_dashboard_workflow, description) do
+      [_match, workflow] -> String.downcase(workflow)
+      _ -> nil
+    end
+  end
+
+  defp agent_dashboard_workflow(_issue), do: nil
 
   defp prompt_template!({:ok, %{prompt_template: prompt}}), do: default_prompt(prompt)
 

@@ -388,6 +388,10 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   @doc false
+  @spec claim_issue_for_dispatch_for_test(Issue.t()) :: {:ok, Issue.t()} | {:error, term()}
+  def claim_issue_for_dispatch_for_test(%Issue{} = issue), do: claim_issue_for_dispatch(issue)
+
+  @doc false
   @spec sort_issues_for_dispatch_for_test([Issue.t()]) :: [Issue.t()]
   def sort_issues_for_dispatch_for_test(issues) when is_list(issues) do
     sort_issues_for_dispatch(issues)
@@ -909,7 +913,20 @@ defmodule SymphonyElixir.Orchestrator do
   defp dispatch_issue(%State{} = state, issue, attempt \\ nil, preferred_worker_host \\ nil) do
     case revalidate_issue_for_dispatch(issue, &Tracker.fetch_issue_states_by_ids/1, terminal_state_set()) do
       {:ok, %Issue{} = refreshed_issue} ->
-        do_dispatch_issue(state, refreshed_issue, attempt, preferred_worker_host)
+        case claim_issue_for_dispatch(refreshed_issue) do
+          {:ok, %Issue{} = claimed_issue} ->
+            do_dispatch_issue(state, claimed_issue, attempt, preferred_worker_host)
+
+          {:error, reason} ->
+            Logger.warning("Skipping dispatch; claim state update failed for #{issue_context(refreshed_issue)}: #{inspect(reason)}")
+
+            schedule_issue_retry(state, refreshed_issue.id, attempt, %{
+              identifier: refreshed_issue.identifier,
+              issue_url: refreshed_issue.url,
+              error: "claim state update failed: #{inspect(reason)}",
+              worker_host: preferred_worker_host
+            })
+        end
 
       {:skip, :missing} ->
         Logger.info("Skipping dispatch; issue no longer active or visible: #{issue_context(issue)}")
@@ -989,6 +1006,39 @@ defmodule SymphonyElixir.Orchestrator do
           error: "failed to spawn agent: #{inspect(reason)}",
           worker_host: worker_host
         })
+    end
+  end
+
+  defp claim_issue_for_dispatch(%Issue{} = issue) do
+    case configured_claim_state() do
+      nil ->
+        {:ok, issue}
+
+      claim_state ->
+        cond do
+          not is_binary(issue.id) or String.trim(issue.id) == "" ->
+            {:error, :missing_issue_id}
+
+          normalize_issue_state(issue.state) == normalize_issue_state(claim_state) ->
+            {:ok, issue}
+
+          true ->
+            case Tracker.update_issue_state(issue.id, claim_state) do
+              :ok -> {:ok, %{issue | state: claim_state}}
+              {:error, reason} -> {:error, reason}
+            end
+        end
+    end
+  end
+
+  defp configured_claim_state do
+    case Config.settings!().tracker.claim_state do
+      claim_state when is_binary(claim_state) ->
+        claim_state = String.trim(claim_state)
+        if claim_state == "", do: nil, else: claim_state
+
+      _ ->
+        nil
     end
   end
 

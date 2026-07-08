@@ -42,3 +42,7 @@ mise exec -- ./bin/symphony \
 Only add `codex-ready` when an issue is safe to dispatch. Use `Todo` for queued
 agent work, `Human Review` for PRs/questions/decomposition, `Rework` for review
 feedback, and `Merging` only after human approval.
+
+For deterministic plugin routing, put the workflow directive in the issue's
+`Notes For Agent`, for example `Use agent-dashboard:chore`. Symphony turns that
+into the actual `$agent-dashboard:chore` invocation before Codex sees the task.

@@ -28,7 +28,7 @@ Run:
 <low | medium | high>
 
 ## Notes For Agent
-<optional constraints, preferred workflow, or known pitfalls>
+<optional constraints, `Use agent-dashboard:<workflow>`, or known pitfalls>
 ```
 
 ## Semantics
@@ -43,6 +43,9 @@ Run:
   sufficient proof`.
 - `Risk` is required and should be `low`, `medium`, or `high`.
 - `Notes For Agent` is optional.
+- Use `Notes For Agent` for deterministic workflow routing. When an issue says
+  `Use agent-dashboard:<workflow>`, Symphony prepends
+  `$agent-dashboard:<workflow>` before handing the prompt to Codex.
 
 If `Goal`, `Acceptance Criteria`, or `Verification` is missing, the agent must
 not implement. It should post one `## Agent Question` comment that asks for the
@@ -53,6 +56,10 @@ missing decision and move the issue to `Human Review`.
 Only add `codex-ready` when the issue is safe to dispatch. Project identity
 belongs in the Linear project, issue context, repository URL, and workflow
 manifest, not in a different issue contract.
+
+When `tracker.claim_state` is configured, Symphony moves a dispatchable issue to
+that state before starting Codex. The production workflows use `In Progress` so
+Linear reflects the handoff immediately.
 
 ## Agent Execution
 
