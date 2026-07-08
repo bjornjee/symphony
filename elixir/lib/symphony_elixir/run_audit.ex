@@ -160,12 +160,22 @@ defmodule SymphonyElixir.RunAudit do
   end
 
   defp method_attrs(_event, "codex/event/exec_command_output_delta", payload) do
-    %{
-      phase: "command",
-      status: "output",
-      method: "codex/event/exec_command_output_delta",
-      detail: output_delta_from_payload(payload)
-    }
+    case output_delta_from_payload(payload) do
+      detail when is_binary(detail) ->
+        detail = preview(detail)
+
+        if important_command_output?(detail) do
+          %{
+            phase: "command",
+            status: "output",
+            method: "codex/event/exec_command_output_delta",
+            detail: detail
+          }
+        end
+
+      _ ->
+        nil
+    end
   end
 
   defp method_attrs(_event, _method, _payload), do: nil
@@ -188,6 +198,13 @@ defmodule SymphonyElixir.RunAudit do
     get_in(payload, ["params", "msg", "payload", "outputDelta"]) ||
       get_in(payload, ["params", "msg", "outputDelta"]) ||
       get_in(payload, ["params", "outputDelta"])
+  end
+
+  defp important_command_output?(detail) when is_binary(detail) do
+    String.match?(
+      detail,
+      ~r/\b(error|fail(?:ed|ure|ures)?|fatal|panic|exception|warn(?:ing)?|tests?|passed|coverage|skipped)\b/i
+    )
   end
 
   defp turn_status(payload) do

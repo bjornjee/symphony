@@ -1651,6 +1651,7 @@ defmodule SymphonyElixir.CoreTest do
             5)
               printf '%s\\n' '{\"id\":3,\"result\":{\"turn\":{\"id\":\"turn-audit\"}}}'
               printf '%s\\n' '{\"method\":\"codex/event/exec_command_begin\",\"params\":{\"msg\":{\"command\":\"mix test\"}}}'
+              printf '%s\\n' '{\"method\":\"codex/event/exec_command_output_delta\",\"params\":{\"msg\":{\"payload\":{\"outputDelta\":\"downloading dependency chunk 1\"}}}}'
               printf '%s\\n' '{\"method\":\"codex/event/exec_command_output_delta\",\"params\":{\"msg\":{\"payload\":{\"outputDelta\":\"4 tests, 0 failures\\ncoverage ok\"}}}}'
               printf '%s\\n' '{\"method\":\"codex/event/exec_command_end\",\"params\":{\"msg\":{\"exit_code\":0}}}'
               printf '%s\\n' '{\"method\":\"turn/completed\",\"params\":{\"turn\":{\"status\":\"completed\"}}}'
@@ -1712,6 +1713,7 @@ defmodule SymphonyElixir.CoreTest do
       assert Enum.any?(audit_events, &(&1["event"] == "codex_turn_completed"))
       assert Enum.any?(audit_events, &(&1["event"] == "run_completed"))
       assert Enum.any?(audit_events, &(&1["phase"] == "command" and &1["command"] == "mix test"))
+      refute Enum.any?(audit_events, &(&1["detail"] == "downloading dependency chunk 1"))
 
       assert Enum.any?(audit_events, fn event ->
                event["phase"] == "command" and is_binary(event["detail"]) and
