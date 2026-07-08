@@ -87,51 +87,10 @@ stable, and domain-specific; do not encode workflow state in the key.
 
 ## Codex Agent Task
 
-Use this issue template for work that Symphony can run safely.
-
-```md
-## Goal
-<one concrete outcome>
-
-## Context
-<links to Slack thread, PR, doc, screenshot, logs, or previous issue>
-
-## Scope
-In:
-- <files/components/systems the agent may change>
-
-Out:
-- <explicit non-goals>
-
-## Acceptance Criteria
-- [ ] <observable result>
-- [ ] <observable result>
-
-## Verification
-Run:
-`<exact command, or "agent selects smallest sufficient proof">`
-
-## Risk
-<low | medium | high>
-
-## Notes For Agent
-<any constraints, preferred approach, or known pitfalls>
-```
-
-Contract semantics:
-
-- `Goal` is required and must describe one outcome.
-- `Context` is required for non-trivial work; links are preferred over prose.
-- `Scope.In` is required when the issue touches code.
-- `Scope.Out` is required when adjacent cleanup or expansion is plausible.
-- `Acceptance Criteria` must be checklist items.
-- `Verification` is required. If unknown, use `agent selects smallest sufficient proof`.
-- `Risk` defaults to `medium` when absent.
-- `Notes For Agent` is optional.
-
-If `Goal`, `Acceptance Criteria`, or `Verification` is missing, the agent should
-post one concise `## Agent Question` Linear comment, move the issue to
-`Human Review`, and ask for the missing information instead of implementing.
+Use `Codex Agent Task v1` from `docs/codex-agent-task-contract.md` for every
+issue that Symphony may dispatch. Project-specific details for agent-dashboard
+belong in `Context`, `Scope`, and `Notes For Agent`; the issue contract itself
+must stay identical across Linear projects.
 
 ## Decomposition
 
