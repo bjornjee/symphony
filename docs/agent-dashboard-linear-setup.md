@@ -61,6 +61,11 @@ required_labels:
   - codex-ready
 ```
 
+The production workflows set `tracker.claim_state: In Progress`. Symphony moves
+an issue from `Todo` to `In Progress` before starting Codex; if Linear cannot
+acknowledge the state change, dispatch is retried instead of silently running
+while the board still says queued.
+
 ## Issue Title Convention
 
 Use semantic, action-oriented issue titles:

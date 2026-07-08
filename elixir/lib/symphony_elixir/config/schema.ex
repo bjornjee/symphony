@@ -51,6 +51,7 @@ defmodule SymphonyElixir.Config.Schema do
       field(:project_slug, :string)
       field(:assignee, :string)
       field(:required_labels, {:array, :string}, default: [])
+      field(:claim_state, :string)
       field(:active_states, {:array, :string}, default: ["Todo", "In Progress"])
       field(:terminal_states, {:array, :string}, default: ["Closed", "Cancelled", "Canceled", "Duplicate", "Done"])
     end
@@ -60,7 +61,7 @@ defmodule SymphonyElixir.Config.Schema do
       schema
       |> cast(
         attrs,
-        [:kind, :endpoint, :api_key, :project_slug, :assignee, :required_labels, :active_states, :terminal_states],
+        [:kind, :endpoint, :api_key, :project_slug, :assignee, :required_labels, :claim_state, :active_states, :terminal_states],
         empty_values: []
       )
       |> update_change(:required_labels, fn labels ->

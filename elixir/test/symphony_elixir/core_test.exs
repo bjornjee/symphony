@@ -16,6 +16,7 @@ defmodule SymphonyElixir.CoreTest do
     assert config.tracker.active_states == ["Todo", "In Progress"]
     assert config.tracker.terminal_states == ["Closed", "Cancelled", "Canceled", "Duplicate", "Done"]
     assert config.tracker.assignee == nil
+    assert config.tracker.claim_state == nil
     assert config.agent.max_turns == 20
 
     write_workflow_file!(Workflow.workflow_file_path(), poll_interval_ms: "invalid")
@@ -137,6 +138,7 @@ defmodule SymphonyElixir.CoreTest do
 
     settings = Config.settings!()
     assert settings.tracker.required_labels == ["codex-ready"]
+    assert settings.tracker.claim_state == "In Progress"
     assert settings.agent.max_concurrent_agents == 1
     assert settings.agent.max_turns == 12
 
@@ -183,6 +185,61 @@ defmodule SymphonyElixir.CoreTest do
     )
 
     assert Config.settings!().tracker.assignee == env_assignee
+  end
+
+  test "dispatch claim moves a candidate issue to the configured claim state" do
+    previous_memory_issues = Application.get_env(:symphony_elixir, :memory_tracker_issues)
+    previous_memory_recipient = Application.get_env(:symphony_elixir, :memory_tracker_recipient)
+
+    on_exit(fn ->
+      restore_app_env(:memory_tracker_issues, previous_memory_issues)
+      restore_app_env(:memory_tracker_recipient, previous_memory_recipient)
+    end)
+
+    write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_kind: "memory",
+      tracker_claim_state: "In Progress"
+    )
+
+    Application.put_env(:symphony_elixir, :memory_tracker_recipient, self())
+
+    issue = %Issue{
+      id: "issue-claim",
+      identifier: "MT-CLAIM",
+      state: "Todo",
+      title: "Claim before dispatch",
+      description: "Use agent-dashboard:chore",
+      labels: []
+    }
+
+    assert {:ok, claimed_issue} = Orchestrator.claim_issue_for_dispatch_for_test(issue)
+    assert claimed_issue.state == "In Progress"
+    assert_receive {:memory_tracker_state_update, "issue-claim", "In Progress"}
+  end
+
+  test "dispatch claim skips tracker updates when the issue is already claimed" do
+    previous_memory_recipient = Application.get_env(:symphony_elixir, :memory_tracker_recipient)
+
+    on_exit(fn -> restore_app_env(:memory_tracker_recipient, previous_memory_recipient) end)
+
+    write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_kind: "memory",
+      tracker_claim_state: "In Progress"
+    )
+
+    Application.put_env(:symphony_elixir, :memory_tracker_recipient, self())
+
+    issue = %Issue{
+      id: "issue-claimed",
+      identifier: "MT-CLAIMED",
+      state: "In Progress",
+      title: "Already claimed",
+      description: "Use agent-dashboard:chore",
+      labels: []
+    }
+
+    assert {:ok, ^issue} = Orchestrator.claim_issue_for_dispatch_for_test(issue)
+    refute_receive {:memory_tracker_state_update, "issue-claimed", "In Progress"}
   end
 
   test "workflow file path defaults to WORKFLOW.md in the current working directory when app env is unset" do
@@ -947,6 +1004,36 @@ defmodule SymphonyElixir.CoreTest do
     assert prompt =~ "Ticket S-1 Refactor backend request path"
     assert prompt =~ "labels=backend"
     assert prompt =~ "attempt=3"
+  end
+
+  test "prompt builder invokes requested agent-dashboard workflow from issue notes" do
+    write_workflow_file!(Workflow.workflow_file_path(), prompt: "Ticket {{ issue.identifier }}")
+
+    issue = %Issue{
+      identifier: "S-2",
+      title: "Update docs",
+      description: "Notes For Agent:\nUse `agent-dashboard:chore`.",
+      state: "Todo",
+      url: "https://example.org/issues/S-2",
+      labels: ["docs"]
+    }
+
+    assert PromptBuilder.build_prompt(issue) == "$agent-dashboard:chore\n\nTicket S-2"
+  end
+
+  test "prompt builder does not duplicate an existing agent-dashboard invocation" do
+    write_workflow_file!(Workflow.workflow_file_path(), prompt: "$agent-dashboard:chore\n\nTicket {{ issue.identifier }}")
+
+    issue = %Issue{
+      identifier: "S-3",
+      title: "Update docs",
+      description: "Use agent-dashboard:chore",
+      state: "Todo",
+      url: "https://example.org/issues/S-3",
+      labels: ["docs"]
+    }
+
+    assert PromptBuilder.build_prompt(issue) == "$agent-dashboard:chore\n\nTicket S-3"
   end
 
   test "prompt builder renders issue datetime fields without crashing" do

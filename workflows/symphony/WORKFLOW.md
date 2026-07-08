@@ -6,10 +6,9 @@ codex:
   approval_policy: "never"
   command: "codex --config shell_environment_policy.inherit=all app-server"
   read_timeout_ms: 30000
-  thread_sandbox: "workspace-write"
+  thread_sandbox: "danger-full-access"
   turn_sandbox_policy:
-    networkAccess: true
-    type: "workspaceWrite"
+    type: "dangerFullAccess"
 hooks:
   after_create: "git clone 'git@github.com:bjornjee/symphony.git' ."
 polling:
@@ -17,6 +16,7 @@ polling:
 tracker:
   active_states: ["Todo", "In Progress", "Merging", "Rework"]
   api_key: "$LINEAR_API_KEY"
+  claim_state: "In Progress"
   kind: "linear"
   project_slug: "4c620c712be7"
   required_labels: ["codex-ready"]
@@ -114,6 +114,10 @@ Choose the smallest matching agent-dashboard workflow from issue content:
 - docs, config, dependency, generated metadata, or mechanical change: `agent-dashboard:chore`
 - behavior-preserving structure change: `agent-dashboard:refactor`
 - PR finalization or release handoff: `agent-dashboard:pr`
+
+If the issue explicitly names `agent-dashboard:<workflow>`, Symphony will
+prepend the corresponding `$agent-dashboard:<workflow>` invocation before
+this prompt reaches Codex. Treat that as the selected plugin workflow.
 
 Record the selected workflow and reason in the local workpad, not Linear.
 
