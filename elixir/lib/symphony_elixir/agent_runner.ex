@@ -74,10 +74,6 @@ defmodule SymphonyElixir.AgentRunner do
     end
   end
 
-  defp record_run_result(workspace, issue, :ok) do
-    RunAudit.append(workspace, issue, :run_completed, %{phase: "run", status: "completed"})
-  end
-
   defp record_run_result(workspace, issue, {:ok, _completion_info}) do
     RunAudit.append(workspace, issue, :run_completed, %{phase: "run", status: "completed"})
   end
@@ -86,12 +82,8 @@ defmodule SymphonyElixir.AgentRunner do
     RunAudit.append(workspace, issue, :run_failed, %{phase: "run", status: "failed", reason: reason})
   end
 
-  defp record_run_result(_workspace, _issue, _result), do: :ok
-
-  defp normalize_run_result(:ok), do: :ok
   defp normalize_run_result({:ok, _completion_info}), do: :ok
   defp normalize_run_result({:error, _reason} = error), do: error
-  defp normalize_run_result(result), do: result
 
   defp codex_message_handler(recipient, issue, workspace) do
     fn message ->
