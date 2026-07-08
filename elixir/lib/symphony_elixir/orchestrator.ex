@@ -38,6 +38,7 @@ defmodule SymphonyElixir.Orchestrator do
       claimed: MapSet.new(),
       blocked: %{},
       retry_attempts: %{},
+      lifecycle_callback_failures: %{},
       codex_totals: nil,
       codex_rate_limits: nil
     ]
@@ -203,15 +204,25 @@ defmodule SymphonyElixir.Orchestrator do
     else
       Logger.info("Agent task completed for issue_id=#{issue_id} session_id=#{session_id}; scheduling active-state continuation check")
 
-      state
-      |> complete_issue(issue_id)
-      |> schedule_issue_retry(issue_id, 1, %{
-        identifier: running_entry.identifier,
-        issue_url: running_entry.issue.url,
-        delay_type: :continuation,
-        worker_host: Map.get(running_entry, :worker_host),
-        workspace_path: Map.get(running_entry, :workspace_path)
-      })
+      case run_lifecycle_callbacks(running_entry, :completed) do
+        :ok ->
+          state
+          |> complete_issue(issue_id)
+          |> schedule_issue_retry(issue_id, 1, %{
+            identifier: running_entry.identifier,
+            issue_url: running_entry.issue.url,
+            delay_type: :continuation,
+            worker_host: Map.get(running_entry, :worker_host),
+            workspace_path: Map.get(running_entry, :workspace_path)
+          })
+
+        {:error, reason} ->
+          error = lifecycle_callback_error(:completed, reason)
+
+          state
+          |> record_lifecycle_callback_failure(Map.get(running_entry, :issue), :completed, reason)
+          |> block_issue_from_entry(issue_id, running_entry, error)
+      end
     end
   end
 
@@ -228,7 +239,7 @@ defmodule SymphonyElixir.Orchestrator do
 
     Logger.warning("Agent task blocked for issue_id=#{issue_id} issue_identifier=#{running_entry.identifier} session_id=#{session_id}: #{error}")
 
-    block_issue_from_entry(state, issue_id, running_entry, error)
+    block_issue_after_callback(state, issue_id, running_entry, error)
   end
 
   defp retry_agent_down(state, issue_id, running_entry, session_id, reason) do
@@ -419,12 +430,16 @@ defmodule SymphonyElixir.Orchestrator do
       terminal_issue_state?(issue.state, terminal_states) ->
         Logger.info("Issue moved to terminal state: #{issue_context(issue)} state=#{issue.state}; stopping active agent")
 
-        terminate_running_issue(state, issue.id, true)
+        state
+        |> run_lifecycle_callbacks_for_issue(issue, :terminal)
+        |> terminate_running_issue(issue.id, true)
 
       !issue_routable?(issue) ->
         Logger.info("Issue no longer routed to this worker: #{issue_context(issue)} assignee=#{inspect(issue.assignee_id)}; stopping active agent")
 
-        terminate_running_issue(state, issue.id, false)
+        state
+        |> run_lifecycle_callbacks_for_issue(issue, :inactive)
+        |> terminate_running_issue(issue.id, false)
 
       active_issue_state?(issue.state, active_states) ->
         refresh_running_issue_state(state, issue)
@@ -432,7 +447,9 @@ defmodule SymphonyElixir.Orchestrator do
       true ->
         Logger.info("Issue moved to non-active state: #{issue_context(issue)} state=#{issue.state}; stopping active agent")
 
-        terminate_running_issue(state, issue.id, false)
+        state
+        |> run_lifecycle_callbacks_for_issue(issue, :inactive)
+        |> terminate_running_issue(issue.id, false)
     end
   end
 
@@ -454,18 +471,27 @@ defmodule SymphonyElixir.Orchestrator do
       terminal_issue_state?(issue.state, terminal_states) ->
         Logger.info("Blocked issue moved to terminal state: #{issue_context(issue)} state=#{issue.state}; releasing block")
         cleanup_issue_workspace(issue.identifier, blocked_issue_worker_host(state, issue.id))
-        release_issue_claim(state, issue.id)
+
+        state
+        |> run_lifecycle_callbacks_for_issue(issue, :terminal)
+        |> release_issue_claim(issue.id)
 
       !issue_routable?(issue) ->
         Logger.info("Blocked issue no longer routed to this worker: #{issue_context(issue)} assignee=#{inspect(issue.assignee_id)}; releasing block")
-        release_issue_claim(state, issue.id)
+
+        state
+        |> run_lifecycle_callbacks_for_issue(issue, :inactive)
+        |> release_issue_claim(issue.id)
 
       active_issue_state?(issue.state, active_states) ->
         refresh_blocked_issue_state(state, issue)
 
       true ->
         Logger.info("Blocked issue moved to non-active state: #{issue_context(issue)} state=#{issue.state}; releasing block")
-        release_issue_claim(state, issue.id)
+
+        state
+        |> run_lifecycle_callbacks_for_issue(issue, :inactive)
+        |> release_issue_claim(issue.id)
     end
   end
 
@@ -743,7 +769,21 @@ defmodule SymphonyElixir.Orchestrator do
 
   defp stop_and_block_issue(%State{} = state, issue_id, running_entry, error) do
     stop_running_task(Map.get(running_entry, :pid), Map.get(running_entry, :ref))
-    block_issue_from_entry(state, issue_id, running_entry, error)
+    block_issue_after_callback(state, issue_id, running_entry, error)
+  end
+
+  defp block_issue_after_callback(%State{} = state, issue_id, running_entry, error) do
+    case run_lifecycle_callbacks(running_entry, :blocked) do
+      :ok ->
+        block_issue_from_entry(state, issue_id, running_entry, error)
+
+      {:error, reason} ->
+        callback_error = lifecycle_callback_error(:blocked, reason)
+
+        state
+        |> record_lifecycle_callback_failure(Map.get(running_entry, :issue), :blocked, reason)
+        |> block_issue_from_entry(issue_id, running_entry, error <> "; " <> callback_error)
+    end
   end
 
   defp block_issue_from_entry(%State{} = state, issue_id, running_entry, error) do
@@ -1011,20 +1051,21 @@ defmodule SymphonyElixir.Orchestrator do
 
   defp claim_issue_for_dispatch(%Issue{} = issue) do
     case configured_claim_state() do
-      nil ->
+      nil -> {:ok, issue}
+      claim_state -> claim_issue_state(issue, claim_state)
+    end
+  end
+
+  defp claim_issue_state(%Issue{} = issue, claim_state) do
+    cond do
+      not is_binary(issue.id) or String.trim(issue.id) == "" ->
+        {:error, :missing_issue_id}
+
+      normalize_issue_state(issue.state) == normalize_issue_state(claim_state) ->
         {:ok, issue}
 
-      claim_state ->
-        cond do
-          not is_binary(issue.id) or String.trim(issue.id) == "" ->
-            {:error, :missing_issue_id}
-
-          normalize_issue_state(issue.state) == normalize_issue_state(claim_state) ->
-            {:ok, issue}
-
-          true ->
-            update_claimed_issue_state(issue, claim_state)
-        end
+      true ->
+        update_claimed_issue_state(issue, claim_state)
     end
   end
 
@@ -1161,7 +1202,11 @@ defmodule SymphonyElixir.Orchestrator do
         Logger.info("Issue state is terminal: issue_id=#{issue_id} issue_identifier=#{issue.identifier} state=#{issue.state}; removing associated workspace")
 
         cleanup_issue_workspace(issue.identifier, metadata[:worker_host])
-        {:noreply, release_issue_claim(state, issue_id)}
+
+        {:noreply,
+         state
+         |> run_lifecycle_callbacks_for_issue(issue, :terminal)
+         |> release_issue_claim(issue_id)}
 
       retry_candidate_issue?(issue, terminal_states) ->
         handle_active_retry(state, issue, attempt, metadata)
@@ -1169,7 +1214,10 @@ defmodule SymphonyElixir.Orchestrator do
       true ->
         Logger.debug("Issue left active states, removing claim issue_id=#{issue_id} issue_identifier=#{issue.identifier}")
 
-        {:noreply, release_issue_claim(state, issue_id)}
+        {:noreply,
+         state
+         |> run_lifecycle_callbacks_for_issue(issue, :inactive)
+         |> release_issue_claim(issue_id)}
     end
   end
 
@@ -1241,6 +1289,79 @@ defmodule SymphonyElixir.Orchestrator do
         blocked: Map.delete(state.blocked, issue_id),
         retry_attempts: Map.delete(state.retry_attempts, issue_id)
     }
+  end
+
+  defp run_lifecycle_callbacks(%Issue{} = issue, transition) when is_atom(transition) do
+    case cleanup_labels_for_transition(transition) do
+      [] -> :ok
+      label_names -> Tracker.cleanup_issue_labels(issue, label_names)
+    end
+  end
+
+  defp run_lifecycle_callbacks(%{issue: %Issue{} = issue}, transition) when is_atom(transition) do
+    run_lifecycle_callbacks(issue, transition)
+  end
+
+  defp run_lifecycle_callbacks(_entry_or_issue, transition) when is_atom(transition) do
+    case cleanup_labels_for_transition(transition) do
+      [] -> :ok
+      _label_names -> {:error, :missing_issue_for_lifecycle_callback}
+    end
+  end
+
+  defp run_lifecycle_callbacks_for_issue(%State{} = state, %Issue{} = issue, transition)
+       when is_atom(transition) do
+    case run_lifecycle_callbacks(issue, transition) do
+      :ok -> state
+      {:error, reason} -> record_lifecycle_callback_failure(state, issue, transition, reason)
+    end
+  end
+
+  defp cleanup_labels_for_transition(transition) when is_atom(transition) do
+    callbacks = Config.settings!().tracker.cleanup_callbacks || %{}
+
+    callbacks
+    |> Map.get(Atom.to_string(transition), %{})
+    |> case do
+      %{"remove_labels" => labels} when is_list(labels) -> labels
+      _ -> []
+    end
+  end
+
+  defp record_lifecycle_callback_failure(%State{} = state, %Issue{} = issue, transition, reason)
+       when is_atom(transition) do
+    issue_id = issue.id || issue.identifier || "unknown"
+    error = lifecycle_callback_error(transition, reason)
+
+    Logger.error("#{error} issue_id=#{issue_id} issue_identifier=#{issue.identifier || "unknown"}")
+
+    failure = %{
+      transition: Atom.to_string(transition),
+      issue_identifier: issue.identifier,
+      reason: inspect(reason),
+      recorded_at: DateTime.utc_now()
+    }
+
+    %{state | lifecycle_callback_failures: Map.put(state.lifecycle_callback_failures, issue_id, failure)}
+  end
+
+  defp record_lifecycle_callback_failure(%State{} = state, _issue, transition, reason)
+       when is_atom(transition) do
+    error = lifecycle_callback_error(transition, reason)
+    Logger.error("#{error} issue_id=unknown issue_identifier=unknown")
+
+    failure = %{
+      transition: Atom.to_string(transition),
+      issue_identifier: nil,
+      reason: inspect(reason),
+      recorded_at: DateTime.utc_now()
+    }
+
+    %{state | lifecycle_callback_failures: Map.put(state.lifecycle_callback_failures, "unknown", failure)}
+  end
+
+  defp lifecycle_callback_error(transition, reason) when is_atom(transition) do
+    "lifecycle callback failed transition=#{transition} reason=#{inspect(reason)}"
   end
 
   defp retry_delay(attempt, metadata) when is_integer(attempt) and attempt > 0 and is_map(metadata) do

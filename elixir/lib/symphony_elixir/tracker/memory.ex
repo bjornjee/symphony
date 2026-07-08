@@ -47,6 +47,12 @@ defmodule SymphonyElixir.Tracker.Memory do
     :ok
   end
 
+  @spec cleanup_issue_labels(Issue.t(), [String.t()]) :: :ok | {:error, term()}
+  def cleanup_issue_labels(%Issue{id: issue_id}, label_names) when is_list(label_names) do
+    send_event({:memory_tracker_label_cleanup, issue_id, label_names})
+    Application.get_env(:symphony_elixir, :memory_tracker_cleanup_result, :ok)
+  end
+
   defp configured_issues do
     Application.get_env(:symphony_elixir, :memory_tracker_issues, [])
   end

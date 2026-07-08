@@ -128,7 +128,17 @@ defmodule SymphonyElixir.AgentRunner do
           case AppServer.set_goal(session, goal_objective(issue)) do
             :ok ->
               RunAudit.append(workspace, issue, :codex_goal_set, %{phase: "codex_goal", status: "completed"})
-              do_run_codex_turns(session, workspace, issue, codex_update_recipient, opts, issue_state_fetcher, 1, max_turns)
+
+              do_run_codex_turns(
+                session,
+                workspace,
+                issue,
+                codex_update_recipient,
+                opts,
+                issue_state_fetcher,
+                1,
+                max_turns
+              )
 
             {:error, reason} = error ->
               RunAudit.append(workspace, issue, :codex_goal_failed, %{phase: "codex_goal", status: "failed", reason: reason})
