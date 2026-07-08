@@ -142,6 +142,7 @@ defmodule SymphonyElixirWeb.DashboardLive do
                   <col style="width: 7.5rem;" />
                   <col style="width: 8.5rem;" />
                   <col />
+                  <col style="width: 8rem;" />
                   <col style="width: 10rem;" />
                 </colgroup>
                 <thead>
@@ -151,6 +152,7 @@ defmodule SymphonyElixirWeb.DashboardLive do
                     <th>Session</th>
                     <th>Runtime / turns</th>
                     <th>Codex update</th>
+                    <th>Audit</th>
                     <th>Tokens</th>
                   </tr>
                 </thead>
@@ -198,6 +200,22 @@ defmodule SymphonyElixirWeb.DashboardLive do
                           <% end %>
                         </span>
                       </div>
+                    </td>
+                    <td>
+                      <%= if entry.audit_path do %>
+                        <button
+                          type="button"
+                          class="subtle-button"
+                          data-label="Copy audit"
+                          data-copy={entry.audit_path}
+                          title={entry.audit_path}
+                          onclick="navigator.clipboard.writeText(this.dataset.copy); this.textContent = 'Copied'; clearTimeout(this._copyTimer); this._copyTimer = setTimeout(() => { this.textContent = this.dataset.label }, 1200);"
+                        >
+                          Copy audit
+                        </button>
+                      <% else %>
+                        <span class="muted">n/a</span>
+                      <% end %>
                     </td>
                     <td>
                       <div class="token-stack numeric">

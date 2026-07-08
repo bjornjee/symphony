@@ -1691,6 +1691,14 @@ defmodule SymphonyElixir.CoreTest do
       audit_jsonl = Path.join([workspace, ".symphony", "run-audit.jsonl"])
       audit_markdown = Path.join([workspace, ".symphony", "run-audit.md"])
 
+      assert_receive {:worker_runtime_info, "issue-audit",
+                      %{
+                        workspace_path: ^workspace,
+                        audit_path: ^audit_markdown,
+                        audit_events_path: ^audit_jsonl
+                      }},
+                     500
+
       assert File.exists?(audit_jsonl)
       assert File.exists?(audit_markdown)
 

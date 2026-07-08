@@ -69,6 +69,17 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
 
     send(
       pid,
+      {:worker_runtime_info, issue_id,
+       %{
+         worker_host: nil,
+         workspace_path: "/workspaces/MT-188",
+         audit_path: "/workspaces/MT-188/.symphony/run-audit.md",
+         audit_events_path: "/workspaces/MT-188/.symphony/run-audit.jsonl"
+       }}
+    )
+
+    send(
+      pid,
       {:codex_worker_update, issue_id,
        %{
          event: :session_started,
@@ -91,6 +102,9 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
     assert %{running: [snapshot_entry]} = snapshot
     assert snapshot_entry.issue_id == issue_id
     assert snapshot_entry.issue_url == "https://example.org/issues/MT-188"
+    assert snapshot_entry.workspace_path == "/workspaces/MT-188"
+    assert snapshot_entry.audit_path == "/workspaces/MT-188/.symphony/run-audit.md"
+    assert snapshot_entry.audit_events_path == "/workspaces/MT-188/.symphony/run-audit.jsonl"
     assert snapshot_entry.session_id == "thread-live-turn-live"
     assert snapshot_entry.turn_count == 1
     assert snapshot_entry.last_codex_timestamp == now

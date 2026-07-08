@@ -14,6 +14,14 @@ defmodule SymphonyElixir.RunAudit do
 
   @type event_name :: atom() | String.t()
 
+  @spec paths(Path.t()) :: %{audit_path: Path.t(), audit_events_path: Path.t()}
+  def paths(workspace) when is_binary(workspace) do
+    %{
+      audit_path: markdown_path(workspace),
+      audit_events_path: jsonl_path(workspace)
+    }
+  end
+
   @spec start(Path.t(), Issue.t(), map()) :: :ok
   def start(workspace, %Issue{} = issue, attrs \\ %{}) when is_binary(workspace) and is_map(attrs) do
     with_audit_guard(workspace, fn ->

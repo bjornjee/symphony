@@ -42,7 +42,7 @@ defmodule SymphonyElixir.AgentRunner do
         RunAudit.start(workspace, issue, %{worker_host: worker_host_for_log(worker_host)})
         RunAudit.append(workspace, issue, :workspace_prepared, %{phase: "workspace", status: "completed", workspace_path: workspace})
 
-        send_worker_runtime_info(codex_update_recipient, issue, worker_host, workspace)
+        send_worker_runtime_info(codex_update_recipient, issue, worker_host, workspace, RunAudit.paths(workspace))
 
         try do
           run_with_workspace(workspace, issue, codex_update_recipient, opts, worker_host)
@@ -98,21 +98,23 @@ defmodule SymphonyElixir.AgentRunner do
 
   defp send_codex_update(_recipient, _issue, _message), do: :ok
 
-  defp send_worker_runtime_info(recipient, %Issue{id: issue_id}, worker_host, workspace)
-       when is_binary(issue_id) and is_pid(recipient) and is_binary(workspace) do
+  defp send_worker_runtime_info(recipient, %Issue{id: issue_id}, worker_host, workspace, audit_paths)
+       when is_binary(issue_id) and is_pid(recipient) and is_binary(workspace) and is_map(audit_paths) do
     send(
       recipient,
       {:worker_runtime_info, issue_id,
        %{
          worker_host: worker_host,
-         workspace_path: workspace
+         workspace_path: workspace,
+         audit_path: audit_paths.audit_path,
+         audit_events_path: audit_paths.audit_events_path
        }}
     )
 
     :ok
   end
 
-  defp send_worker_runtime_info(_recipient, _issue, _worker_host, _workspace), do: :ok
+  defp send_worker_runtime_info(_recipient, _issue, _worker_host, _workspace, _audit_paths), do: :ok
 
   defp run_codex_turns(workspace, issue, codex_update_recipient, opts, worker_host) do
     max_turns = Keyword.get(opts, :max_turns, Config.settings!().agent.max_turns)

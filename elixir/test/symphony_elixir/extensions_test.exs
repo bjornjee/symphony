@@ -416,7 +416,9 @@ defmodule SymphonyElixir.ExtensionsTest do
                  "issue_url" => "https://example.org/issues/MT-HTTP",
                  "state" => "In Progress",
                  "worker_host" => nil,
-                 "workspace_path" => nil,
+                 "workspace_path" => "/workspaces/MT-HTTP",
+                 "audit_path" => "/workspaces/MT-HTTP/.symphony/run-audit.md",
+                 "audit_events_path" => "/workspaces/MT-HTTP/.symphony/run-audit.jsonl",
                  "session_id" => "thread-http",
                  "turn_count" => 7,
                  "last_event" => "notification",
@@ -435,7 +437,9 @@ defmodule SymphonyElixir.ExtensionsTest do
                  "due_at" => state_payload["retrying"] |> List.first() |> Map.fetch!("due_at"),
                  "error" => "boom",
                  "worker_host" => nil,
-                 "workspace_path" => nil
+                 "workspace_path" => nil,
+                 "audit_path" => nil,
+                 "audit_events_path" => nil
                }
              ],
              "blocked" => [
@@ -447,6 +451,8 @@ defmodule SymphonyElixir.ExtensionsTest do
                  "error" => "codex turn requires operator input",
                  "worker_host" => "dm-dev2",
                  "workspace_path" => "/workspaces/MT-BLOCKED",
+                 "audit_path" => "/workspaces/MT-BLOCKED/.symphony/run-audit.md",
+                 "audit_events_path" => "/workspaces/MT-BLOCKED/.symphony/run-audit.jsonl",
                  "session_id" => "thread-blocked",
                  "blocked_at" => state_payload["blocked"] |> List.first() |> Map.fetch!("blocked_at"),
                  "last_event" => "turn_input_required",
@@ -471,13 +477,17 @@ defmodule SymphonyElixir.ExtensionsTest do
              "issue_id" => "issue-http",
              "status" => "running",
              "workspace" => %{
-               "path" => Path.join(Config.settings!().workspace.root, "MT-HTTP"),
-               "host" => nil
+               "path" => "/workspaces/MT-HTTP",
+               "host" => nil,
+               "audit_path" => "/workspaces/MT-HTTP/.symphony/run-audit.md",
+               "audit_events_path" => "/workspaces/MT-HTTP/.symphony/run-audit.jsonl"
              },
              "attempts" => %{"restart_count" => 0, "current_retry_attempt" => 0},
              "running" => %{
                "worker_host" => nil,
-               "workspace_path" => nil,
+               "workspace_path" => "/workspaces/MT-HTTP",
+               "audit_path" => "/workspaces/MT-HTTP/.symphony/run-audit.md",
+               "audit_events_path" => "/workspaces/MT-HTTP/.symphony/run-audit.jsonl",
                "session_id" => "thread-http",
                "turn_count" => 7,
                "state" => "In Progress",
@@ -660,6 +670,9 @@ defmodule SymphonyElixir.ExtensionsTest do
     assert html =~ "Offline"
     assert html =~ "Copy ID"
     assert html =~ "Codex update"
+    assert html =~ "Audit"
+    assert html =~ "Copy audit"
+    assert html =~ "/workspaces/MT-HTTP/.symphony/run-audit.md"
     refute html =~ "data-runtime-clock="
     refute html =~ "setInterval(refreshRuntimeClocks"
     refute html =~ "Refresh now"
@@ -694,6 +707,9 @@ defmodule SymphonyElixir.ExtensionsTest do
           codex_input_tokens: 10,
           codex_output_tokens: 12,
           codex_total_tokens: 22,
+          workspace_path: "/workspaces/MT-HTTP",
+          audit_path: "/workspaces/MT-HTTP/.symphony/run-audit.md",
+          audit_events_path: "/workspaces/MT-HTTP/.symphony/run-audit.jsonl",
           started_at: DateTime.utc_now()
         }
       ])
@@ -812,9 +828,12 @@ defmodule SymphonyElixir.ExtensionsTest do
           last_codex_message: "rendered",
           last_codex_timestamp: nil,
           last_codex_event: :notification,
+          workspace_path: "/workspaces/MT-HTTP",
           codex_input_tokens: 4,
           codex_output_tokens: 8,
           codex_total_tokens: 12,
+          audit_path: "/workspaces/MT-HTTP/.symphony/run-audit.md",
+          audit_events_path: "/workspaces/MT-HTTP/.symphony/run-audit.jsonl",
           started_at: DateTime.utc_now()
         }
       ],
@@ -837,6 +856,8 @@ defmodule SymphonyElixir.ExtensionsTest do
           error: "codex turn requires operator input",
           worker_host: "dm-dev2",
           workspace_path: "/workspaces/MT-BLOCKED",
+          audit_path: "/workspaces/MT-BLOCKED/.symphony/run-audit.md",
+          audit_events_path: "/workspaces/MT-BLOCKED/.symphony/run-audit.jsonl",
           session_id: "thread-blocked",
           blocked_at: DateTime.utc_now(),
           last_codex_event: :turn_input_required,
