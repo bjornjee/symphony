@@ -46,8 +46,9 @@ prompt: |
   No description provided.
   {% endif %}
 
-  This is an unattended Symphony session. Symphony schedules the run; the
-  agent-dashboard plugin provides the quality workflow inside Codex.
+  This is an unattended Symphony session. Symphony schedules the run, sets a
+  Codex app-server thread goal for the Linear issue, and owns callbacks.
+  The agent-dashboard plugin provides quality conventions inside Codex.
 
   ## Codex Agent Task v1
 
@@ -71,14 +72,18 @@ prompt: |
 
   ## Agent execution conventions
 
-  Symphony owns scheduling. The selected `agent-dashboard:*` workflow owns how
-  you work inside the repository.
+  Symphony owns scheduling, app-server goal setup, and Linear callbacks. The
+  selected `agent-dashboard:*` workflow owns how you work inside the repository
+  when it is compatible with unattended execution.
 
   You must:
 
   - select the smallest matching `agent-dashboard` workflow before editing
-  - follow that workflow's branch, worktree, environment setup, planning, proof,
-    commit, PR, and cleanup gates exactly
+  - follow that workflow's branch, worktree, environment setup, proof, commit,
+    PR, and cleanup gates exactly when the workflow is unattended-compatible
+  - for `agent-dashboard:feature`, preserve the worktree, env, planning,
+    verification, commit, PR, and handoff conventions without invoking the
+    interactive `$agent-dashboard:feature` skill gate
   - use isolated git worktrees for `feature`, `fix`, and `refactor` work
   - copy and validate `.env*` files when the selected workflow's worktree setup
     requires it
@@ -120,9 +125,15 @@ prompt: |
   - behavior-preserving structure change: `agent-dashboard:refactor`
   - PR finalization or release handoff: `agent-dashboard:pr`
 
-  If the issue explicitly names `agent-dashboard:<workflow>`, Symphony will
-  prepend the corresponding `$agent-dashboard:<workflow>` invocation before
-  this prompt reaches Codex. Treat that as the selected plugin workflow.
+  If the issue explicitly names an unattended-compatible
+  `agent-dashboard:<workflow>`, Symphony may prepend the corresponding
+  `$agent-dashboard:<workflow>` invocation before this prompt reaches Codex.
+  Treat that as the selected plugin workflow.
+
+  If the issue explicitly names `agent-dashboard:feature`, Symphony sets a real
+  Codex app-server thread goal and injects a Symphony-compatible feature
+  contract instead of invoking `$agent-dashboard:feature`, because that skill
+  requires interactive Codex Plan Mode.
 
   Record the selected workflow and reason in the local workpad, not Linear.
 

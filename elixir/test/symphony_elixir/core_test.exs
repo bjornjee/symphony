@@ -1021,6 +1021,28 @@ defmodule SymphonyElixir.CoreTest do
     assert PromptBuilder.build_prompt(issue) == "$agent-dashboard:chore\n\nTicket S-2"
   end
 
+  test "prompt builder converts feature workflow request to unattended feature contract" do
+    write_workflow_file!(Workflow.workflow_file_path(), prompt: "Ticket {{ issue.identifier }}")
+
+    issue = %Issue{
+      identifier: "S-4",
+      title: "Add cleanup callbacks",
+      description: "Notes For Agent:\nUse `agent-dashboard:feature`.",
+      state: "Todo",
+      url: "https://example.org/issues/S-4",
+      labels: ["feature"]
+    }
+
+    prompt = PromptBuilder.build_prompt(issue)
+
+    refute String.starts_with?(prompt, "$agent-dashboard:feature")
+    assert prompt =~ "Symphony selected `agent-dashboard:feature`"
+    assert prompt =~ "cannot enter Codex Plan Mode"
+    assert prompt =~ "create an isolated git worktree"
+    assert prompt =~ "open a PR"
+    assert prompt =~ "Ticket S-4"
+  end
+
   test "prompt builder does not duplicate an existing agent-dashboard invocation" do
     write_workflow_file!(Workflow.workflow_file_path(), prompt: "$agent-dashboard:chore\n\nTicket {{ issue.identifier }}")
 
@@ -1278,6 +1300,9 @@ defmodule SymphonyElixir.CoreTest do
             printf '%s\\n' '{\"id\":2,\"result\":{\"thread\":{\"id\":\"thread-1\"}}}'
             ;;
           4)
+            printf '%s\\n' '{\"id\":4,\"result\":{\"goal\":{\"objective\":\"Complete Linear S-99: Smoke test\",\"status\":\"active\"}}}'
+            ;;
+          5)
             printf '%s\\n' '{\"id\":3,\"result\":{\"turn\":{\"id\":\"turn-1\"}}}'
             printf '%s\\n' '{\"method\":\"turn/completed\"}'
             exit 0
@@ -1358,12 +1383,15 @@ defmodule SymphonyElixir.CoreTest do
               printf '%s\\n' '{\"id\":1,\"result\":{}}'
               ;;
             2)
-              printf '%s\\n' '{\"id\":2,\"result\":{\"thread\":{\"id\":\"thread-live\"}}}'
               ;;
             3)
-              printf '%s\\n' '{\"id\":3,\"result\":{\"turn\":{\"id\":\"turn-live\"}}}'
+              printf '%s\\n' '{\"id\":2,\"result\":{\"thread\":{\"id\":\"thread-live\"}}}'
               ;;
             4)
+              printf '%s\\n' '{\"id\":4,\"result\":{\"goal\":{\"objective\":\"Complete Linear MT-99: Smoke test\",\"status\":\"active\"}}}'
+              ;;
+            5)
+              printf '%s\\n' '{\"id\":3,\"result\":{\"turn\":{\"id\":\"turn-live\"}}}'
               printf '%s\\n' '{\"method\":\"turn/completed\"}'
               ;;
             *)
@@ -1525,10 +1553,13 @@ defmodule SymphonyElixir.CoreTest do
             printf '%s\\n' '{"id":2,"result":{"thread":{"id":"thread-cont"}}}'
             ;;
           4)
+            printf '%s\\n' '{"id":4,"result":{"goal":{"objective":"Complete Linear MT-247: Continue until done","status":"active"}}}'
+            ;;
+          5)
             printf '%s\\n' '{"id":3,"result":{"turn":{"id":"turn-cont-1"}}}'
             printf '%s\\n' '{"method":"turn/completed"}'
             ;;
-          5)
+          6)
             printf '%s\\n' '{"id":3,"result":{"turn":{"id":"turn-cont-2"}}}'
             printf '%s\\n' '{"method":"turn/completed"}'
             ;;
@@ -1592,6 +1623,7 @@ defmodule SymphonyElixir.CoreTest do
 
       assert length(Enum.filter(lines, &String.starts_with?(&1, "RUN:"))) == 1
       assert length(Enum.filter(lines, &String.contains?(&1, "\"method\":\"thread/start\""))) == 1
+      assert length(Enum.filter(lines, &String.contains?(&1, "\"method\":\"thread/goal/set\""))) == 1
 
       turn_texts =
         lines
@@ -1655,10 +1687,13 @@ defmodule SymphonyElixir.CoreTest do
             printf '%s\\n' '{"id":2,"result":{"thread":{"id":"thread-max"}}}'
             ;;
           4)
+            printf '%s\\n' '{"id":4,"result":{"goal":{"objective":"Complete Linear MT-248: Stop at max turns","status":"active"}}}'
+            ;;
+          5)
             printf '%s\\n' '{"id":3,"result":{"turn":{"id":"turn-max-1"}}}'
             printf '%s\\n' '{"method":"turn/completed"}'
             ;;
-          5)
+          6)
             printf '%s\\n' '{"id":3,"result":{"turn":{"id":"turn-max-2"}}}'
             printf '%s\\n' '{"method":"turn/completed"}'
             ;;
@@ -1705,6 +1740,7 @@ defmodule SymphonyElixir.CoreTest do
 
       trace = File.read!(trace_file)
       assert length(String.split(trace, "RUN", trim: true)) == 1
+      assert length(Regex.scan(~r/"method":"thread\/goal\/set"/, trace)) == 1
       assert length(Regex.scan(~r/"method":"turn\/start"/, trace)) == 2
     after
       System.delete_env("SYMP_TEST_CODEx_TRACE")

@@ -956,6 +956,8 @@ client to:
 - Start the app-server subprocess in the per-issue workspace.
 - Initialize the app-server session using the targeted Codex app-server protocol.
 - Create or resume a coding-agent thread according to the targeted protocol.
+- Set a durable thread goal for the current issue when the targeted protocol supports it. The goal
+  MUST be set through the app-server protocol, not by sending slash-command text in the prompt.
 - Supply the absolute per-issue workspace path as the thread/turn working directory wherever the
   targeted protocol accepts cwd.
 - Start the first turn with the rendered issue prompt.
@@ -1131,8 +1133,9 @@ Behavior:
 1. Create/reuse workspace for issue.
 2. Build prompt from workflow template.
 3. Start app-server session.
-4. Forward app-server events to orchestrator.
-5. On any error, fail the worker attempt (the orchestrator will retry).
+4. Set the app-server thread goal for the issue.
+5. Start the first turn and forward app-server events to orchestrator.
+6. On any error, fail the worker attempt (the orchestrator will retry).
 
 Note:
 
@@ -2018,6 +2021,8 @@ Unless otherwise noted, Sections 17.1 through 17.7 are `Core Conformance`. Bulle
 - Client identity/capability payloads are valid when the targeted Codex app-server protocol requires
   them.
 - Policy-related startup payloads use the implementation's documented approval/sandbox settings
+- Thread goal setup uses the targeted protocol when supported and fails the worker attempt if the
+  app-server rejects the goal request
 - Thread and turn identities exposed by the targeted protocol are extracted and used to emit
   `session_started`
 - Request/response read timeout is enforced

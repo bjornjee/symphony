@@ -9,6 +9,7 @@ defmodule SymphonyElixir.Codex.AppServer do
   @initialize_id 1
   @thread_start_id 2
   @turn_start_id 3
+  @thread_goal_set_id 4
   @port_line_bytes 1_048_576
   @max_stream_log_bytes 1_000
   @non_interactive_tool_input_answer "This is a non-interactive session. Operator input is unavailable."
@@ -139,10 +140,48 @@ defmodule SymphonyElixir.Codex.AppServer do
     end
   end
 
+  @spec set_goal(session(), String.t(), keyword()) :: :ok | {:error, term()}
+  def set_goal(%{port: port, thread_id: thread_id}, objective, opts \\ [])
+      when is_binary(thread_id) and is_binary(objective) do
+    objective = String.trim(objective)
+
+    if objective == "" do
+      {:error, :empty_goal_objective}
+    else
+      token_budget = Keyword.get(opts, :token_budget)
+
+      params =
+        %{
+          "threadId" => thread_id,
+          "objective" => objective,
+          "status" => "active"
+        }
+        |> maybe_put_token_budget(token_budget)
+
+      send_message(port, %{
+        "method" => "thread/goal/set",
+        "id" => @thread_goal_set_id,
+        "params" => params
+      })
+
+      case await_response(port, @thread_goal_set_id) do
+        {:ok, %{"goal" => _goal}} -> :ok
+        {:ok, _response} -> :ok
+        other -> other
+      end
+    end
+  end
+
   @spec stop_session(session()) :: :ok
   def stop_session(%{port: port}) when is_port(port) do
     stop_port(port)
   end
+
+  defp maybe_put_token_budget(params, token_budget) when is_integer(token_budget) and token_budget > 0 do
+    Map.put(params, "tokenBudget", token_budget)
+  end
+
+  defp maybe_put_token_budget(params, _token_budget), do: params
 
   defp validate_workspace_cwd(workspace, nil) when is_binary(workspace) do
     expanded_workspace = Path.expand(workspace)

@@ -1023,11 +1023,15 @@ defmodule SymphonyElixir.Orchestrator do
             {:ok, issue}
 
           true ->
-            case Tracker.update_issue_state(issue.id, claim_state) do
-              :ok -> {:ok, %{issue | state: claim_state}}
-              {:error, reason} -> {:error, reason}
-            end
+            update_claimed_issue_state(issue, claim_state)
         end
+    end
+  end
+
+  defp update_claimed_issue_state(%Issue{} = issue, claim_state) do
+    case Tracker.update_issue_state(issue.id, claim_state) do
+      :ok -> {:ok, %{issue | state: claim_state}}
+      {:error, reason} -> {:error, reason}
     end
   end
 

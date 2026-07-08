@@ -90,7 +90,9 @@ defmodule SymphonyElixir.AgentRunner do
 
     with {:ok, session} <- AppServer.start_session(workspace, worker_host: worker_host) do
       try do
-        do_run_codex_turns(session, workspace, issue, codex_update_recipient, opts, issue_state_fetcher, 1, max_turns)
+        with :ok <- AppServer.set_goal(session, goal_objective(issue)) do
+          do_run_codex_turns(session, workspace, issue, codex_update_recipient, opts, issue_state_fetcher, 1, max_turns)
+        end
       after
         AppServer.stop_session(session)
       end
@@ -150,6 +152,21 @@ defmodule SymphonyElixir.AgentRunner do
     - The original task instructions and prior turn context are already present in this thread, so do not restate them before acting.
     - Focus on the remaining ticket work and do not end the turn while the issue stays active unless you are truly blocked.
     """
+  end
+
+  defp goal_objective(issue) do
+    issue
+    |> raw_goal_objective()
+    |> String.slice(0, 4_000)
+  end
+
+  defp raw_goal_objective(%Issue{identifier: identifier, title: title}) do
+    """
+    Complete Linear #{identifier}: #{title}.
+
+    Use Symphony's prepared workspace, worktree, env setup, issue prompt, and local workpad as the task packet. Preserve agent-dashboard conventions for scoped planning, verification profile selection, implementation proof, commit, PR creation, and one semantic Linear handoff. Do not stop while the issue remains actionable; either deliver a PR-backed handoff or record one real external blocker/question for human review.
+    """
+    |> String.trim()
   end
 
   defp continue_with_issue?(%Issue{id: issue_id} = issue, issue_state_fetcher) when is_binary(issue_id) do
