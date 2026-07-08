@@ -70,7 +70,9 @@ defmodule SymphonyElixirWeb.Presenter do
       status: issue_status(running, retry, blocked),
       workspace: %{
         path: workspace_path(issue_identifier, running, retry, blocked),
-        host: workspace_host(running, retry, blocked)
+        host: workspace_host(running, retry, blocked),
+        audit_path: audit_path(running, retry, blocked),
+        audit_events_path: audit_events_path(running, retry, blocked)
       },
       attempts: %{
         restart_count: restart_count(retry),
@@ -107,6 +109,8 @@ defmodule SymphonyElixirWeb.Presenter do
       state: entry.state,
       worker_host: Map.get(entry, :worker_host),
       workspace_path: Map.get(entry, :workspace_path),
+      audit_path: Map.get(entry, :audit_path),
+      audit_events_path: Map.get(entry, :audit_events_path),
       session_id: entry.session_id,
       turn_count: Map.get(entry, :turn_count, 0),
       last_event: entry.last_codex_event,
@@ -130,7 +134,9 @@ defmodule SymphonyElixirWeb.Presenter do
       due_at: due_at_iso8601(entry.due_in_ms),
       error: entry.error,
       worker_host: Map.get(entry, :worker_host),
-      workspace_path: Map.get(entry, :workspace_path)
+      workspace_path: Map.get(entry, :workspace_path),
+      audit_path: Map.get(entry, :audit_path),
+      audit_events_path: Map.get(entry, :audit_events_path)
     }
   end
 
@@ -143,6 +149,8 @@ defmodule SymphonyElixirWeb.Presenter do
       error: entry.error,
       worker_host: Map.get(entry, :worker_host),
       workspace_path: Map.get(entry, :workspace_path),
+      audit_path: Map.get(entry, :audit_path),
+      audit_events_path: Map.get(entry, :audit_events_path),
       session_id: entry.session_id,
       blocked_at: iso8601(entry.blocked_at),
       last_event: entry.last_codex_event,
@@ -155,6 +163,8 @@ defmodule SymphonyElixirWeb.Presenter do
     %{
       worker_host: Map.get(running, :worker_host),
       workspace_path: Map.get(running, :workspace_path),
+      audit_path: Map.get(running, :audit_path),
+      audit_events_path: Map.get(running, :audit_events_path),
       session_id: running.session_id,
       turn_count: Map.get(running, :turn_count, 0),
       state: running.state,
@@ -176,7 +186,9 @@ defmodule SymphonyElixirWeb.Presenter do
       due_at: due_at_iso8601(retry.due_in_ms),
       error: retry.error,
       worker_host: Map.get(retry, :worker_host),
-      workspace_path: Map.get(retry, :workspace_path)
+      workspace_path: Map.get(retry, :workspace_path),
+      audit_path: Map.get(retry, :audit_path),
+      audit_events_path: Map.get(retry, :audit_events_path)
     }
   end
 
@@ -184,6 +196,8 @@ defmodule SymphonyElixirWeb.Presenter do
     %{
       worker_host: Map.get(blocked, :worker_host),
       workspace_path: Map.get(blocked, :workspace_path),
+      audit_path: Map.get(blocked, :audit_path),
+      audit_events_path: Map.get(blocked, :audit_events_path),
       session_id: blocked.session_id,
       state: blocked.state,
       error: blocked.error,
@@ -205,6 +219,18 @@ defmodule SymphonyElixirWeb.Presenter do
     (running && Map.get(running, :worker_host)) ||
       (retry && Map.get(retry, :worker_host)) ||
       (blocked && Map.get(blocked, :worker_host))
+  end
+
+  defp audit_path(running, retry, blocked) do
+    (running && Map.get(running, :audit_path)) ||
+      (retry && Map.get(retry, :audit_path)) ||
+      (blocked && Map.get(blocked, :audit_path))
+  end
+
+  defp audit_events_path(running, retry, blocked) do
+    (running && Map.get(running, :audit_events_path)) ||
+      (retry && Map.get(retry, :audit_events_path)) ||
+      (blocked && Map.get(blocked, :audit_events_path))
   end
 
   defp recent_events_payload(nil), do: []

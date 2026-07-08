@@ -1502,7 +1502,10 @@ defmodule SymphonyElixir.StatusDashboard do
   defp humanize_codex_wrapper_event("turn_diff", _payload), do: "turn diff updated"
   defp humanize_codex_wrapper_event("exec_command_begin", payload), do: humanize_exec_command_begin(payload)
   defp humanize_codex_wrapper_event("exec_command_end", payload), do: humanize_exec_command_end(payload)
-  defp humanize_codex_wrapper_event("exec_command_output_delta", _payload), do: "command output streaming"
+
+  defp humanize_codex_wrapper_event("exec_command_output_delta", payload),
+    do: humanize_streaming_event("command output streaming", payload)
+
   defp humanize_codex_wrapper_event("mcp_tool_call_begin", _payload), do: "mcp tool call started"
   defp humanize_codex_wrapper_event("mcp_tool_call_end", _payload), do: "mcp tool call completed"
 

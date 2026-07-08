@@ -22,7 +22,7 @@ tracker:
   required_labels: ["codex-ready"]
   terminal_states: ["Closed", "Cancelled", "Canceled", "Duplicate", "Done"]
 workspace:
-  root: "~/code/symphony-workspaces/agent-dashboard"
+  root: "~/Code/bjornjee/worktrees/agent-dashboard"
 ---
 
 You are working on Linear issue `{{ issue.identifier }}`.
@@ -41,8 +41,9 @@ Description:
 No description provided.
 {% endif %}
 
-This is an unattended Symphony session. Symphony schedules the run; the
-agent-dashboard plugin provides the quality workflow inside Codex.
+This is an unattended Symphony session. Symphony schedules the run, sets a
+Codex app-server thread goal for the Linear issue, and owns callbacks.
+The agent-dashboard plugin provides quality conventions inside Codex.
 
 ## Codex Agent Task v1
 
@@ -66,14 +67,18 @@ one focused proof command, decompose before implementation.
 
 ## Agent execution conventions
 
-Symphony owns scheduling. The selected `agent-dashboard:*` workflow owns how
-you work inside the repository.
+Symphony owns scheduling, app-server goal setup, and Linear callbacks. The
+selected `agent-dashboard:*` workflow owns how you work inside the repository
+when it is compatible with unattended execution.
 
 You must:
 
 - select the smallest matching `agent-dashboard` workflow before editing
-- follow that workflow's branch, worktree, environment setup, planning, proof,
-  commit, PR, and cleanup gates exactly
+- follow that workflow's branch, worktree, environment setup, proof, commit,
+  PR, and cleanup gates exactly when the workflow is unattended-compatible
+- for `agent-dashboard:feature`, preserve the worktree, env, planning,
+  verification, commit, PR, and handoff conventions without invoking the
+  interactive `$agent-dashboard:feature` skill gate
 - use isolated git worktrees for `feature`, `fix`, and `refactor` work
 - copy and validate `.env*` files when the selected workflow's worktree setup
   requires it
@@ -105,6 +110,34 @@ closed without human action. Create the comment, read it back, then move the
 issue. If comment creation or readback fails, do not move the issue; leave one
 local workpad note and stop.
 
+## Run audit and latency control
+
+Maintain a lightweight local audit for every implementation run at
+`.symphony/run-audit.md`. Update it at phase boundaries, not after every
+thought. The audit must include:
+
+- issue identifier, selected workflow, workspace path, branch, and PR URL when available
+- phase timestamps for claim/context, workspace setup, first edit, proof start,
+  proof end, commit, PR creation, Linear comment, and state transition
+- verification profile, commands run, exit status, and duration when known
+- proof gaps and whether they are new, pre-existing, or intentionally deferred
+- a short latency note if any phase takes longer than expected
+
+Keep latency bounded without weakening quality:
+
+- prefer the smallest sufficient proof command during the edit loop
+- reserve full-suite or aggregate gates for Full-profile changes, before PR, or
+  when scoped proof cannot bound the risk
+- when a broad gate fails for a known unrelated reason after scoped proof
+  passes, record it once as a proof gap instead of retrying blindly
+- if blocked by missing human input, external auth, or unavailable services,
+  stop with one semantic Linear comment instead of waiting live
+
+The final `## Agent Handoff`, `## Agent Blocked`, or `## Agent Question`
+Linear comment must include a concise `Audit:` line summarizing the local audit
+path, total runtime when known, slowest phase, and any proof gap. Do not paste
+raw logs or the full audit into Linear.
+
 ## Workflow selection
 
 Choose the smallest matching agent-dashboard workflow from issue content:
@@ -115,9 +148,15 @@ Choose the smallest matching agent-dashboard workflow from issue content:
 - behavior-preserving structure change: `agent-dashboard:refactor`
 - PR finalization or release handoff: `agent-dashboard:pr`
 
-If the issue explicitly names `agent-dashboard:<workflow>`, Symphony will
-prepend the corresponding `$agent-dashboard:<workflow>` invocation before
-this prompt reaches Codex. Treat that as the selected plugin workflow.
+If the issue explicitly names an unattended-compatible
+`agent-dashboard:<workflow>`, Symphony may prepend the corresponding
+`$agent-dashboard:<workflow>` invocation before this prompt reaches Codex.
+Treat that as the selected plugin workflow.
+
+If the issue explicitly names `agent-dashboard:feature`, Symphony sets a real
+Codex app-server thread goal and injects a Symphony-compatible feature
+contract instead of invoking `$agent-dashboard:feature`, because that skill
+requires interactive Codex Plan Mode.
 
 Record the selected workflow and reason in the local workpad, not Linear.
 

@@ -22,7 +22,7 @@ defmodule SymphonyElixir.WorkflowBootstrapTest do
         codex:
           command: codex app-server
         workspace:
-          root: ~/code/symphony-workspaces
+          root: ~/Code/bjornjee/worktrees
       prompt: |
         You are working on Linear issue `{{ issue.identifier }}`.
       workflows:
@@ -30,16 +30,12 @@ defmodule SymphonyElixir.WorkflowBootstrapTest do
           output_path: workflows/agent-dashboard/WORKFLOW.md
           tracker:
             project_slug: agent-project
-          workspace:
-            root: ~/code/symphony-workspaces/agent-dashboard
           repository:
             url: git@github.com:bjornjee/agent-dashboard.git
         - name: symphony
           output_path: workflows/symphony/WORKFLOW.md
           tracker:
             project_slug: symphony-project
-          workspace:
-            root: ~/code/symphony-workspaces/symphony
           repository:
             url: git@github.com:bjornjee/symphony.git
       """)
@@ -51,8 +47,10 @@ defmodule SymphonyElixir.WorkflowBootstrapTest do
       symphony_workflow_path = Path.join(root, "workflows/symphony/WORKFLOW.md")
 
       assert File.read!(agent_workflow_path) =~ "project_slug: \"agent-project\""
+      assert File.read!(agent_workflow_path) =~ "root: \"~/Code/bjornjee/worktrees/agent-dashboard\""
       assert File.read!(agent_workflow_path) =~ "git clone 'git@github.com:bjornjee/agent-dashboard.git' ."
       assert File.read!(symphony_workflow_path) =~ "project_slug: \"symphony-project\""
+      assert File.read!(symphony_workflow_path) =~ "root: \"~/Code/bjornjee/worktrees/symphony\""
       assert File.read!(symphony_workflow_path) =~ "git clone 'git@github.com:bjornjee/symphony.git' ."
 
       assert {:ok, %{config: config, prompt: prompt}} = Workflow.load(agent_workflow_path)

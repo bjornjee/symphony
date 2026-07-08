@@ -8,6 +8,7 @@ defmodule SymphonyElixir.PromptBuilder do
   @render_opts [strict_variables: true, strict_filters: true]
   @agent_dashboard_workflow ~r/\$?agent-dashboard:(chore|feature|fix|refactor|pr|investigate|implement|rca)\b/i
   @agent_dashboard_prompt_start ~r/^\$agent-dashboard:(chore|feature|fix|refactor|pr|investigate|implement|rca)\b/i
+  @direct_agent_dashboard_workflows ~w(chore fix refactor pr investigate implement rca)
 
   @spec build_prompt(SymphonyElixir.Linear.Issue.t(), keyword()) :: String.t()
   def build_prompt(issue, opts \\ []) do
@@ -29,16 +30,41 @@ defmodule SymphonyElixir.PromptBuilder do
   end
 
   defp maybe_prepend_agent_dashboard_invocation(prompt, issue) when is_binary(prompt) do
-    cond do
-      Regex.match?(@agent_dashboard_prompt_start, String.trim_leading(prompt)) ->
-        prompt
+    if Regex.match?(@agent_dashboard_prompt_start, String.trim_leading(prompt)) do
+      prompt
+    else
+      case agent_dashboard_workflow(issue) do
+        workflow when workflow in @direct_agent_dashboard_workflows ->
+          "$agent-dashboard:#{workflow}\n\n#{prompt}"
 
-      workflow = agent_dashboard_workflow(issue) ->
-        "$agent-dashboard:#{workflow}\n\n#{prompt}"
+        "feature" ->
+          "#{unattended_feature_contract()}\n\n#{prompt}"
 
-      true ->
-        prompt
+        _ ->
+          prompt
+      end
     end
+  end
+
+  defp unattended_feature_contract do
+    """
+    Symphony selected `agent-dashboard:feature`, but this is an unattended Codex
+    app-server run and cannot enter Codex Plan Mode. Do not invoke
+    `$agent-dashboard:feature` from this session.
+
+    Follow this Symphony-compatible feature contract instead:
+
+    - create an isolated git worktree from latest `main` with a `feat/<name>` branch
+    - copy and validate `.env*` parity when source repo env files exist
+    - keep planning and invariant notes in `.symphony/workpad.md`, not Linear
+    - keep a phase-level run audit in `.symphony/run-audit.md` with commands, durations, proof gaps, and handoff timing
+    - state execution context, scale shape, verification profile, and proof command before editing
+    - use the smallest sufficient proof during the edit loop; record known unrelated broad-gate failures once instead of retrying blindly
+    - use RED/GREEN/REFACTOR when changing behavior and a test adds value
+    - make the smallest scoped implementation, commit with `feat:`, and open a PR
+    - before moving the Linear issue to `Human Review`, leave exactly one human-facing comment with a PR URL or a real external blocker plus a concise audit summary
+    """
+    |> String.trim()
   end
 
   defp agent_dashboard_workflow(%{description: description}) when is_binary(description) do

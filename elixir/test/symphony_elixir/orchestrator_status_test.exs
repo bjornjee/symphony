@@ -69,6 +69,17 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
 
     send(
       pid,
+      {:worker_runtime_info, issue_id,
+       %{
+         worker_host: nil,
+         workspace_path: "/workspaces/MT-188",
+         audit_path: "/workspaces/MT-188/.symphony/run-audit.md",
+         audit_events_path: "/workspaces/MT-188/.symphony/run-audit.jsonl"
+       }}
+    )
+
+    send(
+      pid,
       {:codex_worker_update, issue_id,
        %{
          event: :session_started,
@@ -91,6 +102,9 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
     assert %{running: [snapshot_entry]} = snapshot
     assert snapshot_entry.issue_id == issue_id
     assert snapshot_entry.issue_url == "https://example.org/issues/MT-188"
+    assert snapshot_entry.workspace_path == "/workspaces/MT-188"
+    assert snapshot_entry.audit_path == "/workspaces/MT-188/.symphony/run-audit.md"
+    assert snapshot_entry.audit_events_path == "/workspaces/MT-188/.symphony/run-audit.jsonl"
     assert snapshot_entry.session_id == "thread-live-turn-live"
     assert snapshot_entry.turn_count == 1
     assert snapshot_entry.last_codex_timestamp == now
@@ -1581,7 +1595,7 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
       {"item/reasoning/summaryTextDelta", %{"params" => %{"summaryText" => "thinking"}}, "reasoning summary streaming"},
       {"item/reasoning/summaryPartAdded", %{"params" => %{"summaryText" => "section"}}, "reasoning summary section added"},
       {"item/reasoning/textDelta", %{"params" => %{"textDelta" => "reason"}}, "reasoning text streaming"},
-      {"item/commandExecution/outputDelta", %{"params" => %{"outputDelta" => "ok"}}, "command output streaming"},
+      {"item/commandExecution/outputDelta", %{"params" => %{"outputDelta" => "ok"}}, "command output streaming: ok"},
       {"item/fileChange/outputDelta", %{"params" => %{"outputDelta" => "changed"}}, "file change output streaming"},
       {"item/commandExecution/requestApproval", %{"params" => %{"parsedCmd" => "git status"}}, "command approval requested (git status)"},
       {"item/fileChange/requestApproval", %{"params" => %{"fileChangeCount" => 2}}, "file change approval requested (2 files)"},
@@ -1735,7 +1749,22 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
     assert StatusDashboard.humanize_codex_message(message_delta) =~
              "agent message streaming: writing workpad reconciliation update"
 
+    output_delta = %{
+      event: :notification,
+      message: %{
+        "method" => "codex/event/exec_command_output_delta",
+        "params" => %{
+          "msg" => %{
+            "payload" => %{"outputDelta" => "256 tests, 0 failures\ncoverage 94.02%"}
+          }
+        }
+      }
+    }
+
     assert StatusDashboard.humanize_codex_message(fallback_reasoning) == "reasoning update"
+
+    assert StatusDashboard.humanize_codex_message(output_delta) =~
+             "command output streaming: 256 tests, 0 failures coverage 94.02%"
   end
 
   test "application stop renders offline status" do

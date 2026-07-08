@@ -151,6 +151,9 @@ defmodule SymphonyElixir.CoreTest do
     assert prompt =~ "codex-ready"
     assert prompt =~ "context packet"
     assert prompt =~ "invariant"
+    assert prompt =~ ".symphony/run-audit.md"
+    assert prompt =~ "latency"
+    assert prompt =~ "Audit:"
   end
 
   test "linear api token resolves from LINEAR_API_KEY env var" do
@@ -1183,6 +1186,30 @@ defmodule SymphonyElixir.CoreTest do
     assert PromptBuilder.build_prompt(issue) == "$agent-dashboard:chore\n\nTicket S-2"
   end
 
+  test "prompt builder converts feature workflow request to unattended feature contract" do
+    write_workflow_file!(Workflow.workflow_file_path(), prompt: "Ticket {{ issue.identifier }}")
+
+    issue = %Issue{
+      identifier: "S-4",
+      title: "Add cleanup callbacks",
+      description: "Notes For Agent:\nUse `agent-dashboard:feature`.",
+      state: "Todo",
+      url: "https://example.org/issues/S-4",
+      labels: ["feature"]
+    }
+
+    prompt = PromptBuilder.build_prompt(issue)
+
+    refute String.starts_with?(prompt, "$agent-dashboard:feature")
+    assert prompt =~ "Symphony selected `agent-dashboard:feature`"
+    assert prompt =~ "cannot enter Codex Plan Mode"
+    assert prompt =~ "create an isolated git worktree"
+    assert prompt =~ ".symphony/run-audit.md"
+    assert prompt =~ "smallest sufficient proof"
+    assert prompt =~ "open a PR"
+    assert prompt =~ "Ticket S-4"
+  end
+
   test "prompt builder does not duplicate an existing agent-dashboard invocation" do
     write_workflow_file!(Workflow.workflow_file_path(), prompt: "$agent-dashboard:chore\n\nTicket {{ issue.identifier }}")
 
@@ -1440,6 +1467,9 @@ defmodule SymphonyElixir.CoreTest do
             printf '%s\\n' '{\"id\":2,\"result\":{\"thread\":{\"id\":\"thread-1\"}}}'
             ;;
           4)
+            printf '%s\\n' '{\"id\":4,\"result\":{\"goal\":{\"objective\":\"Complete Linear S-99: Smoke test\",\"status\":\"active\"}}}'
+            ;;
+          5)
             printf '%s\\n' '{\"id\":3,\"result\":{\"turn\":{\"id\":\"turn-1\"}}}'
             printf '%s\\n' '{\"method\":\"turn/completed\"}'
             exit 0
@@ -1520,12 +1550,15 @@ defmodule SymphonyElixir.CoreTest do
               printf '%s\\n' '{\"id\":1,\"result\":{}}'
               ;;
             2)
-              printf '%s\\n' '{\"id\":2,\"result\":{\"thread\":{\"id\":\"thread-live\"}}}'
               ;;
             3)
-              printf '%s\\n' '{\"id\":3,\"result\":{\"turn\":{\"id\":\"turn-live\"}}}'
+              printf '%s\\n' '{\"id\":2,\"result\":{\"thread\":{\"id\":\"thread-live\"}}}'
               ;;
             4)
+              printf '%s\\n' '{\"id\":4,\"result\":{\"goal\":{\"objective\":\"Complete Linear MT-99: Smoke test\",\"status\":\"active\"}}}'
+              ;;
+            5)
+              printf '%s\\n' '{\"id\":3,\"result\":{\"turn\":{\"id\":\"turn-live\"}}}'
               printf '%s\\n' '{\"method\":\"turn/completed\"}'
               ;;
             *)
@@ -1571,6 +1604,128 @@ defmodule SymphonyElixir.CoreTest do
                      500
 
       assert session_id == "thread-live-turn-live"
+    after
+      File.rm_rf(test_root)
+    end
+  end
+
+  test "agent runner writes engine-owned run audit files" do
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-agent-runner-audit-#{System.unique_integer([:positive])}"
+      )
+
+    try do
+      template_repo = Path.join(test_root, "source")
+      workspace_root = Path.join(test_root, "workspaces")
+      codex_binary = Path.join(test_root, "fake-codex")
+
+      File.mkdir_p!(template_repo)
+      File.write!(Path.join(template_repo, "README.md"), "# test")
+      System.cmd("git", ["-C", template_repo, "init", "-b", "main"])
+      System.cmd("git", ["-C", template_repo, "config", "user.name", "Test User"])
+      System.cmd("git", ["-C", template_repo, "config", "user.email", "test@example.com"])
+      System.cmd("git", ["-C", template_repo, "add", "README.md"])
+      System.cmd("git", ["-C", template_repo, "commit", "-m", "initial"])
+
+      File.write!(
+        codex_binary,
+        """
+        #!/bin/sh
+        count=0
+        while IFS= read -r line; do
+          count=$((count + 1))
+          case "$count" in
+            1)
+              printf '%s\\n' '{\"id\":1,\"result\":{}}'
+              ;;
+            2)
+              ;;
+            3)
+              printf '%s\\n' '{\"id\":2,\"result\":{\"thread\":{\"id\":\"thread-audit\"}}}'
+              ;;
+            4)
+              printf '%s\\n' '{\"id\":4,\"result\":{\"goal\":{\"objective\":\"Complete Linear MT-AUDIT: Audit test\",\"status\":\"active\"}}}'
+              ;;
+            5)
+              printf '%s\\n' '{\"id\":3,\"result\":{\"turn\":{\"id\":\"turn-audit\"}}}'
+              printf '%s\\n' '{\"method\":\"codex/event/exec_command_begin\",\"params\":{\"msg\":{\"command\":\"mix test\"}}}'
+              printf '%s\\n' '{\"method\":\"codex/event/exec_command_output_delta\",\"params\":{\"msg\":{\"payload\":{\"outputDelta\":\"downloading dependency chunk 1\"}}}}'
+              printf '%s\\n' '{\"method\":\"codex/event/exec_command_output_delta\",\"params\":{\"msg\":{\"payload\":{\"outputDelta\":\"4 tests, 0 failures\\ncoverage ok\"}}}}'
+              printf '%s\\n' '{\"method\":\"codex/event/exec_command_end\",\"params\":{\"msg\":{\"exit_code\":0}}}'
+              printf '%s\\n' '{\"method\":\"turn/completed\",\"params\":{\"turn\":{\"status\":\"completed\"}}}'
+              ;;
+            *)
+              ;;
+          esac
+        done
+        """
+      )
+
+      File.chmod!(codex_binary, 0o755)
+
+      write_workflow_file!(Workflow.workflow_file_path(),
+        workspace_root: workspace_root,
+        hook_after_create: "cp #{Path.join(template_repo, "README.md")} README.md",
+        codex_command: "#{codex_binary} app-server"
+      )
+
+      issue = %Issue{
+        id: "issue-audit",
+        identifier: "MT-AUDIT",
+        title: "Audit test",
+        description: "Capture audit files",
+        state: "In Progress",
+        url: "https://example.org/issues/MT-AUDIT",
+        labels: ["backend"]
+      }
+
+      assert :ok =
+               AgentRunner.run(
+                 issue,
+                 self(),
+                 issue_state_fetcher: fn [_issue_id] -> {:ok, [%{issue | state: "Done"}]} end
+               )
+
+      workspace = Path.join(workspace_root, "MT-AUDIT")
+      audit_jsonl = Path.join([workspace, ".symphony", "run-audit.jsonl"])
+      audit_markdown = Path.join([workspace, ".symphony", "run-audit.md"])
+
+      assert_receive {:worker_runtime_info, "issue-audit",
+                      %{
+                        workspace_path: ^workspace,
+                        audit_path: ^audit_markdown,
+                        audit_events_path: ^audit_jsonl
+                      }},
+                     500
+
+      assert File.exists?(audit_jsonl)
+      assert File.exists?(audit_markdown)
+
+      audit_events =
+        audit_jsonl
+        |> File.read!()
+        |> String.split("\n", trim: true)
+        |> Enum.map(&Jason.decode!/1)
+
+      assert Enum.any?(audit_events, &(&1["event"] == "workspace_prepared"))
+      assert Enum.any?(audit_events, &(&1["event"] == "codex_turn_completed"))
+      assert Enum.any?(audit_events, &(&1["event"] == "run_completed"))
+      assert Enum.any?(audit_events, &(&1["phase"] == "command" and &1["command"] == "mix test"))
+      refute Enum.any?(audit_events, &(&1["detail"] == "downloading dependency chunk 1"))
+
+      assert Enum.any?(audit_events, fn event ->
+               event["phase"] == "command" and is_binary(event["detail"]) and
+                 event["detail"] =~ "4 tests, 0 failures"
+             end)
+
+      assert Enum.any?(audit_events, &(&1["phase"] == "command" and &1["exit_code"] == 0))
+
+      audit_markdown_content = File.read!(audit_markdown)
+      assert audit_markdown_content =~ "# Run Audit"
+      assert audit_markdown_content =~ "`MT-AUDIT`"
+      assert audit_markdown_content =~ "command=mix test"
     after
       File.rm_rf(test_root)
     end
@@ -1687,10 +1842,13 @@ defmodule SymphonyElixir.CoreTest do
             printf '%s\\n' '{"id":2,"result":{"thread":{"id":"thread-cont"}}}'
             ;;
           4)
+            printf '%s\\n' '{"id":4,"result":{"goal":{"objective":"Complete Linear MT-247: Continue until done","status":"active"}}}'
+            ;;
+          5)
             printf '%s\\n' '{"id":3,"result":{"turn":{"id":"turn-cont-1"}}}'
             printf '%s\\n' '{"method":"turn/completed"}'
             ;;
-          5)
+          6)
             printf '%s\\n' '{"id":3,"result":{"turn":{"id":"turn-cont-2"}}}'
             printf '%s\\n' '{"method":"turn/completed"}'
             ;;
@@ -1754,6 +1912,7 @@ defmodule SymphonyElixir.CoreTest do
 
       assert length(Enum.filter(lines, &String.starts_with?(&1, "RUN:"))) == 1
       assert length(Enum.filter(lines, &String.contains?(&1, "\"method\":\"thread/start\""))) == 1
+      assert length(Enum.filter(lines, &String.contains?(&1, "\"method\":\"thread/goal/set\""))) == 1
 
       turn_texts =
         lines
@@ -1817,10 +1976,13 @@ defmodule SymphonyElixir.CoreTest do
             printf '%s\\n' '{"id":2,"result":{"thread":{"id":"thread-max"}}}'
             ;;
           4)
+            printf '%s\\n' '{"id":4,"result":{"goal":{"objective":"Complete Linear MT-248: Stop at max turns","status":"active"}}}'
+            ;;
+          5)
             printf '%s\\n' '{"id":3,"result":{"turn":{"id":"turn-max-1"}}}'
             printf '%s\\n' '{"method":"turn/completed"}'
             ;;
-          5)
+          6)
             printf '%s\\n' '{"id":3,"result":{"turn":{"id":"turn-max-2"}}}'
             printf '%s\\n' '{"method":"turn/completed"}'
             ;;
@@ -1867,6 +2029,7 @@ defmodule SymphonyElixir.CoreTest do
 
       trace = File.read!(trace_file)
       assert length(String.split(trace, "RUN", trim: true)) == 1
+      assert length(Regex.scan(~r/"method":"thread\/goal\/set"/, trace)) == 1
       assert length(Regex.scan(~r/"method":"turn\/start"/, trace)) == 2
     after
       System.delete_env("SYMP_TEST_CODEx_TRACE")
