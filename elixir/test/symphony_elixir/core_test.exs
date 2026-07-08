@@ -1933,6 +1933,20 @@ defmodule SymphonyElixir.CoreTest do
       assert Enum.at(turn_texts, 1) =~ "close the Linear handoff before doing more implementation"
       assert Enum.at(turn_texts, 1) =~ "If a PR, commit, or proof result already exists"
       assert Enum.at(turn_texts, 1) =~ "Record the reason for the extra turn in `.symphony/run-audit.md`"
+
+      assert {:ok, workspace} = SymphonyElixir.PathSafety.canonicalize(Path.join(workspace_root, "MT-247"))
+
+      continuation_audit =
+        Path.join([workspace, ".symphony", "run-audit.jsonl"])
+        |> File.read!()
+        |> String.split("\n", trim: true)
+        |> Enum.map(&Jason.decode!/1)
+        |> Enum.find(&(&1["event"] == "codex_turn_continuing"))
+
+      assert continuation_audit["reason"] == "issue_still_active_and_routable"
+      assert continuation_audit["issue_state"] == "In Progress"
+      assert continuation_audit["previous_turn_number"] == 1
+      assert continuation_audit["turn_number"] == 2
     after
       System.delete_env("SYMP_TEST_CODEx_TRACE")
       File.rm_rf(test_root)

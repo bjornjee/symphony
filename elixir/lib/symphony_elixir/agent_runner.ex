@@ -174,7 +174,16 @@ defmodule SymphonyElixir.AgentRunner do
         case continue_with_issue?(issue, issue_state_fetcher) do
           {:continue, refreshed_issue} when turn_number < max_turns ->
             Logger.info("Continuing agent run for #{issue_context(refreshed_issue)} after normal turn completion turn=#{turn_number}/#{max_turns}")
-            RunAudit.append(workspace, refreshed_issue, :codex_turn_continuing, %{phase: "codex_turn", status: "continuing", turn_number: turn_number + 1})
+
+            RunAudit.append(workspace, refreshed_issue, :codex_turn_continuing, %{
+              phase: "codex_turn",
+              status: "continuing",
+              reason: "issue_still_active_and_routable",
+              previous_turn_number: turn_number,
+              turn_number: turn_number + 1,
+              issue_state: refreshed_issue.state,
+              issue_labels: Enum.join(refreshed_issue.labels || [], ",")
+            })
 
             do_run_codex_turns(
               app_session,
