@@ -15,6 +15,7 @@ defmodule SymphonyElixir.Linear.Issue do
     :assignee_id,
     blocked_by: [],
     labels: [],
+    label_ids_by_name: %{},
     assigned_to_worker: true,
     created_at: nil,
     updated_at: nil
@@ -31,6 +32,7 @@ defmodule SymphonyElixir.Linear.Issue do
           url: String.t() | nil,
           assignee_id: String.t() | nil,
           labels: [String.t()],
+          label_ids_by_name: %{optional(String.t()) => String.t()},
           assigned_to_worker: boolean(),
           created_at: DateTime.t() | nil,
           updated_at: DateTime.t() | nil
@@ -40,6 +42,20 @@ defmodule SymphonyElixir.Linear.Issue do
   def label_names(%__MODULE__{labels: labels}) do
     labels
   end
+
+  @spec has_label?(t(), String.t()) :: boolean()
+  def has_label?(%__MODULE__{labels: labels}, label) when is_binary(label) do
+    normalized_label = normalize_label(label)
+    Enum.any?(labels, &(normalize_label(&1) == normalized_label))
+  end
+
+  @spec label_id_for_name(t(), String.t()) :: String.t() | nil
+  def label_id_for_name(%__MODULE__{label_ids_by_name: label_ids_by_name}, label)
+      when is_map(label_ids_by_name) and is_binary(label) do
+    Map.get(label_ids_by_name, normalize_label(label)) || Map.get(label_ids_by_name, label)
+  end
+
+  def label_id_for_name(%__MODULE__{}, _label), do: nil
 
   @spec routable?(t(), [String.t()]) :: boolean()
   def routable?(%__MODULE__{assigned_to_worker: true, labels: labels}, required_labels)

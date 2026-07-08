@@ -54,6 +54,7 @@ defmodule SymphonyElixir.Config.Schema do
       field(:claim_state, :string)
       field(:active_states, {:array, :string}, default: ["Todo", "In Progress"])
       field(:terminal_states, {:array, :string}, default: ["Closed", "Cancelled", "Canceled", "Duplicate", "Done"])
+      field(:cleanup_callbacks, :map, default: %{})
     end
 
     @spec changeset(%__MODULE__{}, map()) :: Ecto.Changeset.t()
@@ -61,15 +62,73 @@ defmodule SymphonyElixir.Config.Schema do
       schema
       |> cast(
         attrs,
-        [:kind, :endpoint, :api_key, :project_slug, :assignee, :required_labels, :claim_state, :active_states, :terminal_states],
+        [
+          :kind,
+          :endpoint,
+          :api_key,
+          :project_slug,
+          :assignee,
+          :required_labels,
+          :claim_state,
+          :active_states,
+          :terminal_states,
+          :cleanup_callbacks
+        ],
         empty_values: []
       )
+      |> validate_change(:cleanup_callbacks, &validate_cleanup_callbacks/2)
+      |> update_change(:cleanup_callbacks, &normalize_cleanup_callbacks/1)
       |> update_change(:required_labels, fn labels ->
         labels
         |> Enum.map(&(String.trim(&1) |> String.downcase()))
         |> Enum.uniq()
       end)
     end
+
+    defp validate_cleanup_callbacks(:cleanup_callbacks, callbacks) when is_map(callbacks) do
+      invalid? =
+        Enum.any?(callbacks, fn {transition, callback_config} ->
+          transition_name = transition |> to_string() |> String.trim()
+
+          transition_name not in ["completed", "blocked", "terminal", "inactive"] or
+            not valid_cleanup_callback_config?(callback_config)
+        end)
+
+      if invalid? do
+        [cleanup_callbacks: "must map completed, blocked, terminal, or inactive to remove_labels lists"]
+      else
+        []
+      end
+    end
+
+    defp validate_cleanup_callbacks(:cleanup_callbacks, _callbacks) do
+      [cleanup_callbacks: "must map completed, blocked, terminal, or inactive to remove_labels lists"]
+    end
+
+    defp valid_cleanup_callback_config?(%{"remove_labels" => labels}) when is_list(labels), do: true
+    defp valid_cleanup_callback_config?(%{remove_labels: labels}) when is_list(labels), do: true
+    defp valid_cleanup_callback_config?(_callback_config), do: false
+
+    defp normalize_cleanup_callbacks(callbacks) when is_map(callbacks) do
+      Enum.reduce(callbacks, %{}, fn {transition, callback_config}, acc ->
+        labels =
+          callback_config
+          |> cleanup_callback_labels()
+          |> Enum.map(&(String.trim(to_string(&1)) |> String.downcase()))
+          |> Enum.reject(&(&1 == ""))
+          |> Enum.uniq()
+
+        if labels == [] do
+          acc
+        else
+          Map.put(acc, transition |> to_string() |> String.trim(), %{"remove_labels" => labels})
+        end
+      end)
+    end
+
+    defp cleanup_callback_labels(%{"remove_labels" => labels}) when is_list(labels), do: labels
+    defp cleanup_callback_labels(%{remove_labels: labels}) when is_list(labels), do: labels
+    defp cleanup_callback_labels(_callback_config), do: []
   end
 
   defmodule Polling do

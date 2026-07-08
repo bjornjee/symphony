@@ -949,6 +949,7 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
       |> Map.put(:claimed, MapSet.put(initial_state.claimed, issue_id))
     end)
 
+    before_tick_ms = System.monotonic_time(:millisecond)
     send(pid, :tick)
     Process.sleep(100)
     state = :sys.get_state(pid)
@@ -965,9 +966,9 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
            } = state.retry_attempts[issue_id]
 
     assert is_integer(due_at_ms)
-    remaining_ms = due_at_ms - System.monotonic_time(:millisecond)
-    assert remaining_ms >= 9_500
-    assert remaining_ms <= 10_500
+    delay_ms = due_at_ms - before_tick_ms
+    assert delay_ms >= 9_500
+    assert delay_ms <= 10_500
   end
 
   test "orchestrator blocks stalled workers that are waiting on MCP elicitation" do

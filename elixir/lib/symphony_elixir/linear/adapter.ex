@@ -5,7 +5,7 @@ defmodule SymphonyElixir.Linear.Adapter do
 
   @behaviour SymphonyElixir.Tracker
 
-  alias SymphonyElixir.Linear.Client
+  alias SymphonyElixir.Linear.{Client, Issue}
 
   @create_comment_mutation """
   mutation SymphonyCreateComment($issueId: String!, $body: String!) {
@@ -18,6 +18,14 @@ defmodule SymphonyElixir.Linear.Adapter do
   @update_state_mutation """
   mutation SymphonyUpdateIssueState($issueId: String!, $stateId: String!) {
     issueUpdate(id: $issueId, input: {stateId: $stateId}) {
+      success
+    }
+  }
+  """
+
+  @remove_label_mutation """
+  mutation SymphonyRemoveIssueLabel($issueId: String!, $labelId: String!) {
+    issueRemoveLabel(id: $issueId, labelId: $labelId) {
       success
     }
   }
@@ -73,8 +81,59 @@ defmodule SymphonyElixir.Linear.Adapter do
     end
   end
 
+  @spec cleanup_issue_labels(term(), [String.t()]) :: :ok | {:error, term()}
+  def cleanup_issue_labels(%Issue{id: issue_id} = issue, label_names)
+      when is_binary(issue_id) and is_list(label_names) do
+    issue
+    |> attached_cleanup_labels(label_names)
+    |> Enum.reduce_while(:ok, &remove_attached_cleanup_label(issue, issue_id, &1, &2))
+  end
+
+  def cleanup_issue_labels(%Issue{}, _label_names), do: {:error, :missing_issue_id}
+
   defp client_module do
     Application.get_env(:symphony_elixir, :linear_client_module, Client)
+  end
+
+  defp attached_cleanup_labels(issue, label_names) do
+    label_names
+    |> Enum.filter(&is_binary/1)
+    |> Enum.map(&String.trim/1)
+    |> Enum.reject(&(&1 == ""))
+    |> Enum.uniq_by(&String.downcase/1)
+    |> Enum.filter(&Issue.has_label?(issue, &1))
+  end
+
+  defp remove_attached_cleanup_label(issue, issue_id, label_name, :ok) do
+    case label_id_for_cleanup(issue, label_name) do
+      {:ok, label_id} ->
+        case remove_issue_label(issue_id, label_id, label_name) do
+          :ok -> {:cont, :ok}
+          {:error, reason} -> {:halt, {:error, reason}}
+        end
+
+      {:error, reason} ->
+        {:halt, {:error, reason}}
+    end
+  end
+
+  defp label_id_for_cleanup(issue, label_name) do
+    case Issue.label_id_for_name(issue, label_name) do
+      label_id when is_binary(label_id) and label_id != "" -> {:ok, label_id}
+      _ -> {:error, {:missing_label_id, label_name}}
+    end
+  end
+
+  defp remove_issue_label(issue_id, label_id, label_name) do
+    with {:ok, response} <-
+           client_module().graphql(@remove_label_mutation, %{issueId: issue_id, labelId: label_id}),
+         true <- get_in(response, ["data", "issueRemoveLabel", "success"]) == true do
+      :ok
+    else
+      false -> {:error, {:label_cleanup_failed, label_name, :issue_remove_label_failed}}
+      {:error, reason} -> {:error, {:label_cleanup_failed, label_name, reason}}
+      _ -> {:error, {:label_cleanup_failed, label_name, :issue_remove_label_failed}}
+    end
   end
 
   defp resolve_state_id(issue_id, state_name) do

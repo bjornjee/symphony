@@ -194,12 +194,15 @@ defmodule SymphonyElixir.ExtensionsTest do
     assert {:ok, [^issue]} = SymphonyElixir.Tracker.fetch_issue_states_by_ids(["issue-1"])
     assert :ok = SymphonyElixir.Tracker.create_comment("issue-1", "comment")
     assert :ok = SymphonyElixir.Tracker.update_issue_state("issue-1", "Done")
+    assert :ok = SymphonyElixir.Tracker.cleanup_issue_labels(issue, ["codex-ready"])
     assert_receive {:memory_tracker_comment, "issue-1", "comment"}
     assert_receive {:memory_tracker_state_update, "issue-1", "Done"}
+    assert_receive {:memory_tracker_label_cleanup, "issue-1", ["codex-ready"]}
 
     Application.delete_env(:symphony_elixir, :memory_tracker_recipient)
     assert :ok = Memory.create_comment("issue-1", "quiet")
     assert :ok = Memory.update_issue_state("issue-1", "Quiet")
+    assert :ok = Memory.cleanup_issue_labels(issue, ["quiet"])
 
     write_workflow_file!(Workflow.workflow_file_path(), tracker_kind: "linear")
     assert SymphonyElixir.Tracker.adapter() == Adapter
@@ -317,6 +320,69 @@ defmodule SymphonyElixir.ExtensionsTest do
     )
 
     assert {:error, :issue_update_failed} = Adapter.update_issue_state("issue-1", "Odd")
+  end
+
+  test "linear adapter removes labels only from the current issue" do
+    Application.put_env(:symphony_elixir, :linear_client_module, FakeLinearClient)
+
+    issue = %Issue{
+      id: "issue-1",
+      identifier: "MT-1",
+      labels: ["codex-ready", "backend"],
+      label_ids_by_name: %{"codex-ready" => "label-ready", "backend" => "label-backend"}
+    }
+
+    Process.put(
+      {FakeLinearClient, :graphql_result},
+      {:ok, %{"data" => %{"issueRemoveLabel" => %{"success" => true}}}}
+    )
+
+    assert :ok = Adapter.cleanup_issue_labels(issue, ["codex-ready", "codex-review"])
+    assert_receive {:graphql_called, remove_label_query, %{issueId: "issue-1", labelId: "label-ready"}}
+    assert remove_label_query =~ "issueRemoveLabel"
+    refute_receive {:graphql_called, _query, %{labelId: "codex-review"}}
+  end
+
+  test "linear adapter label cleanup is idempotent when labels are missing" do
+    Application.put_env(:symphony_elixir, :linear_client_module, FakeLinearClient)
+
+    issue = %Issue{
+      id: "issue-1",
+      identifier: "MT-1",
+      labels: ["backend"],
+      label_ids_by_name: %{"backend" => "label-backend"}
+    }
+
+    assert :ok = Adapter.cleanup_issue_labels(issue, ["codex-ready"])
+    refute_receive {:graphql_called, _query, _variables}
+  end
+
+  test "linear adapter label cleanup fails closed on API failure" do
+    Application.put_env(:symphony_elixir, :linear_client_module, FakeLinearClient)
+
+    issue = %Issue{
+      id: "issue-1",
+      identifier: "MT-1",
+      labels: ["codex-ready"],
+      label_ids_by_name: %{"codex-ready" => "label-ready"}
+    }
+
+    Process.put({FakeLinearClient, :graphql_result}, {:error, :boom})
+
+    assert {:error, {:label_cleanup_failed, "codex-ready", :boom}} =
+             Adapter.cleanup_issue_labels(issue, ["codex-ready"])
+  end
+
+  test "linear adapter label cleanup fails closed when an attached label id is missing" do
+    issue = %Issue{
+      id: "issue-1",
+      identifier: "MT-1",
+      labels: ["codex-ready"],
+      label_ids_by_name: %{}
+    }
+
+    assert {:error, {:missing_label_id, "codex-ready"}} =
+             Adapter.cleanup_issue_labels(issue, ["codex-ready"])
   end
 
   test "phoenix observability api preserves state, issue, and refresh responses" do

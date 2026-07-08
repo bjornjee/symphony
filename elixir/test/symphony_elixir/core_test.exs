@@ -772,6 +772,168 @@ defmodule SymphonyElixir.CoreTest do
     assert_due_after(due_at_ms, before_down_ms, 500, 1_100)
   end
 
+  test "normal worker exit runs configured completed cleanup callback" do
+    previous_memory_recipient = Application.get_env(:symphony_elixir, :memory_tracker_recipient)
+
+    on_exit(fn -> restore_app_env(:memory_tracker_recipient, previous_memory_recipient) end)
+
+    write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_kind: "memory",
+      tracker_cleanup_callbacks: %{
+        "completed" => %{"remove_labels" => ["codex-ready", "codex-review"]}
+      }
+    )
+
+    Application.put_env(:symphony_elixir, :memory_tracker_recipient, self())
+
+    issue_id = "issue-cleanup-complete"
+    ref = make_ref()
+    orchestrator_name = Module.concat(__MODULE__, :CompletionCleanupOrchestrator)
+    {:ok, pid} = Orchestrator.start_link(name: orchestrator_name)
+
+    on_exit(fn ->
+      if Process.alive?(pid) do
+        Process.exit(pid, :normal)
+      end
+    end)
+
+    initial_state = :sys.get_state(pid)
+
+    running_entry = %{
+      pid: self(),
+      ref: ref,
+      identifier: "MT-CLEAN",
+      issue: %Issue{
+        id: issue_id,
+        identifier: "MT-CLEAN",
+        state: "In Progress",
+        labels: ["codex-ready"]
+      },
+      started_at: DateTime.utc_now()
+    }
+
+    :sys.replace_state(pid, fn _ ->
+      initial_state
+      |> Map.put(:running, %{issue_id => running_entry})
+      |> Map.put(:claimed, MapSet.new([issue_id]))
+      |> Map.put(:retry_attempts, %{})
+    end)
+
+    send(pid, {:DOWN, ref, :process, self(), :normal})
+    Process.sleep(50)
+    state = :sys.get_state(pid)
+
+    assert_receive {:memory_tracker_label_cleanup, ^issue_id, ["codex-ready", "codex-review"]}
+    assert MapSet.member?(state.completed, issue_id)
+    refute Map.has_key?(state.blocked, issue_id)
+  end
+
+  test "normal worker exit skips cleanup callback when none is configured" do
+    previous_memory_recipient = Application.get_env(:symphony_elixir, :memory_tracker_recipient)
+
+    on_exit(fn -> restore_app_env(:memory_tracker_recipient, previous_memory_recipient) end)
+
+    write_workflow_file!(Workflow.workflow_file_path(), tracker_kind: "memory")
+    Application.put_env(:symphony_elixir, :memory_tracker_recipient, self())
+
+    issue_id = "issue-cleanup-noop"
+    ref = make_ref()
+    orchestrator_name = Module.concat(__MODULE__, :CompletionNoCleanupOrchestrator)
+    {:ok, pid} = Orchestrator.start_link(name: orchestrator_name)
+
+    on_exit(fn ->
+      if Process.alive?(pid) do
+        Process.exit(pid, :normal)
+      end
+    end)
+
+    initial_state = :sys.get_state(pid)
+
+    running_entry = %{
+      pid: self(),
+      ref: ref,
+      identifier: "MT-NOOP",
+      issue: %Issue{id: issue_id, identifier: "MT-NOOP", state: "In Progress"},
+      started_at: DateTime.utc_now()
+    }
+
+    :sys.replace_state(pid, fn _ ->
+      initial_state
+      |> Map.put(:running, %{issue_id => running_entry})
+      |> Map.put(:claimed, MapSet.new([issue_id]))
+      |> Map.put(:retry_attempts, %{})
+    end)
+
+    send(pid, {:DOWN, ref, :process, self(), :normal})
+    Process.sleep(50)
+    state = :sys.get_state(pid)
+
+    refute_receive {:memory_tracker_label_cleanup, ^issue_id, _labels}
+    assert MapSet.member?(state.completed, issue_id)
+  end
+
+  test "normal worker exit records callback failure instead of claiming completion" do
+    previous_memory_recipient = Application.get_env(:symphony_elixir, :memory_tracker_recipient)
+    previous_cleanup_result = Application.get_env(:symphony_elixir, :memory_tracker_cleanup_result)
+
+    on_exit(fn ->
+      restore_app_env(:memory_tracker_recipient, previous_memory_recipient)
+      restore_app_env(:memory_tracker_cleanup_result, previous_cleanup_result)
+    end)
+
+    write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_kind: "memory",
+      tracker_cleanup_callbacks: %{
+        "completed" => %{"remove_labels" => ["codex-ready"]}
+      }
+    )
+
+    Application.put_env(:symphony_elixir, :memory_tracker_recipient, self())
+    Application.put_env(:symphony_elixir, :memory_tracker_cleanup_result, {:error, :linear_down})
+
+    issue_id = "issue-cleanup-failure"
+    ref = make_ref()
+    orchestrator_name = Module.concat(__MODULE__, :CompletionCleanupFailureOrchestrator)
+    {:ok, pid} = Orchestrator.start_link(name: orchestrator_name)
+
+    on_exit(fn ->
+      if Process.alive?(pid) do
+        Process.exit(pid, :normal)
+      end
+    end)
+
+    initial_state = :sys.get_state(pid)
+
+    running_entry = %{
+      pid: self(),
+      ref: ref,
+      identifier: "MT-FAIL-CLEAN",
+      issue: %Issue{
+        id: issue_id,
+        identifier: "MT-FAIL-CLEAN",
+        state: "In Progress",
+        labels: ["codex-ready"]
+      },
+      started_at: DateTime.utc_now()
+    }
+
+    :sys.replace_state(pid, fn _ ->
+      initial_state
+      |> Map.put(:running, %{issue_id => running_entry})
+      |> Map.put(:claimed, MapSet.new([issue_id]))
+      |> Map.put(:retry_attempts, %{})
+    end)
+
+    send(pid, {:DOWN, ref, :process, self(), :normal})
+    Process.sleep(50)
+    state = :sys.get_state(pid)
+
+    assert_receive {:memory_tracker_label_cleanup, ^issue_id, ["codex-ready"]}
+    refute MapSet.member?(state.completed, issue_id)
+    assert %{reason: reason, transition: "completed"} = state.lifecycle_callback_failures[issue_id]
+    assert reason =~ "linear_down"
+  end
+
   test "abnormal worker exit increments retry attempt progressively" do
     issue_id = "issue-crash"
     ref = make_ref()
