@@ -10,8 +10,9 @@ Linear project:
 - Dispatch label: `codex-ready`
 - Marker label: `symphony`
 
-Use the same lifecycle states and issue contract described in
-`docs/agent-dashboard-linear-setup.md`. The workflow remains project-agnostic;
+Use the same lifecycle states described in
+`docs/agent-dashboard-linear-setup.md` and the canonical issue shape in
+`docs/codex-agent-task-contract.md`. The workflow remains project-agnostic;
 project specificity lives in the Linear project, issue content, repository URL,
 and workspace root configured in `WORKFLOWS.yml`.
 
