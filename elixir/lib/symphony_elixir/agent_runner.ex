@@ -5,7 +5,7 @@ defmodule SymphonyElixir.AgentRunner do
 
   require Logger
   alias SymphonyElixir.Codex.AppServer
-  alias SymphonyElixir.{Config, Linear.Issue, PromptBuilder, Tracker, Workspace}
+  alias SymphonyElixir.{Config, Linear.Issue, PromptBuilder, RunAudit, Tracker, Workspace}
 
   @type worker_host :: String.t() | nil
 
@@ -39,14 +39,17 @@ defmodule SymphonyElixir.AgentRunner do
 
     case Workspace.create_for_issue(issue, worker_host) do
       {:ok, workspace} ->
+        RunAudit.start(workspace, issue, %{worker_host: worker_host_for_log(worker_host)})
+        RunAudit.append(workspace, issue, :workspace_prepared, %{phase: "workspace", status: "completed", workspace_path: workspace})
+
         send_worker_runtime_info(codex_update_recipient, issue, worker_host, workspace)
 
         try do
-          with :ok <- Workspace.run_before_run_hook(workspace, issue, worker_host) do
-            run_codex_turns(workspace, issue, codex_update_recipient, opts, worker_host)
-          end
+          run_with_workspace(workspace, issue, codex_update_recipient, opts, worker_host)
         after
+          RunAudit.append(workspace, issue, :after_run_hook_started, %{phase: "workspace", status: "started"})
           Workspace.run_after_run_hook(workspace, issue, worker_host)
+          RunAudit.append(workspace, issue, :after_run_hook_completed, %{phase: "workspace", status: "completed"})
         end
 
       {:error, reason} ->
@@ -54,8 +57,35 @@ defmodule SymphonyElixir.AgentRunner do
     end
   end
 
-  defp codex_message_handler(recipient, issue) do
+  defp run_with_workspace(workspace, issue, codex_update_recipient, opts, worker_host) do
+    RunAudit.append(workspace, issue, :before_run_hook_started, %{phase: "workspace", status: "started"})
+
+    case Workspace.run_before_run_hook(workspace, issue, worker_host) do
+      :ok ->
+        RunAudit.append(workspace, issue, :before_run_hook_completed, %{phase: "workspace", status: "completed"})
+        result = run_codex_turns(workspace, issue, codex_update_recipient, opts, worker_host)
+        record_run_result(workspace, issue, result)
+        result
+
+      {:error, reason} = error ->
+        RunAudit.append(workspace, issue, :before_run_hook_failed, %{phase: "workspace", status: "failed", reason: reason})
+        error
+    end
+  end
+
+  defp record_run_result(workspace, issue, :ok) do
+    RunAudit.append(workspace, issue, :run_completed, %{phase: "run", status: "completed"})
+  end
+
+  defp record_run_result(workspace, issue, {:error, reason}) do
+    RunAudit.append(workspace, issue, :run_failed, %{phase: "run", status: "failed", reason: reason})
+  end
+
+  defp record_run_result(_workspace, _issue, _result), do: :ok
+
+  defp codex_message_handler(recipient, issue, workspace) do
     fn message ->
+      RunAudit.append_codex_update(workspace, issue, message)
       send_codex_update(recipient, issue, message)
     end
   end
@@ -88,55 +118,81 @@ defmodule SymphonyElixir.AgentRunner do
     max_turns = Keyword.get(opts, :max_turns, Config.settings!().agent.max_turns)
     issue_state_fetcher = Keyword.get(opts, :issue_state_fetcher, &Tracker.fetch_issue_states_by_ids/1)
 
-    with {:ok, session} <- AppServer.start_session(workspace, worker_host: worker_host) do
-      try do
-        with :ok <- AppServer.set_goal(session, goal_objective(issue)) do
-          do_run_codex_turns(session, workspace, issue, codex_update_recipient, opts, issue_state_fetcher, 1, max_turns)
+    RunAudit.append(workspace, issue, :codex_app_server_starting, %{phase: "codex_app_server", status: "started"})
+
+    case AppServer.start_session(workspace, worker_host: worker_host) do
+      {:ok, session} ->
+        RunAudit.append(workspace, issue, :codex_app_server_started, %{phase: "codex_app_server", status: "completed"})
+
+        try do
+          case AppServer.set_goal(session, goal_objective(issue)) do
+            :ok ->
+              RunAudit.append(workspace, issue, :codex_goal_set, %{phase: "codex_goal", status: "completed"})
+              do_run_codex_turns(session, workspace, issue, codex_update_recipient, opts, issue_state_fetcher, 1, max_turns)
+
+            {:error, reason} = error ->
+              RunAudit.append(workspace, issue, :codex_goal_failed, %{phase: "codex_goal", status: "failed", reason: reason})
+              error
+          end
+        after
+          RunAudit.append(workspace, issue, :codex_app_server_stopping, %{phase: "codex_app_server", status: "stopping"})
+          AppServer.stop_session(session)
         end
-      after
-        AppServer.stop_session(session)
-      end
+
+      {:error, reason} = error ->
+        RunAudit.append(workspace, issue, :codex_app_server_failed, %{phase: "codex_app_server", status: "failed", reason: reason})
+        error
     end
   end
 
   defp do_run_codex_turns(app_session, workspace, issue, codex_update_recipient, opts, issue_state_fetcher, turn_number, max_turns) do
     prompt = build_turn_prompt(issue, opts, turn_number, max_turns)
+    RunAudit.append(workspace, issue, :codex_turn_started, %{phase: "codex_turn", status: "started", turn_number: turn_number})
 
-    with {:ok, turn_session} <-
-           AppServer.run_turn(
-             app_session,
-             prompt,
-             issue,
-             on_message: codex_message_handler(codex_update_recipient, issue)
-           ) do
-      Logger.info("Completed agent run for #{issue_context(issue)} session_id=#{turn_session[:session_id]} workspace=#{workspace} turn=#{turn_number}/#{max_turns}")
+    case AppServer.run_turn(
+           app_session,
+           prompt,
+           issue,
+           on_message: codex_message_handler(codex_update_recipient, issue, workspace)
+         ) do
+      {:ok, turn_session} ->
+        Logger.info("Completed agent run for #{issue_context(issue)} session_id=#{turn_session[:session_id]} workspace=#{workspace} turn=#{turn_number}/#{max_turns}")
+        RunAudit.append(workspace, issue, :codex_turn_completed, %{phase: "codex_turn", status: "completed", session_id: turn_session[:session_id], turn_number: turn_number})
 
-      case continue_with_issue?(issue, issue_state_fetcher) do
-        {:continue, refreshed_issue} when turn_number < max_turns ->
-          Logger.info("Continuing agent run for #{issue_context(refreshed_issue)} after normal turn completion turn=#{turn_number}/#{max_turns}")
+        case continue_with_issue?(issue, issue_state_fetcher) do
+          {:continue, refreshed_issue} when turn_number < max_turns ->
+            Logger.info("Continuing agent run for #{issue_context(refreshed_issue)} after normal turn completion turn=#{turn_number}/#{max_turns}")
+            RunAudit.append(workspace, refreshed_issue, :codex_turn_continuing, %{phase: "codex_turn", status: "continuing", turn_number: turn_number + 1})
 
-          do_run_codex_turns(
-            app_session,
-            workspace,
-            refreshed_issue,
-            codex_update_recipient,
-            opts,
-            issue_state_fetcher,
-            turn_number + 1,
-            max_turns
-          )
+            do_run_codex_turns(
+              app_session,
+              workspace,
+              refreshed_issue,
+              codex_update_recipient,
+              opts,
+              issue_state_fetcher,
+              turn_number + 1,
+              max_turns
+            )
 
-        {:continue, refreshed_issue} ->
-          Logger.info("Reached agent.max_turns for #{issue_context(refreshed_issue)} with issue still active; returning control to orchestrator")
+          {:continue, refreshed_issue} ->
+            Logger.info("Reached agent.max_turns for #{issue_context(refreshed_issue)} with issue still active; returning control to orchestrator")
+            RunAudit.append(workspace, refreshed_issue, :codex_max_turns_reached, %{phase: "codex_turn", status: "max_turns_reached", turn_number: turn_number})
 
-          :ok
+            :ok
 
-        {:done, _refreshed_issue} ->
-          :ok
+          {:done, _refreshed_issue} ->
+            RunAudit.append(workspace, issue, :codex_continuation_check_completed, %{phase: "codex_turn", status: "done", turn_number: turn_number})
+            :ok
 
-        {:error, reason} ->
-          {:error, reason}
-      end
+          {:error, reason} ->
+            RunAudit.append(workspace, issue, :codex_continuation_check_failed, %{phase: "codex_turn", status: "failed", reason: reason, turn_number: turn_number})
+            {:error, reason}
+        end
+
+      {:error, reason} = error ->
+        RunAudit.append(workspace, issue, :codex_turn_failed, %{phase: "codex_turn", status: "failed", reason: reason, turn_number: turn_number})
+        error
     end
   end
 

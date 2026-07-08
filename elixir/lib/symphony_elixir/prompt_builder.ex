@@ -57,10 +57,12 @@ defmodule SymphonyElixir.PromptBuilder do
     - create an isolated git worktree from latest `main` with a `feat/<name>` branch
     - copy and validate `.env*` parity when source repo env files exist
     - keep planning and invariant notes in `.symphony/workpad.md`, not Linear
+    - keep a phase-level run audit in `.symphony/run-audit.md` with commands, durations, proof gaps, and handoff timing
     - state execution context, scale shape, verification profile, and proof command before editing
+    - use the smallest sufficient proof during the edit loop; record known unrelated broad-gate failures once instead of retrying blindly
     - use RED/GREEN/REFACTOR when changing behavior and a test adds value
     - make the smallest scoped implementation, commit with `feat:`, and open a PR
-    - before moving the Linear issue to `Human Review`, leave exactly one human-facing comment with a PR URL or a real external blocker
+    - before moving the Linear issue to `Human Review`, leave exactly one human-facing comment with a PR URL or a real external blocker plus a concise audit summary
     """
     |> String.trim()
   end

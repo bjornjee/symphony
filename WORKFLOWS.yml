@@ -117,6 +117,34 @@ prompt: |
   issue. If comment creation or readback fails, do not move the issue; leave one
   local workpad note and stop.
 
+  ## Run audit and latency control
+
+  Maintain a lightweight local audit for every implementation run at
+  `.symphony/run-audit.md`. Update it at phase boundaries, not after every
+  thought. The audit must include:
+
+  - issue identifier, selected workflow, workspace path, branch, and PR URL when available
+  - phase timestamps for claim/context, workspace setup, first edit, proof start,
+    proof end, commit, PR creation, Linear comment, and state transition
+  - verification profile, commands run, exit status, and duration when known
+  - proof gaps and whether they are new, pre-existing, or intentionally deferred
+  - a short latency note if any phase takes longer than expected
+
+  Keep latency bounded without weakening quality:
+
+  - prefer the smallest sufficient proof command during the edit loop
+  - reserve full-suite or aggregate gates for Full-profile changes, before PR, or
+    when scoped proof cannot bound the risk
+  - when a broad gate fails for a known unrelated reason after scoped proof
+    passes, record it once as a proof gap instead of retrying blindly
+  - if blocked by missing human input, external auth, or unavailable services,
+    stop with one semantic Linear comment instead of waiting live
+
+  The final `## Agent Handoff`, `## Agent Blocked`, or `## Agent Question`
+  Linear comment must include a concise `Audit:` line summarizing the local audit
+  path, total runtime when known, slowest phase, and any proof gap. Do not paste
+  raw logs or the full audit into Linear.
+
   ## Workflow selection
 
   Choose the smallest matching agent-dashboard workflow from issue content:

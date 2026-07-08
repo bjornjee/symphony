@@ -1580,7 +1580,7 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
       {"item/reasoning/summaryTextDelta", %{"params" => %{"summaryText" => "thinking"}}, "reasoning summary streaming"},
       {"item/reasoning/summaryPartAdded", %{"params" => %{"summaryText" => "section"}}, "reasoning summary section added"},
       {"item/reasoning/textDelta", %{"params" => %{"textDelta" => "reason"}}, "reasoning text streaming"},
-      {"item/commandExecution/outputDelta", %{"params" => %{"outputDelta" => "ok"}}, "command output streaming"},
+      {"item/commandExecution/outputDelta", %{"params" => %{"outputDelta" => "ok"}}, "command output streaming: ok"},
       {"item/fileChange/outputDelta", %{"params" => %{"outputDelta" => "changed"}}, "file change output streaming"},
       {"item/commandExecution/requestApproval", %{"params" => %{"parsedCmd" => "git status"}}, "command approval requested (git status)"},
       {"item/fileChange/requestApproval", %{"params" => %{"fileChangeCount" => 2}}, "file change approval requested (2 files)"},
@@ -1734,7 +1734,22 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
     assert StatusDashboard.humanize_codex_message(message_delta) =~
              "agent message streaming: writing workpad reconciliation update"
 
+    output_delta = %{
+      event: :notification,
+      message: %{
+        "method" => "codex/event/exec_command_output_delta",
+        "params" => %{
+          "msg" => %{
+            "payload" => %{"outputDelta" => "256 tests, 0 failures\ncoverage 94.02%"}
+          }
+        }
+      }
+    }
+
     assert StatusDashboard.humanize_codex_message(fallback_reasoning) == "reasoning update"
+
+    assert StatusDashboard.humanize_codex_message(output_delta) =~
+             "command output streaming: 256 tests, 0 failures coverage 94.02%"
   end
 
   test "application stop renders offline status" do
