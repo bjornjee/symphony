@@ -775,6 +775,90 @@ defmodule SymphonyElixir.CoreTest do
     assert_due_after(due_at_ms, before_down_ms, 500, 1_100)
   end
 
+  test "normal worker exit skips continuation retry after agent reports inactive issue" do
+    issue_id = "issue-finished"
+    ref = make_ref()
+    orchestrator_name = Module.concat(__MODULE__, :FinishedContinuationOrchestrator)
+    {:ok, pid} = Orchestrator.start_link(name: orchestrator_name)
+
+    on_exit(fn ->
+      if Process.alive?(pid) do
+        Process.exit(pid, :normal)
+      end
+    end)
+
+    initial_state = :sys.get_state(pid)
+
+    running_entry = %{
+      pid: self(),
+      ref: ref,
+      identifier: "MT-559",
+      issue: %Issue{id: issue_id, identifier: "MT-559", state: "In Progress"},
+      completion_info: %{
+        continuation: :done,
+        issue_state: "Human Review",
+        issue_active: false,
+        issue_routable: false
+      },
+      started_at: DateTime.utc_now()
+    }
+
+    :sys.replace_state(pid, fn _ ->
+      initial_state
+      |> Map.put(:running, %{issue_id => running_entry})
+      |> Map.put(:claimed, MapSet.new([issue_id]))
+      |> Map.put(:retry_attempts, %{})
+    end)
+
+    send(pid, {:DOWN, ref, :process, self(), :normal})
+    Process.sleep(50)
+    state = :sys.get_state(pid)
+
+    refute Map.has_key?(state.running, issue_id)
+    assert MapSet.member?(state.completed, issue_id)
+    refute Map.has_key?(state.retry_attempts, issue_id)
+  end
+
+  test "normal worker exit keeps continuation retry when completion metadata is ambiguous" do
+    issue_id = "issue-ambiguous-finished"
+    ref = make_ref()
+    orchestrator_name = Module.concat(__MODULE__, :AmbiguousFinishedContinuationOrchestrator)
+    {:ok, pid} = Orchestrator.start_link(name: orchestrator_name)
+
+    on_exit(fn ->
+      if Process.alive?(pid) do
+        Process.exit(pid, :normal)
+      end
+    end)
+
+    initial_state = :sys.get_state(pid)
+
+    running_entry = %{
+      pid: self(),
+      ref: ref,
+      identifier: "MT-560",
+      issue: %Issue{id: issue_id, identifier: "MT-560", state: "In Progress"},
+      completion_info: %{continuation: :done},
+      started_at: DateTime.utc_now()
+    }
+
+    :sys.replace_state(pid, fn _ ->
+      initial_state
+      |> Map.put(:running, %{issue_id => running_entry})
+      |> Map.put(:claimed, MapSet.new([issue_id]))
+      |> Map.put(:retry_attempts, %{})
+    end)
+
+    before_down_ms = System.monotonic_time(:millisecond)
+    send(pid, {:DOWN, ref, :process, self(), :normal})
+    Process.sleep(50)
+    state = :sys.get_state(pid)
+
+    assert MapSet.member?(state.completed, issue_id)
+    assert %{attempt: 1, due_at_ms: due_at_ms} = state.retry_attempts[issue_id]
+    assert_due_after(due_at_ms, before_down_ms, 500, 1_100)
+  end
+
   test "normal worker exit runs configured completed cleanup callback" do
     previous_memory_recipient = Application.get_env(:symphony_elixir, :memory_tracker_recipient)
 
@@ -1604,6 +1688,14 @@ defmodule SymphonyElixir.CoreTest do
                      500
 
       assert session_id == "thread-live-turn-live"
+
+      assert_receive {:worker_completion_info, "issue-live-updates",
+                      %{
+                        continuation: :done,
+                        issue_state: "Done",
+                        issue_active: false
+                      }},
+                     500
     after
       File.rm_rf(test_root)
     end
@@ -1688,7 +1780,7 @@ defmodule SymphonyElixir.CoreTest do
                  issue_state_fetcher: fn [_issue_id] -> {:ok, [%{issue | state: "Done"}]} end
                )
 
-      workspace = Path.join(workspace_root, "MT-AUDIT")
+      assert {:ok, workspace} = SymphonyElixir.PathSafety.canonicalize(Path.join(workspace_root, "MT-AUDIT"))
       audit_jsonl = Path.join([workspace, ".symphony", "run-audit.jsonl"])
       audit_markdown = Path.join([workspace, ".symphony", "run-audit.md"])
 
@@ -1930,6 +2022,23 @@ defmodule SymphonyElixir.CoreTest do
       refute Enum.at(turn_texts, 1) =~ "You are an agent for this repository."
       assert Enum.at(turn_texts, 1) =~ "Continuation guidance:"
       assert Enum.at(turn_texts, 1) =~ "continuation turn #2 of 3"
+      assert Enum.at(turn_texts, 1) =~ "close the Linear handoff before doing more implementation"
+      assert Enum.at(turn_texts, 1) =~ "If a PR, commit, or proof result already exists"
+      assert Enum.at(turn_texts, 1) =~ "Record the reason for the extra turn in `.symphony/run-audit.md`"
+
+      assert {:ok, workspace} = SymphonyElixir.PathSafety.canonicalize(Path.join(workspace_root, "MT-247"))
+
+      continuation_audit =
+        Path.join([workspace, ".symphony", "run-audit.jsonl"])
+        |> File.read!()
+        |> String.split("\n", trim: true)
+        |> Enum.map(&Jason.decode!/1)
+        |> Enum.find(&(&1["event"] == "codex_turn_continuing"))
+
+      assert continuation_audit["reason"] == "issue_still_active_and_routable"
+      assert continuation_audit["issue_state"] == "In Progress"
+      assert continuation_audit["previous_turn_number"] == 1
+      assert continuation_audit["turn_number"] == 2
     after
       System.delete_env("SYMP_TEST_CODEx_TRACE")
       File.rm_rf(test_root)
