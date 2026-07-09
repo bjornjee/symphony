@@ -139,7 +139,7 @@ defmodule SymphonyElixir.CoreTest do
     settings = Config.settings!()
     assert settings.tracker.required_labels == ["codex-ready"]
     assert settings.tracker.claim_state == "In Progress"
-    assert settings.agent.max_concurrent_agents == 2
+    assert settings.agent.max_concurrent_agents == 1
     assert settings.agent.max_turns == 12
 
     prompt = Config.workflow_prompt()

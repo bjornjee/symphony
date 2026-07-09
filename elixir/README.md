@@ -126,7 +126,7 @@ hooks:
   after_create: |
     git clone git@github.com:your-org/your-repo.git .
 agent:
-  max_concurrent_agents: 2
+  max_concurrent_agents: 10
   max_turns: 20
 codex:
   command: codex app-server
@@ -157,8 +157,6 @@ Notes:
   by the Codex turn sandbox.
 - `agent.max_turns` caps how many back-to-back Codex turns Symphony will run in a single agent
   invocation when a turn completes normally but the issue is still in an active state. Default: `20`.
-- `agent.max_concurrent_agents` defaults to `2`. Set it to `0` to pause dispatching new agents
-  without shutting down Symphony.
 - If the Markdown body is blank, Symphony uses a default prompt template that includes the issue
   identifier, title, and body.
 - Use `hooks.after_create` to bootstrap a fresh workspace. For a Git-backed repo, you can run

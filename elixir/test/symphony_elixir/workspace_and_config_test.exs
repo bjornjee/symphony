@@ -595,26 +595,6 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
     assert Orchestrator.should_dispatch_issue_for_test(issue, state)
   end
 
-  test "zero max concurrent agents pauses dispatch" do
-    state = %Orchestrator.State{
-      max_concurrent_agents: 0,
-      running: %{},
-      claimed: MapSet.new(),
-      codex_totals: %{input_tokens: 0, output_tokens: 0, total_tokens: 0, seconds_running: 0},
-      retry_attempts: %{}
-    }
-
-    issue = %Issue{
-      id: "ready-zero-capacity",
-      identifier: "MT-ZERO",
-      title: "Ready but paused",
-      state: "Todo",
-      labels: []
-    }
-
-    refute Orchestrator.should_dispatch_issue_for_test(issue, state)
-  end
-
   test "dispatch revalidation skips stale todo issue once a non-terminal blocker appears" do
     stale_issue = %Issue{
       id: "blocked-2",
@@ -819,7 +799,7 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
     assert config.tracker.required_labels == []
     assert config.workspace.root == Path.join(System.tmp_dir!(), "symphony_workspaces")
     assert config.worker.max_concurrent_agents_per_host == nil
-    assert config.agent.max_concurrent_agents == 2
+    assert config.agent.max_concurrent_agents == 10
     assert config.codex.command == "codex app-server"
 
     assert config.codex.approval_policy == %{
@@ -902,10 +882,6 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
     write_workflow_file!(Workflow.workflow_file_path(), max_concurrent_agents: "bad")
     assert {:error, {:invalid_workflow_config, message}} = Config.validate!()
     assert message =~ "agent.max_concurrent_agents"
-
-    write_workflow_file!(Workflow.workflow_file_path(), max_concurrent_agents: 0)
-    assert :ok = Config.validate!()
-    assert Config.settings!().agent.max_concurrent_agents == 0
 
     write_workflow_file!(Workflow.workflow_file_path(), worker_max_concurrent_agents_per_host: 0)
     assert {:error, {:invalid_workflow_config, message}} = Config.validate!()
