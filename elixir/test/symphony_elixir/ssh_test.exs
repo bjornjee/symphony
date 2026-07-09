@@ -123,9 +123,10 @@ defmodule SymphonyElixir.SSHTest do
 
     System.delete_env("SYMPHONY_SSH_CONFIG")
 
+    assert System.find_executable("ssh") == Path.join(test_root, "bin/ssh")
     assert {:ok, port} = SSH.start_port("localhost", "printf ok")
     assert is_port(port)
-    wait_for_trace!(trace_file)
+    assert_receive {^port, {:data, "ready\n"}}, 500
 
     trace = File.read!(trace_file)
     assert trace =~ "-T localhost bash -lc"
@@ -149,9 +150,10 @@ defmodule SymphonyElixir.SSHTest do
     exit 0
     """)
 
+    assert System.find_executable("ssh") == Path.join(test_root, "bin/ssh")
     assert {:ok, port} = SSH.start_port("localhost:2222", "printf ok", line: 256)
     assert is_port(port)
-    wait_for_trace!(trace_file)
+    assert_receive {^port, {:data, {:eol, "ready"}}}, 500
 
     trace = File.read!(trace_file)
     assert trace =~ "-T -p 2222 localhost bash -lc"
@@ -180,18 +182,6 @@ defmodule SymphonyElixir.SSHTest do
 
     File.chmod!(fake_ssh, 0o755)
     System.put_env("PATH", fake_bin_dir <> ":" <> (System.get_env("PATH") || ""))
-  end
-
-  defp wait_for_trace!(trace_file, attempts \\ 20)
-  defp wait_for_trace!(trace_file, 0), do: flunk("timed out waiting for fake ssh trace at #{trace_file}")
-
-  defp wait_for_trace!(trace_file, attempts) do
-    if File.exists?(trace_file) and File.read!(trace_file) != "" do
-      :ok
-    else
-      Process.sleep(25)
-      wait_for_trace!(trace_file, attempts - 1)
-    end
   end
 
   defp restore_env(key, nil), do: System.delete_env(key)
