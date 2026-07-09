@@ -35,8 +35,8 @@ help with the setup:
 > https://github.com/openai/symphony/blob/main/elixir/README.md
 
 For teams running Symphony across more than one Linear project or repository,
-use a `WORKFLOWS.yml` bootstrap manifest to keep shared lifecycle doctrine in
-one place while generating concrete `WORKFLOW.md` files per project.
+use a `workflow-manifest.yml` bootstrap manifest to keep shared lifecycle doctrine in
+one place while generating concrete `workflow.md` files per project.
 
 ---
 

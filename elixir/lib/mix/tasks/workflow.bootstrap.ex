@@ -1,13 +1,13 @@
 defmodule Mix.Tasks.Workflow.Bootstrap do
   @moduledoc """
-  Generates runnable WORKFLOW.md files from a bootstrap manifest.
+  Generates runnable workflow.md files from a bootstrap manifest.
   """
 
   use Mix.Task
 
   alias SymphonyElixir.WorkflowBootstrap
 
-  @shortdoc "Generates WORKFLOW.md files from a bootstrap manifest"
+  @shortdoc "Generates workflow.md files from a bootstrap manifest"
   @switches [manifest: :string, check: :boolean]
 
   @impl Mix.Task
@@ -19,7 +19,7 @@ defmodule Mix.Tasks.Workflow.Bootstrap do
       Mix.raise(usage())
     end
 
-    manifest_path = opts |> Keyword.get(:manifest, "../WORKFLOWS.yml") |> Path.expand(File.cwd!())
+    manifest_path = opts |> Keyword.get(:manifest, "../workflow-manifest.yml") |> Path.expand(File.cwd!())
 
     case WorkflowBootstrap.bootstrap(manifest_path, check: Keyword.get(opts, :check, false)) do
       {:ok, workflows} ->
@@ -35,6 +35,6 @@ defmodule Mix.Tasks.Workflow.Bootstrap do
   end
 
   defp usage do
-    "Usage: mix workflow.bootstrap [--manifest ../WORKFLOWS.yml] [--check]"
+    "Usage: mix workflow.bootstrap [--manifest ../workflow-manifest.yml] [--check]"
   end
 end

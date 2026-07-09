@@ -89,7 +89,7 @@ defmodule SymphonyElixir.CoreTest do
     assert {:error, {:unsupported_tracker_kind, "123"}} = Config.validate!()
   end
 
-  test "current WORKFLOW.md file is valid and complete" do
+  test "current workflow.md file is valid and complete" do
     original_workflow_path = Workflow.workflow_file_path()
     on_exit(fn -> Workflow.set_workflow_file_path(original_workflow_path) end)
     Workflow.clear_workflow_file_path()
@@ -129,7 +129,7 @@ defmodule SymphonyElixir.CoreTest do
 
     workflow_path =
       File.cwd!()
-      |> Path.join("../WORKFLOW.md")
+      |> Path.join("../workflow.md")
       |> Path.expand()
 
     Workflow.set_workflow_file_path(workflow_path)
@@ -139,7 +139,7 @@ defmodule SymphonyElixir.CoreTest do
     settings = Config.settings!()
     assert settings.tracker.required_labels == ["codex-ready"]
     assert settings.tracker.claim_state == "In Progress"
-    assert settings.agent.max_concurrent_agents == 1
+    assert settings.agent.max_concurrent_agents == 2
     assert settings.agent.max_turns == 12
 
     prompt = Config.workflow_prompt()
@@ -245,7 +245,7 @@ defmodule SymphonyElixir.CoreTest do
     refute_receive {:memory_tracker_state_update, "issue-claimed", "In Progress"}
   end
 
-  test "workflow file path defaults to WORKFLOW.md in the current working directory when app env is unset" do
+  test "workflow file path defaults to workflow.md in the current working directory when app env is unset" do
     original_workflow_path = Workflow.workflow_file_path()
 
     on_exit(fn ->
@@ -254,11 +254,11 @@ defmodule SymphonyElixir.CoreTest do
 
     Workflow.clear_workflow_file_path()
 
-    assert Workflow.workflow_file_path() == Path.join(File.cwd!(), "WORKFLOW.md")
+    assert Workflow.workflow_file_path() == Path.join(File.cwd!(), "workflow.md")
   end
 
   test "workflow file path resolves from app env when set" do
-    app_workflow_path = "/tmp/app/WORKFLOW.md"
+    app_workflow_path = "/tmp/app/workflow.md"
 
     on_exit(fn ->
       Workflow.clear_workflow_file_path()
@@ -270,7 +270,7 @@ defmodule SymphonyElixir.CoreTest do
   end
 
   test "workflow load accepts prompt-only files without front matter" do
-    workflow_path = Path.join(Path.dirname(Workflow.workflow_file_path()), "PROMPT_ONLY_WORKFLOW.md")
+    workflow_path = Path.join(Path.dirname(Workflow.workflow_file_path()), "PROMPT_ONLY_workflow.md")
     File.write!(workflow_path, "Prompt only\n")
 
     assert {:ok, %{config: %{}, prompt: "Prompt only", prompt_template: "Prompt only"}} =
@@ -278,7 +278,7 @@ defmodule SymphonyElixir.CoreTest do
   end
 
   test "workflow load accepts unterminated front matter with an empty prompt" do
-    workflow_path = Path.join(Path.dirname(Workflow.workflow_file_path()), "UNTERMINATED_WORKFLOW.md")
+    workflow_path = Path.join(Path.dirname(Workflow.workflow_file_path()), "UNTERMINATED_workflow.md")
     File.write!(workflow_path, "---\ntracker:\n  kind: linear\n")
 
     assert {:ok, %{config: %{"tracker" => %{"kind" => "linear"}}, prompt: "", prompt_template: ""}} =
@@ -286,7 +286,7 @@ defmodule SymphonyElixir.CoreTest do
   end
 
   test "workflow load rejects non-map front matter" do
-    workflow_path = Path.join(Path.dirname(Workflow.workflow_file_path()), "INVALID_FRONT_MATTER_WORKFLOW.md")
+    workflow_path = Path.join(Path.dirname(Workflow.workflow_file_path()), "INVALID_FRONT_MATTER_workflow.md")
     File.write!(workflow_path, "---\n- not-a-map\n---\nPrompt body\n")
 
     assert {:error, :workflow_front_matter_not_a_map} = Workflow.load(workflow_path)
@@ -1465,13 +1465,13 @@ defmodule SymphonyElixir.CoreTest do
     end
   end
 
-  test "in-repo WORKFLOW.md renders correctly" do
+  test "in-repo workflow.md renders correctly" do
     workflow_path = Workflow.workflow_file_path()
-    Workflow.set_workflow_file_path(Path.expand("WORKFLOW.md", File.cwd!()))
+    Workflow.set_workflow_file_path(Path.expand("workflow.md", File.cwd!()))
 
     issue = %Issue{
       identifier: "MT-616",
-      title: "Use rich templates for WORKFLOW.md",
+      title: "Use rich templates for workflow.md",
       description: "Render with rich template variables",
       state: "In Progress",
       url: "https://example.org/issues/MT-616/use-rich-templates-for-workflowmd",
@@ -1485,7 +1485,7 @@ defmodule SymphonyElixir.CoreTest do
     assert prompt =~ "You are working on a Linear ticket `MT-616`"
     assert prompt =~ "Issue context:"
     assert prompt =~ "Identifier: MT-616"
-    assert prompt =~ "Title: Use rich templates for WORKFLOW.md"
+    assert prompt =~ "Title: Use rich templates for workflow.md"
     assert prompt =~ "Current status: In Progress"
     assert prompt =~ "https://example.org/issues/MT-616/use-rich-templates-for-workflowmd"
     assert prompt =~ "This is an unattended orchestration session."

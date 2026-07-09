@@ -24,7 +24,7 @@ The service solves four operational problems:
 - It turns issue execution into a repeatable daemon workflow instead of manual scripts.
 - It isolates agent execution in per-issue workspaces so agent commands run only inside per-issue
   workspace directories.
-- It keeps the workflow policy in-repo (`WORKFLOW.md`) so teams version the agent prompt and runtime
+- It keeps the workflow policy in-repo (`workflow.md`) so teams version the agent prompt and runtime
   settings with their code.
 - It provides enough observability to operate and debug multiple concurrent agent runs.
 
@@ -50,7 +50,7 @@ Important boundary:
 - Create deterministic per-issue workspaces and preserve them across runs.
 - Stop active runs when issue state changes make them ineligible.
 - Recover from transient failures with exponential backoff.
-- Load runtime behavior from a repository-owned `WORKFLOW.md` contract.
+- Load runtime behavior from a repository-owned `workflow.md` contract.
 - Expose operator-visible observability (at minimum structured logs).
 - Support tracker/filesystem-driven restart recovery without requiring a persistent database; exact
   in-memory scheduler state is not restored.
@@ -71,7 +71,7 @@ Important boundary:
 ### 3.1 Main Components
 
 1. `Workflow Loader`
-   - Reads `WORKFLOW.md`.
+   - Reads `workflow.md`.
    - Parses YAML front matter and prompt body.
    - Returns `{config, prompt_template}`.
 
@@ -116,7 +116,7 @@ Important boundary:
 Symphony is easiest to port when kept in these layers:
 
 1. `Policy Layer` (repo-defined)
-   - `WORKFLOW.md` prompt body.
+   - `workflow.md` prompt body.
    - Team-specific rules for ticket handling, validation, and handoff.
 
 2. `Configuration Layer` (typed getters)
@@ -178,7 +178,7 @@ Fields:
 
 #### 4.1.2 Workflow Definition
 
-Parsed `WORKFLOW.md` payload:
+Parsed `workflow.md` payload:
 
 - `config` (map)
   - YAML front matter root object.
@@ -293,7 +293,7 @@ Fields:
 Workflow file path precedence:
 
 1. Explicit application/runtime setting (set by CLI startup path).
-2. Default: `WORKFLOW.md` in the current process working directory.
+2. Default: `workflow.md` in the current process working directory.
 
 Loader behavior:
 
@@ -302,11 +302,11 @@ Loader behavior:
 
 ### 5.2 File Format
 
-`WORKFLOW.md` is a Markdown file with OPTIONAL YAML front matter.
+`workflow.md` is a Markdown file with OPTIONAL YAML front matter.
 
 Design note:
 
-- `WORKFLOW.md` SHOULD be self-contained enough to describe and run different workflows (prompt,
+- `workflow.md` SHOULD be self-contained enough to describe and run different workflows (prompt,
   runtime settings, hooks, and tracker selection/config) without requiring out-of-band
   service-specific configuration.
 
@@ -383,7 +383,7 @@ Fields:
 - `root` (path string or `$VAR`)
   - Default: `<system-temp>/symphony_workspaces`
   - `~` is expanded.
-  - Relative paths are resolved relative to the directory containing `WORKFLOW.md`.
+  - Relative paths are resolved relative to the directory containing `workflow.md`.
   - The effective workspace root is normalized to an absolute path before use.
 
 #### 5.3.4 `hooks` (object)
@@ -461,7 +461,7 @@ fields locally if they want stricter startup checks.
 
 ### 5.4 Prompt Template Contract
 
-The Markdown body of `WORKFLOW.md` is the per-issue prompt template.
+The Markdown body of `workflow.md` is the per-issue prompt template.
 
 Rendering requirements:
 
@@ -522,13 +522,13 @@ Value coercion semantics:
   - Apply expansion only to values intended to be local filesystem paths; do not rewrite URIs or
     arbitrary shell command strings.
 - Relative `workspace.root` values resolve relative to the directory containing the selected
-  `WORKFLOW.md`.
+  `workflow.md`.
 
 ### 6.2 Dynamic Reload Semantics
 
 Dynamic reload is REQUIRED:
 
-- The software MUST detect `WORKFLOW.md` changes.
+- The software MUST detect `workflow.md` changes.
 - On change, it MUST re-read and re-apply workflow config and prompt template without restart.
 - The software MUST attempt to adjust live behavior to the new config (for example polling
   cadence, concurrency limits, active/terminal states, codex settings, workspace paths/hooks, and
@@ -1379,7 +1379,7 @@ Extension config:
 Enablement (extension):
 
 - Start the HTTP server when a CLI `--port` argument is provided.
-- Start the HTTP server when `server.port` is present in `WORKFLOW.md` front matter.
+- Start the HTTP server when `server.port` is present in `workflow.md` front matter.
 - The `server` top-level key is owned by this extension.
 - Positive `server.port` values bind that port.
 - Implementations SHOULD bind loopback by default (`127.0.0.1` or host equivalent) unless explicitly
@@ -1538,7 +1538,7 @@ API design notes:
 ### 14.1 Failure Classes
 
 1. `Workflow/Config Failures`
-   - Missing `WORKFLOW.md`
+   - Missing `workflow.md`
    - Invalid YAML front matter
    - Unsupported tracker kind or missing tracker credentials/project slug
    - Missing coding-agent executable
@@ -1609,8 +1609,8 @@ After restart:
 
 Operators can control behavior by:
 
-- Editing `WORKFLOW.md` (prompt and most runtime settings).
-- `WORKFLOW.md` changes are detected and re-applied automatically without restart according to
+- Editing `workflow.md` (prompt and most runtime settings).
+- `workflow.md` changes are detected and re-applied automatically without restart according to
   Section 6.2.
 - Changing issue states in the tracker:
   - terminal state -> running session is stopped and workspace cleaned when reconciled
@@ -1655,7 +1655,7 @@ RECOMMENDED additional hardening for ports:
 
 ### 15.4 Hook Script Safety
 
-Workspace hooks are arbitrary shell scripts from `WORKFLOW.md`.
+Workspace hooks are arbitrary shell scripts from `workflow.md`.
 
 Implications:
 
@@ -1951,11 +1951,11 @@ Unless otherwise noted, Sections 17.1 through 17.7 are `Core Conformance`. Bulle
 
 - Workflow file path precedence:
   - explicit runtime path is used when provided
-  - cwd default is `WORKFLOW.md` when no explicit runtime path is provided
+  - cwd default is `workflow.md` when no explicit runtime path is provided
 - Workflow file changes are detected and trigger re-read/re-apply without restart
 - Invalid workflow reload keeps last known good effective configuration and emits an
   operator-visible error
-- Missing `WORKFLOW.md` returns typed error
+- Missing `workflow.md` returns typed error
 - Invalid YAML front matter returns typed error
 - Front matter non-map returns typed error
 - Config defaults apply when OPTIONAL values are missing
@@ -2058,9 +2058,9 @@ Unless otherwise noted, Sections 17.1 through 17.7 are `Core Conformance`. Bulle
 
 ### 17.7 CLI and Host Lifecycle
 
-- CLI accepts a positional workflow path argument (`path-to-WORKFLOW.md`)
-- CLI uses `./WORKFLOW.md` when no workflow path argument is provided
-- CLI errors on nonexistent explicit workflow path or missing default `./WORKFLOW.md`
+- CLI accepts a positional workflow path argument (`path-to-workflow.md`)
+- CLI uses `./workflow.md` when no workflow path argument is provided
+- CLI errors on nonexistent explicit workflow path or missing default `./workflow.md`
 - CLI surfaces startup failure cleanly
 - CLI exits with success when application starts and shuts down normally
 - CLI exits nonzero when startup fails or the host process exits abnormally
@@ -2089,9 +2089,9 @@ Use the same validation profiles as Section 17:
 ### 18.1 REQUIRED for Conformance
 
 - Workflow path selection supports explicit runtime path and cwd default
-- `WORKFLOW.md` loader with YAML front matter + prompt body split
+- `workflow.md` loader with YAML front matter + prompt body split
 - Typed config layer with defaults and `$` resolution
-- Dynamic `WORKFLOW.md` watch/reload/re-apply for config and prompt
+- Dynamic `workflow.md` watch/reload/re-apply for config and prompt
 - Polling orchestrator with single-authority mutable state
 - Issue tracker client with candidate fetch + state refresh + terminal fetch
 - Workspace manager with sanitized per-issue workspaces
