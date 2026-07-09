@@ -17,7 +17,7 @@ defmodule SymphonyElixir.WorkflowBootstrapTest do
           active_states: [Todo, In Progress, Rework, Merging]
           terminal_states: [Done, Closed, Canceled, Cancelled, Duplicate]
         agent:
-          max_concurrent_agents: 1
+          max_concurrent_agents: 2
           max_turns: 12
         codex:
           command: codex app-server
@@ -55,6 +55,7 @@ defmodule SymphonyElixir.WorkflowBootstrapTest do
 
       assert {:ok, %{config: config, prompt: prompt}} = Workflow.load(agent_workflow_path)
       assert get_in(config, ["tracker", "required_labels"]) == ["codex-ready"]
+      assert get_in(config, ["agent", "max_concurrent_agents"]) == 2
       assert get_in(config, ["agent", "max_turns"]) == 12
       assert String.trim(prompt) == "You are working on Linear issue `{{ issue.identifier }}`."
     end)
