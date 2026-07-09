@@ -232,13 +232,13 @@ prompt: |
 
 workflows:
   - name: agent-dashboard
-    output_path: workflows/agent-dashboard/WORKFLOW.md
+    output_path: workflows/agent-dashboard/workflow.md
     tracker:
       project_slug: d42b2f1089ce
     repository:
       url: git@github.com:bjornjee/agent-dashboard.git
   - name: symphony
-    output_path: workflows/symphony/WORKFLOW.md
+    output_path: workflows/symphony/workflow.md
     tracker:
       project_slug: 4c620c712be7
     repository:

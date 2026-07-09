@@ -116,7 +116,7 @@ defmodule SymphonyElixir.ExtensionsTest do
     assert {:error, _reason} = WorkflowStore.force_reload()
     assert {:ok, %{prompt: "Second prompt"}} = Workflow.current()
 
-    third_workflow = Path.join(Path.dirname(Workflow.workflow_file_path()), "THIRD_WORKFLOW.md")
+    third_workflow = Path.join(Path.dirname(Workflow.workflow_file_path()), "THIRD_workflow.md")
     write_workflow_file!(third_workflow, prompt: "Third prompt")
     Workflow.set_workflow_file_path(third_workflow)
     assert {:ok, %{prompt: "Third prompt"}} = Workflow.current()
@@ -128,7 +128,7 @@ defmodule SymphonyElixir.ExtensionsTest do
   end
 
   test "workflow store init stops on missing workflow file" do
-    missing_path = Path.join(Path.dirname(Workflow.workflow_file_path()), "MISSING_WORKFLOW.md")
+    missing_path = Path.join(Path.dirname(Workflow.workflow_file_path()), "MISSING_workflow.md")
     Workflow.set_workflow_file_path(missing_path)
 
     assert {:stop, {:missing_workflow_file, ^missing_path, :enoent}} = WorkflowStore.init([])
@@ -137,8 +137,8 @@ defmodule SymphonyElixir.ExtensionsTest do
   test "workflow store start_link and poll callback cover missing-file error paths" do
     ensure_workflow_store_running()
     existing_path = Workflow.workflow_file_path()
-    manual_path = Path.join(Path.dirname(existing_path), "MANUAL_WORKFLOW.md")
-    missing_path = Path.join(Path.dirname(existing_path), "MANUAL_MISSING_WORKFLOW.md")
+    manual_path = Path.join(Path.dirname(existing_path), "MANUAL_workflow.md")
+    missing_path = Path.join(Path.dirname(existing_path), "MANUAL_MISSING_workflow.md")
 
     assert :ok = Supervisor.terminate_child(SymphonyElixir.Supervisor, WorkflowStore)
 

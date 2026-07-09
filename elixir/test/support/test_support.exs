@@ -32,7 +32,7 @@ defmodule SymphonyElixir.TestSupport do
           )
 
         File.mkdir_p!(workflow_root)
-        workflow_file = Path.join(workflow_root, "WORKFLOW.md")
+        workflow_file = Path.join(workflow_root, "workflow.md")
         write_workflow_file!(workflow_file)
         Workflow.set_workflow_file_path(workflow_file)
         if Process.whereis(SymphonyElixir.WorkflowStore), do: SymphonyElixir.WorkflowStore.force_reload()

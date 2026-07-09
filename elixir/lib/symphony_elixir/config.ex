@@ -1,6 +1,6 @@
 defmodule SymphonyElixir.Config do
   @moduledoc """
-  Runtime configuration loaded from `WORKFLOW.md`.
+  Runtime configuration loaded from `workflow.md`.
   """
 
   alias SymphonyElixir.Config.Schema
@@ -136,19 +136,19 @@ defmodule SymphonyElixir.Config do
   defp format_config_error(reason) do
     case reason do
       {:invalid_workflow_config, message} ->
-        "Invalid WORKFLOW.md config: #{message}"
+        "Invalid workflow.md config: #{message}"
 
       {:missing_workflow_file, path, raw_reason} ->
-        "Missing WORKFLOW.md at #{path}: #{inspect(raw_reason)}"
+        "Missing workflow.md at #{path}: #{inspect(raw_reason)}"
 
       {:workflow_parse_error, raw_reason} ->
-        "Failed to parse WORKFLOW.md: #{inspect(raw_reason)}"
+        "Failed to parse workflow.md: #{inspect(raw_reason)}"
 
       :workflow_front_matter_not_a_map ->
-        "Failed to parse WORKFLOW.md: workflow front matter must decode to a map"
+        "Failed to parse workflow.md: workflow front matter must decode to a map"
 
       other ->
-        "Invalid WORKFLOW.md config: #{inspect(other)}"
+        "Invalid workflow.md config: #{inspect(other)}"
     end
   end
 end

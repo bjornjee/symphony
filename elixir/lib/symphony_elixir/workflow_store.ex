@@ -1,6 +1,6 @@
 defmodule SymphonyElixir.WorkflowStore do
   @moduledoc """
-  Caches the last known good workflow and reloads it when `WORKFLOW.md` changes.
+  Caches the last known good workflow and reloads it when `workflow.md` changes.
   """
 
   use GenServer

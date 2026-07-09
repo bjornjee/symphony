@@ -12,14 +12,14 @@ defmodule Mix.Tasks.WorkflowBootstrapTest do
 
   test "generates workflows through the mix task" do
     in_temp_dir(fn root ->
-      manifest_path = Path.join(root, "WORKFLOWS.yml")
+      manifest_path = Path.join(root, "workflow-manifest.yml")
 
       File.write!(manifest_path, """
       prompt: |
         Task prompt.
       workflows:
         - name: sample
-          output_path: generated/WORKFLOW.md
+          output_path: generated/workflow.md
           tracker:
             kind: linear
             project_slug: sample-project
@@ -31,7 +31,7 @@ defmodule Mix.Tasks.WorkflowBootstrapTest do
         end)
 
       assert output =~ "generated sample:"
-      assert File.exists?(Path.join(root, "generated/WORKFLOW.md"))
+      assert File.exists?(Path.join(root, "generated/workflow.md"))
     end)
   end
 
