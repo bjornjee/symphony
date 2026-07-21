@@ -1,5 +1,5 @@
 defmodule SymphonyElixir.CompletionEvidenceTest do
-  use ExUnit.Case, async: true
+  use ExUnit.Case
 
   import SymphonyElixir.TaskContractFixtures
   alias SymphonyElixir.CompletionEvidence
@@ -76,11 +76,97 @@ defmodule SymphonyElixir.CompletionEvidenceTest do
              )
   end
 
+  test "rejects a non-object completion envelope", context do
+    File.mkdir_p!(Path.dirname(CompletionEvidence.path(context.workspace)))
+    File.write!(CompletionEvidence.path(context.workspace), "[]")
+
+    assert {:error, {:malformed_completion_evidence, :not_an_object}} =
+             CompletionEvidence.validate(
+               context.workspace,
+               context.task,
+               context.contract,
+               %{},
+               validation_opts()
+             )
+  end
+
+  test "rejects an oversized local completion envelope", context do
+    File.mkdir_p!(Path.dirname(CompletionEvidence.path(context.workspace)))
+    File.write!(CompletionEvidence.path(context.workspace), String.duplicate("x", 131_073))
+
+    assert {:error, {:completion_evidence_too_large, 131_072}} =
+             CompletionEvidence.validate(
+               context.workspace,
+               context.task,
+               context.contract,
+               %{},
+               validation_opts()
+             )
+  end
+
   test "rejects evidence for a stale plan digest", context do
     observed = observed_proofs(context.contract)
     write_evidence(context, %{valid_evidence(context, observed) | "plan_digest" => String.duplicate("0", 64)})
 
     assert {:error, {:completion_evidence_plan_digest_mismatch, _, _}} =
+             CompletionEvidence.validate(
+               context.workspace,
+               context.task,
+               context.contract,
+               observed,
+               validation_opts()
+             )
+  end
+
+  test "rejects unsupported schema and malformed criterion entries", context do
+    observed = observed_proofs(context.contract)
+    evidence = valid_evidence(context, observed)
+    write_evidence(context, %{evidence | "schema_version" => 2})
+
+    assert {:error, {:unsupported_completion_evidence_version, 2}} =
+             CompletionEvidence.validate(
+               context.workspace,
+               context.task,
+               context.contract,
+               observed,
+               validation_opts()
+             )
+
+    write_evidence(context, %{evidence | "criteria" => [%{} | tl(evidence["criteria"])]})
+
+    assert {:error, :malformed_criterion_evidence} =
+             CompletionEvidence.validate(
+               context.workspace,
+               context.task,
+               context.contract,
+               observed,
+               validation_opts()
+             )
+  end
+
+  test "rejects evidence for another issue identity", context do
+    expected_issue_id = context.task.id
+    observed = observed_proofs(context.contract)
+    evidence = valid_evidence(context, observed)
+    write_evidence(context, %{evidence | "issue_id" => "other-issue"})
+
+    assert {:error, {:completion_evidence_issue_mismatch, "other-issue", ^expected_issue_id}} =
+             CompletionEvidence.validate(
+               context.workspace,
+               context.task,
+               context.contract,
+               observed,
+               validation_opts()
+             )
+  end
+
+  test "rejects evidence for another issue identifier", context do
+    expected_identifier = context.task.identifier
+    observed = observed_proofs(context.contract)
+    evidence = valid_evidence(context, observed)
+    write_evidence(context, %{evidence | "issue_identifier" => "OTHER-1"})
+
+    assert {:error, {:completion_evidence_identifier_mismatch, "OTHER-1", ^expected_identifier}} =
              CompletionEvidence.validate(
                context.workspace,
                context.task,
@@ -165,6 +251,262 @@ defmodule SymphonyElixir.CompletionEvidenceTest do
              )
 
     assert criterion_id == first["criterion_id"]
+  end
+
+  test "rejects malformed criterion proof", context do
+    observed = observed_proofs(context.contract)
+    evidence = valid_evidence(context, observed)
+    [first | rest] = evidence["criteria"]
+    write_evidence(context, %{evidence | "criteria" => [Map.delete(first, "proof") | rest]})
+
+    assert {:error, {:malformed_criterion_proof, criterion_id}} =
+             CompletionEvidence.validate(
+               context.workspace,
+               context.task,
+               context.contract,
+               observed,
+               validation_opts()
+             )
+
+    assert criterion_id == first["criterion_id"]
+  end
+
+  test "rejects failed and malformed engine observations", context do
+    evidence = valid_evidence(context, observed_proofs(context.contract))
+    [first, second] = evidence["criteria"]
+    first_event = get_in(first, ["proof", "event_id"])
+    second_event = get_in(second, ["proof", "event_id"])
+    write_evidence(context, evidence)
+
+    assert {:error, {:failed_criterion_proof, _, ^first_event, 1}} =
+             CompletionEvidence.validate(
+               context.workspace,
+               context.task,
+               context.contract,
+               %{first_event => %{exit_code: 1}, second_event => %{exit_code: 0}},
+               validation_opts()
+             )
+
+    assert {:error, {:malformed_observed_proof, ^first_event}} =
+             CompletionEvidence.validate(
+               context.workspace,
+               context.task,
+               context.contract,
+               %{first_event => :invalid, second_event => %{exit_code: 0}},
+               validation_opts()
+             )
+  end
+
+  test "reads and normalizes the workspace git origin", context do
+    System.cmd("git", ["-C", context.workspace, "init", "-b", "main"])
+
+    System.cmd("git", [
+      "-C",
+      context.workspace,
+      "remote",
+      "add",
+      "origin",
+      "https://github.com/bjornjee/symphony.git"
+    ])
+
+    observed = observed_proofs(context.contract)
+    write_evidence(context, valid_evidence(context, observed))
+    opts = Keyword.delete(validation_opts(), :origin_url)
+
+    assert {:ok, %{pull_request_url: @pr_url}} =
+             CompletionEvidence.validate(
+               context.workspace,
+               context.task,
+               context.contract,
+               observed,
+               opts
+             )
+  end
+
+  test "rejects an unavailable workspace git origin", context do
+    observed = observed_proofs(context.contract)
+    write_evidence(context, valid_evidence(context, observed))
+    opts = Keyword.delete(validation_opts(), :origin_url)
+
+    assert {:error, {:repository_origin_unavailable, {_status, _output}}} =
+             CompletionEvidence.validate(
+               context.workspace,
+               context.task,
+               context.contract,
+               observed,
+               opts
+             )
+  end
+
+  test "validates and rejects completion evidence through the SSH boundary", context do
+    original_path = System.get_env("PATH")
+    original_gh_failure = System.get_env("FAKE_GH_FAIL")
+    original_origin_failure = System.get_env("FAKE_ORIGIN_FAIL")
+    fake_bin = Path.join(context.workspace, "fake-bin")
+    fake_ssh = Path.join(fake_bin, "ssh")
+    fake_gh = Path.join(fake_bin, "gh")
+    File.mkdir_p!(fake_bin)
+
+    File.write!(fake_ssh, """
+    #!/bin/sh
+    for arg in "$@"; do remote_command="$arg"; done
+    case "$remote_command" in
+      *"gh pr view"*)
+        if [ "${FAKE_GH_FAIL:-}" = "1" ]; then echo failed; exit 7; fi
+        echo "#{@pr_url}"
+        ;;
+      *"remote get-url origin"*)
+        if [ "${FAKE_ORIGIN_FAIL:-}" = "1" ]; then echo missing; exit 2; fi
+        echo "#{@origin_url}"
+        ;;
+      *) eval "$remote_command" ;;
+    esac
+    """)
+
+    File.write!(fake_gh, """
+    #!/bin/sh
+    if [ "${FAKE_GH_FAIL:-}" = "1" ]; then
+      echo failed
+      exit 7
+    fi
+    for arg in "$@"; do
+      case "$arg" in
+        https://github.com/*/pull/*) printf '%s\n' "$arg"; exit 0 ;;
+      esac
+    done
+    exit 8
+    """)
+
+    File.chmod!(fake_ssh, 0o755)
+    File.chmod!(fake_gh, 0o755)
+    System.put_env("PATH", fake_bin <> ":" <> (original_path || ""))
+
+    on_exit(fn ->
+      restore_env("PATH", original_path)
+      restore_env("FAKE_GH_FAIL", original_gh_failure)
+      restore_env("FAKE_ORIGIN_FAIL", original_origin_failure)
+    end)
+
+    System.cmd("git", ["-C", context.workspace, "init", "-b", "main"])
+    System.cmd("git", ["-C", context.workspace, "remote", "add", "origin", @origin_url])
+
+    observed = observed_proofs(context.contract)
+    evidence = valid_evidence(context, observed)
+    write_evidence(context, evidence)
+    opts = [worker_host: "worker-a"]
+
+    assert {:ok, %{pull_request_url: @pr_url}} =
+             CompletionEvidence.validate(
+               context.workspace,
+               context.task,
+               context.contract,
+               observed,
+               opts
+             )
+
+    System.put_env("FAKE_GH_FAIL", "1")
+
+    assert {:error, {:pull_request_unavailable, {"worker-a", 7, "failed"}}} =
+             CompletionEvidence.validate(
+               context.workspace,
+               context.task,
+               context.contract,
+               observed,
+               opts
+             )
+
+    System.delete_env("FAKE_GH_FAIL")
+    File.rm!(CompletionEvidence.path(context.workspace))
+
+    assert {:error, :completion_evidence_missing} =
+             CompletionEvidence.validate(
+               context.workspace,
+               context.task,
+               context.contract,
+               observed,
+               opts
+             )
+
+    File.write!(CompletionEvidence.path(context.workspace), String.duplicate("x", 131_073))
+
+    assert {:error, {:completion_evidence_too_large, 131_072}} =
+             CompletionEvidence.validate(
+               context.workspace,
+               context.task,
+               context.contract,
+               observed,
+               opts
+             )
+
+    write_evidence(context, evidence)
+    System.put_env("FAKE_ORIGIN_FAIL", "1")
+
+    assert {:error, {:repository_origin_unavailable, {"worker-a", 2, _output}}} =
+             CompletionEvidence.validate(
+               context.workspace,
+               context.task,
+               context.contract,
+               observed,
+               opts
+             )
+  end
+
+  test "rejects mismatched and malformed PR verifier results", context do
+    observed = observed_proofs(context.contract)
+    write_evidence(context, valid_evidence(context, observed))
+
+    mismatch_opts =
+      Keyword.put(validation_opts(), :pull_request_verifier, fn _, _, _ ->
+        {:ok, "https://github.com/bjornjee/symphony/pull/43"}
+      end)
+
+    assert {:error, {:pull_request_url_mismatch, _details}} =
+             CompletionEvidence.validate(
+               context.workspace,
+               context.task,
+               context.contract,
+               observed,
+               mismatch_opts
+             )
+
+    malformed_opts =
+      Keyword.put(validation_opts(), :pull_request_verifier, fn _, _, _ -> :unexpected end)
+
+    assert {:error, {:pull_request_verification_failed, :unexpected}} =
+             CompletionEvidence.validate(
+               context.workspace,
+               context.task,
+               context.contract,
+               observed,
+               malformed_opts
+             )
+  end
+
+  test "rejects malformed PR numbers and unsupported repository origins", context do
+    observed = observed_proofs(context.contract)
+    evidence = valid_evidence(context, observed)
+    write_evidence(context, %{evidence | "pull_request_url" => "https://github.com/bjornjee/symphony/pull/not-a-number"})
+
+    assert {:error, {:invalid_pull_request_url, _url}} =
+             CompletionEvidence.validate(
+               context.workspace,
+               context.task,
+               context.contract,
+               observed,
+               validation_opts()
+             )
+
+    write_evidence(context, evidence)
+    opts = Keyword.put(validation_opts(), :origin_url, "https://gitlab.com/bjornjee/symphony.git")
+
+    assert {:error, {:unsupported_repository_origin, _origin}} =
+             CompletionEvidence.validate(
+               context.workspace,
+               context.task,
+               context.contract,
+               observed,
+               opts
+             )
   end
 
   test "rejects missing pull request URL", context do
@@ -262,4 +604,7 @@ defmodule SymphonyElixir.CompletionEvidenceTest do
       pull_request_verifier: fn url, _workspace, _worker_host -> {:ok, url} end
     ]
   end
+
+  defp restore_env(name, nil), do: System.delete_env(name)
+  defp restore_env(name, value), do: System.put_env(name, value)
 end
