@@ -1,6 +1,13 @@
 defmodule SymphonyElixir.CoreTest do
   use SymphonyElixir.TestSupport
 
+  alias SymphonyElixir.Linear.TaskContract
+  alias SymphonyElixir.TaskContractFixtures
+
+  defp valid_handoff_evidence(_workspace, _issue, _contract, _proofs, _opts) do
+    {:ok, %{pull_request_url: "https://github.com/bjornjee/symphony/pull/42"}}
+  end
+
   test "config defaults and validation checks" do
     write_workflow_file!(Workflow.workflow_file_path(),
       tracker_api_token: nil,
@@ -1294,6 +1301,47 @@ defmodule SymphonyElixir.CoreTest do
     assert prompt =~ "Ticket S-4"
   end
 
+  test "prompt builder supplies the pinned machine-evidence contract" do
+    write_workflow_file!(Workflow.workflow_file_path(), prompt: "Ticket {{ issue.identifier }}")
+    issue = TaskContractFixtures.issue(%{identifier: "PIN-16"})
+    assert {:ok, contract} = TaskContract.from_issue(issue)
+
+    prompt = PromptBuilder.build_prompt(issue, task_contract: contract)
+
+    assert prompt =~ ".symphony/completion-evidence.json"
+    assert prompt =~ contract.digest
+    assert prompt =~ "run_audit_command"
+    assert prompt =~ "pull_request_url"
+
+    for criterion <- contract.acceptance_criteria do
+      assert prompt =~ criterion.id
+      assert prompt =~ criterion.text
+    end
+  end
+
+  test "agent runner rejects handoff when completion evidence is missing" do
+    workspace =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-handoff-evidence-#{System.unique_integer([:positive, :monotonic])}"
+      )
+
+    File.mkdir_p!(workspace)
+    on_exit(fn -> File.rm_rf(workspace) end)
+
+    issue = TaskContractFixtures.issue(%{state: "Human Review"})
+    assert {:ok, contract} = TaskContract.from_issue(issue)
+
+    assert {:error, {:handoff_evidence_invalid, :completion_evidence_missing}} =
+             AgentRunner.validate_handoff_for_test(
+               workspace,
+               issue,
+               contract,
+               %{},
+               origin_url: "git@github.com:bjornjee/symphony.git"
+             )
+  end
+
   test "prompt builder does not duplicate an existing agent-dashboard invocation" do
     write_workflow_file!(Workflow.workflow_file_path(), prompt: "$agent-dashboard:chore\n\nTicket {{ issue.identifier }}")
 
@@ -1585,7 +1633,10 @@ defmodule SymphonyElixir.CoreTest do
       before = MapSet.new(File.ls!(workspace_root))
 
       assert :ok =
-               AgentRunner.run(issue, nil, issue_state_fetcher: fn [_issue_id] -> {:ok, [%{issue | state: "Done"}]} end)
+               AgentRunner.run(issue, nil,
+                 issue_state_fetcher: fn [_issue_id] -> {:ok, [%{issue | state: "Done"}]} end,
+                 completion_evidence_validator: &valid_handoff_evidence/5
+               )
 
       entries_after = MapSet.new(File.ls!(workspace_root))
 
@@ -1680,7 +1731,8 @@ defmodule SymphonyElixir.CoreTest do
                AgentRunner.run(
                  issue,
                  test_pid,
-                 issue_state_fetcher: fn [_issue_id] -> {:ok, [%{issue | state: "Done"}]} end
+                 issue_state_fetcher: fn [_issue_id] -> {:ok, [%{issue | state: "Done"}]} end,
+                 completion_evidence_validator: &valid_handoff_evidence/5
                )
 
       assert_receive {:codex_worker_update, "issue-live-updates",
@@ -1781,7 +1833,8 @@ defmodule SymphonyElixir.CoreTest do
                AgentRunner.run(
                  issue,
                  self(),
-                 issue_state_fetcher: fn [_issue_id] -> {:ok, [%{issue | state: "Done"}]} end
+                 issue_state_fetcher: fn [_issue_id] -> {:ok, [%{issue | state: "Done"}]} end,
+                 completion_evidence_validator: &valid_handoff_evidence/5
                )
 
       assert {:ok, workspace} = SymphonyElixir.PathSafety.canonicalize(Path.join(workspace_root, "MT-AUDIT"))
@@ -2000,7 +2053,12 @@ defmodule SymphonyElixir.CoreTest do
         labels: []
       }
 
-      assert :ok = AgentRunner.run(issue, nil, issue_state_fetcher: state_fetcher)
+      assert :ok =
+               AgentRunner.run(issue, nil,
+                 issue_state_fetcher: state_fetcher,
+                 completion_evidence_validator: &valid_handoff_evidence/5
+               )
+
       assert_receive {:issue_state_fetch, 1}
       assert_receive {:issue_state_fetch, 2}
 
