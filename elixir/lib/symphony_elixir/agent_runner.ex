@@ -6,8 +6,15 @@ defmodule SymphonyElixir.AgentRunner do
   require Logger
   alias SymphonyElixir.Codex.AppServer
   alias SymphonyElixir.Codex.ThreadIdentity
-  alias SymphonyElixir.{CompletionEvidence, Config, ExecutionManifest, PromptBuilder, RunAudit, Tracker, Workspace}
+  alias SymphonyElixir.CompletionEvidence
+  alias SymphonyElixir.Config
+  alias SymphonyElixir.ExecutionManifest
+  alias SymphonyElixir.HandoffPublisher
   alias SymphonyElixir.Linear.{Issue, TaskContract}
+  alias SymphonyElixir.PromptBuilder
+  alias SymphonyElixir.RunAudit
+  alias SymphonyElixir.Tracker
+  alias SymphonyElixir.Workspace
 
   @type worker_host :: String.t() | nil
 
@@ -37,6 +44,27 @@ defmodule SymphonyElixir.AgentRunner do
   def validate_handoff_for_test(workspace, %Issue{} = issue, %TaskContract{} = contract, proofs, opts \\ [])
       when is_binary(workspace) and is_map(proofs) do
     validate_handoff(workspace, issue, contract, proofs, opts)
+  end
+
+  @doc false
+  @spec handoff_after_turn_for_test(
+          Path.t(),
+          Issue.t(),
+          Issue.t(),
+          TaskContract.t(),
+          map(),
+          keyword()
+        ) :: {:continue, Issue.t()} | {:ok, map()} | {:error, term()}
+  def handoff_after_turn_for_test(
+        workspace,
+        %Issue{} = issue,
+        %Issue{} = refreshed_issue,
+        %TaskContract{} = contract,
+        proofs,
+        opts \\ []
+      )
+      when is_binary(workspace) and is_map(proofs) and is_list(opts) do
+    handoff_after_turn(workspace, issue, refreshed_issue, contract, proofs, opts, 1)
   end
 
   @spec run(Issue.t(), pid() | nil, keyword()) :: :ok | no_return()
@@ -329,48 +357,122 @@ defmodule SymphonyElixir.AgentRunner do
         Logger.info("Completed agent run for #{issue_context(issue)} session_id=#{turn_session[:session_id]} workspace=#{workspace} turn=#{turn_number}/#{max_turns}")
         RunAudit.append(workspace, issue, :codex_turn_completed, %{phase: "codex_turn", status: "completed", session_id: turn_session[:session_id], turn_number: turn_number})
 
-        case continue_with_issue?(issue, task_contract, runtime.issue_state_fetcher) do
-          {:continue, refreshed_issue} when turn_number < max_turns ->
-            Logger.info("Continuing agent run for #{issue_context(refreshed_issue)} after normal turn completion turn=#{turn_number}/#{max_turns}")
-
-            RunAudit.append(workspace, refreshed_issue, :codex_turn_continuing, %{
-              phase: "codex_turn",
-              status: "continuing",
-              reason: "issue_still_active_and_routable",
-              previous_turn_number: turn_number,
-              turn_number: turn_number + 1,
-              issue_state: refreshed_issue.state,
-              issue_labels: Enum.join(refreshed_issue.labels || [], ",")
-            })
-
-            do_run_codex_turns(
-              app_session,
-              workspace,
-              refreshed_issue,
-              task_contract,
-              codex_update_recipient,
-              runtime,
-              {turn_number + 1, max_turns}
-            )
-
-          {:continue, refreshed_issue} ->
-            Logger.info("Reached agent.max_turns for #{issue_context(refreshed_issue)} with issue still active; returning control to orchestrator")
-            RunAudit.append(workspace, refreshed_issue, :codex_max_turns_reached, %{phase: "codex_turn", status: "max_turns_reached", turn_number: turn_number})
-
-            {:ok, completion_info(refreshed_issue, :max_turns_reached)}
-
-          {:done, refreshed_issue} ->
-            finish_handoff(workspace, issue, refreshed_issue, task_contract, runtime, turn_number)
-
-          {:error, reason} ->
-            RunAudit.append(workspace, issue, :codex_continuation_check_failed, %{phase: "codex_turn", status: "failed", reason: reason, turn_number: turn_number})
-            {:error, reason}
-        end
+        handle_completed_turn(
+          app_session,
+          workspace,
+          issue,
+          task_contract,
+          codex_update_recipient,
+          runtime,
+          {turn_number, max_turns}
+        )
 
       {:error, reason} = error ->
         RunAudit.append(workspace, issue, :codex_turn_failed, %{phase: "codex_turn", status: "failed", reason: reason, turn_number: turn_number})
         error
     end
+  end
+
+  defp handle_completed_turn(
+         app_session,
+         workspace,
+         issue,
+         task_contract,
+         codex_update_recipient,
+         runtime,
+         turn_numbers
+       ) do
+    case continue_with_issue?(issue, task_contract, runtime.issue_state_fetcher) do
+      {:continue, refreshed_issue} ->
+        handoff_result =
+          finish_handoff(workspace, issue, refreshed_issue, task_contract, runtime, elem(turn_numbers, 0))
+
+        handle_handoff_result(
+          handoff_result,
+          app_session,
+          workspace,
+          task_contract,
+          codex_update_recipient,
+          runtime,
+          turn_numbers
+        )
+
+      {:done, refreshed_issue} ->
+        finish_handoff(workspace, issue, refreshed_issue, task_contract, runtime, elem(turn_numbers, 0))
+
+      {:error, reason} ->
+        record_continuation_failure(workspace, issue, reason, elem(turn_numbers, 0))
+    end
+  end
+
+  defp handle_handoff_result(
+         {:continue, refreshed_issue},
+         app_session,
+         workspace,
+         task_contract,
+         codex_update_recipient,
+         runtime,
+         {turn_number, max_turns}
+       )
+       when turn_number < max_turns do
+    Logger.info("Continuing agent run for #{issue_context(refreshed_issue)} after normal turn completion turn=#{turn_number}/#{max_turns}")
+
+    RunAudit.append(workspace, refreshed_issue, :codex_turn_continuing, %{
+      phase: "codex_turn",
+      status: "continuing",
+      reason: "handoff_evidence_pending",
+      previous_turn_number: turn_number,
+      turn_number: turn_number + 1,
+      issue_state: refreshed_issue.state,
+      issue_labels: Enum.join(refreshed_issue.labels, ",")
+    })
+
+    do_run_codex_turns(
+      app_session,
+      workspace,
+      refreshed_issue,
+      task_contract,
+      codex_update_recipient,
+      runtime,
+      {turn_number + 1, max_turns}
+    )
+  end
+
+  defp handle_handoff_result(
+         {:continue, refreshed_issue},
+         _app_session,
+         workspace,
+         _task_contract,
+         _codex_update_recipient,
+         _runtime,
+         {turn_number, _max_turns}
+       ) do
+    Logger.info("Reached agent.max_turns for #{issue_context(refreshed_issue)} with issue still active; returning control to orchestrator")
+    RunAudit.append(workspace, refreshed_issue, :codex_max_turns_reached, %{phase: "codex_turn", status: "max_turns_reached", turn_number: turn_number})
+
+    {:ok, completion_info(refreshed_issue, :max_turns_reached)}
+  end
+
+  defp handle_handoff_result(
+         result,
+         _app_session,
+         _workspace,
+         _task_contract,
+         _codex_update_recipient,
+         _runtime,
+         _turn_numbers
+       ),
+       do: result
+
+  defp record_continuation_failure(workspace, issue, reason, turn_number) do
+    RunAudit.append(workspace, issue, :codex_continuation_check_failed, %{
+      phase: "codex_turn",
+      status: "failed",
+      reason: reason,
+      turn_number: turn_number
+    })
+
+    {:error, reason}
   end
 
   defp build_turn_prompt(issue, opts, 1, _max_turns), do: PromptBuilder.build_prompt(issue, opts)
@@ -383,9 +485,10 @@ defmodule SymphonyElixir.AgentRunner do
     - This is continuation turn ##{turn_number} of #{max_turns} for the current agent run.
     - Resume from the current workspace and workpad state instead of restarting from scratch.
     - The original task instructions and prior turn context are already present in this thread, so do not restate them before acting.
-    - First check whether the implementation is already complete but the Linear handoff is missing or stale; if so, close the Linear handoff before doing more implementation.
+    - First check whether the implementation is already complete but `.symphony/completion-evidence.json` is missing or stale; if so, refresh that artifact before doing more implementation.
     - If a PR, commit, or proof result already exists, verify only the missing handoff facts instead of rerunning broad setup, research, or full test gates.
     - Before leaving the active workflow, atomically refresh `.symphony/completion-evidence.json` with exact proof coverage and the repository PR URL required by the original prompt.
+    - Do not create the completed-work Linear handoff comment or move the issue to the configured handoff state; Symphony owns those external writes after validation.
     - Record the reason for the extra turn in `.symphony/run-audit.md`, including whether it was missing handoff, missing state transition, rework, or a real blocker.
     - Focus on the remaining ticket work and do not end the turn while the issue stays active unless you are truly blocked.
     """
@@ -470,19 +573,78 @@ defmodule SymphonyElixir.AgentRunner do
   end
 
   defp finish_handoff(workspace, issue, refreshed_issue, task_contract, runtime, turn_number) do
-    validation_opts =
+    opts =
       [worker_host: runtime.worker_host] ++
-        Keyword.take(runtime.opts, [:completion_evidence_validator])
+        Keyword.take(runtime.opts, [:completion_evidence_validator, :handoff_publisher, :handoff_state])
 
+    handoff_after_turn(
+      workspace,
+      issue,
+      refreshed_issue,
+      task_contract,
+      Agent.get(runtime.proof_ledger, & &1),
+      opts,
+      turn_number
+    )
+  end
+
+  defp handoff_after_turn(workspace, issue, refreshed_issue, task_contract, proofs, opts, turn_number) do
+    if active_issue_state?(refreshed_issue.state) do
+      validate_and_publish_handoff(
+        workspace,
+        issue,
+        refreshed_issue,
+        task_contract,
+        proofs,
+        opts,
+        turn_number
+      )
+    else
+      reason = {:handoff_state_advanced_before_publish, refreshed_issue.state}
+
+      RunAudit.append(workspace, issue, :handoff_publish_rejected, %{
+        phase: "handoff",
+        status: "failed",
+        reason: reason,
+        turn_number: turn_number
+      })
+
+      {:error, reason}
+    end
+  end
+
+  defp validate_and_publish_handoff(
+         workspace,
+         issue,
+         refreshed_issue,
+         task_contract,
+         proofs,
+         opts,
+         turn_number
+       ) do
     case validate_handoff(
            workspace,
            refreshed_issue,
            task_contract,
-           Agent.get(runtime.proof_ledger, & &1),
-           validation_opts
+           proofs,
+           opts
          ) do
       {:ok, evidence} ->
-        record_valid_handoff(workspace, issue, refreshed_issue, evidence, turn_number)
+        publish_handoff(workspace, issue, refreshed_issue, task_contract, evidence, opts, turn_number)
+
+      {:error, {:handoff_evidence_invalid, :completion_evidence_missing}} = error ->
+        if issue_routable?(refreshed_issue) do
+          RunAudit.append(workspace, issue, :handoff_evidence_pending, %{
+            phase: "handoff",
+            status: "pending",
+            reason: "completion_evidence_missing",
+            turn_number: turn_number
+          })
+
+          {:continue, refreshed_issue}
+        else
+          error
+        end
 
       {:error, reason} = error ->
         RunAudit.append(workspace, issue, :handoff_evidence_rejected, %{
@@ -496,7 +658,47 @@ defmodule SymphonyElixir.AgentRunner do
     end
   end
 
-  defp record_valid_handoff(workspace, issue, refreshed_issue, evidence, turn_number) do
+  defp publish_handoff(workspace, issue, refreshed_issue, task_contract, evidence, opts, turn_number) do
+    publisher = Keyword.get(opts, :handoff_publisher, &HandoffPublisher.publish/4)
+
+    handoff_state =
+      Keyword.get_lazy(opts, :handoff_state, fn -> Config.settings!().tracker.handoff_state end)
+
+    case publisher.(refreshed_issue, task_contract, evidence, handoff_state: handoff_state) do
+      {:ok, publication} ->
+        record_published_handoff(
+          workspace,
+          issue,
+          refreshed_issue,
+          evidence,
+          publication,
+          turn_number
+        )
+
+      {:error, reason} = error ->
+        RunAudit.append(workspace, issue, :handoff_publish_failed, %{
+          phase: "handoff",
+          status: "failed",
+          reason: reason,
+          artifact_digest: evidence.artifact_digest,
+          turn_number: turn_number
+        })
+
+        error
+
+      other ->
+        {:error, {:handoff_publish_failed, other}}
+    end
+  end
+
+  defp record_published_handoff(
+         workspace,
+         issue,
+         refreshed_issue,
+         evidence,
+         publication,
+         turn_number
+       ) do
     RunAudit.append(workspace, issue, :codex_continuation_check_completed, %{
       phase: "codex_turn",
       status: "done",
@@ -507,13 +709,27 @@ defmodule SymphonyElixir.AgentRunner do
       phase: "handoff",
       status: "completed",
       pull_request_url: evidence.pull_request_url,
+      artifact_digest: evidence.artifact_digest,
+      turn_number: turn_number
+    })
+
+    RunAudit.append(workspace, issue, :handoff_published, %{
+      phase: "handoff",
+      status: "completed",
+      comment_id: publication.comment_id,
+      issue_state: publication.issue_state,
+      artifact_digest: evidence.artifact_digest,
       turn_number: turn_number
     })
 
     {:ok,
-     refreshed_issue
+     %{refreshed_issue | state: publication.issue_state}
      |> completion_info(:done)
-     |> Map.put(:pull_request_url, evidence.pull_request_url)}
+     |> Map.merge(%{
+       pull_request_url: evidence.pull_request_url,
+       handoff_comment_id: publication.comment_id,
+       completion_artifact_digest: evidence.artifact_digest
+     })}
   end
 
   defp record_observed_proof(proof_ledger, event_id, exit_code) do

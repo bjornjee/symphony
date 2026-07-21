@@ -52,6 +52,7 @@ defmodule SymphonyElixir.Config.Schema do
       field(:assignee, :string)
       field(:required_labels, {:array, :string}, default: [])
       field(:claim_state, :string)
+      field(:handoff_state, :string, default: "Human Review")
       field(:active_states, {:array, :string}, default: ["Todo", "In Progress"])
       field(:terminal_states, {:array, :string}, default: ["Closed", "Cancelled", "Canceled", "Duplicate", "Done"])
       field(:cleanup_callbacks, :map, default: %{})
@@ -70,12 +71,14 @@ defmodule SymphonyElixir.Config.Schema do
           :assignee,
           :required_labels,
           :claim_state,
+          :handoff_state,
           :active_states,
           :terminal_states,
           :cleanup_callbacks
         ],
         empty_values: []
       )
+      |> validate_required([:handoff_state])
       |> validate_change(:cleanup_callbacks, &validate_cleanup_callbacks/2)
       |> update_change(:cleanup_callbacks, &normalize_cleanup_callbacks/1)
       |> update_change(:required_labels, fn labels ->

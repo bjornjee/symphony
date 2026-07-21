@@ -68,10 +68,36 @@ defmodule SymphonyElixir.AgentRunnerThreadResumeTest do
         labels: []
       }
 
-      issue_state_fetcher = fn [_issue_id] -> {:ok, [%{issue | state: "Done"}]} end
+      issue_state_fetcher = fn [_issue_id] -> {:ok, [issue]} end
 
-      assert :ok = AgentRunner.run(issue, nil, issue_state_fetcher: issue_state_fetcher)
-      assert :ok = AgentRunner.run(issue, nil, issue_state_fetcher: issue_state_fetcher)
+      evidence_validator = fn _workspace, _issue, contract, _proofs, _opts ->
+        {:ok,
+         %{
+           artifact_digest: String.duplicate("a", 64),
+           pull_request_url: "https://github.com/bjornjee/symphony/pull/42",
+           criteria:
+             Enum.map(contract.acceptance_criteria, fn criterion ->
+               %{criterion_id: criterion.id, proof_event_id: "proof-#{criterion.id}"}
+             end)
+         }}
+      end
+
+      publisher = fn _issue, _contract, _evidence, opts ->
+        {:ok,
+         %{
+           comment_id: "123e4567-e89b-42d3-a456-426614174000",
+           issue_state: Keyword.fetch!(opts, :handoff_state)
+         }}
+      end
+
+      run_opts = [
+        issue_state_fetcher: issue_state_fetcher,
+        completion_evidence_validator: evidence_validator,
+        handoff_publisher: publisher
+      ]
+
+      assert :ok = AgentRunner.run(issue, nil, run_opts)
+      assert :ok = AgentRunner.run(issue, nil, run_opts)
 
       assert {:ok, workspace} =
                SymphonyElixir.PathSafety.canonicalize(Path.join(workspace_root, "PIN-15"))

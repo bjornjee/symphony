@@ -72,6 +72,8 @@ not silently create a replacement.
    - When creating a workflow based on this repo, note that it depends on non-standard Linear
      issue statuses: "Rework", "Human Review", and "Merging". You can customize them in
      Team Settings → Workflow in Linear.
+   - `tracker.handoff_state` defaults to `Human Review`. After validated completion evidence,
+     Symphony publishes and reads back one deterministic handoff before applying this state.
    - For the `agent-dashboard` operating setup, use `../WORKFLOW.md` and follow
      `../docs/agent-dashboard-linear-setup.md` for the Linear setup, issue template, minimal
      labels, decomposition rules, and invariant-driven guardrails.

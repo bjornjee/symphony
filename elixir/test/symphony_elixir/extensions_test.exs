@@ -193,9 +193,16 @@ defmodule SymphonyElixir.ExtensionsTest do
     assert {:ok, [^issue]} = SymphonyElixir.Tracker.fetch_issues_by_states([" in progress ", 42])
     assert {:ok, [^issue]} = SymphonyElixir.Tracker.fetch_issue_states_by_ids(["issue-1"])
     assert :ok = SymphonyElixir.Tracker.create_comment("issue-1", "comment")
+    assert :ok = SymphonyElixir.Tracker.create_comment("issue-1", "comment-1", "handoff")
+
+    assert {:ok, %{id: "comment-1", body: "handoff"}} =
+             SymphonyElixir.Tracker.fetch_comment("issue-1", "comment-1")
+
+    assert {:ok, nil} = SymphonyElixir.Tracker.fetch_comment("issue-1", "missing")
     assert :ok = SymphonyElixir.Tracker.update_issue_state("issue-1", "Done")
     assert :ok = SymphonyElixir.Tracker.cleanup_issue_labels(issue, ["codex-ready"])
     assert_receive {:memory_tracker_comment, "issue-1", "comment"}
+    assert_receive {:memory_tracker_comment, "issue-1", "comment-1", "handoff"}
     assert_receive {:memory_tracker_state_update, "issue-1", "Done"}
     assert_receive {:memory_tracker_label_cleanup, "issue-1", ["codex-ready"]}
 
@@ -228,6 +235,44 @@ defmodule SymphonyElixir.ExtensionsTest do
     assert :ok = Adapter.create_comment("issue-1", "hello")
     assert_receive {:graphql_called, create_comment_query, %{body: "hello", issueId: "issue-1"}}
     assert create_comment_query =~ "commentCreate"
+
+    Process.put(
+      {FakeLinearClient, :graphql_result},
+      {:ok, %{"data" => %{"commentCreate" => %{"success" => true}}}}
+    )
+
+    assert :ok = Adapter.create_comment("issue-1", "123e4567-e89b-42d3-a456-426614174000", "handoff")
+
+    assert_receive {:graphql_called, idempotent_comment_query,
+                    %{
+                      body: "handoff",
+                      commentId: "123e4567-e89b-42d3-a456-426614174000",
+                      issueId: "issue-1"
+                    }}
+
+    assert idempotent_comment_query =~ "id: $commentId"
+
+    Process.put(
+      {FakeLinearClient, :graphql_result},
+      {:ok,
+       %{
+         "data" => %{
+           "issue" => %{
+             "comments" => %{
+               "nodes" => [%{"id" => "comment-1", "body" => "handoff"}]
+             }
+           }
+         }
+       }}
+    )
+
+    assert {:ok, %{id: "comment-1", body: "handoff"}} =
+             Adapter.fetch_comment("issue-1", "comment-1")
+
+    assert_receive {:graphql_called, comment_read_query, %{commentId: "comment-1", issueId: "issue-1", first: 1}}
+
+    assert comment_read_query =~ "comments(first: $first"
+    assert comment_read_query =~ "id: {eq: $commentId}"
 
     Process.put(
       {FakeLinearClient, :graphql_result},
@@ -341,6 +386,49 @@ defmodule SymphonyElixir.ExtensionsTest do
     assert_receive {:graphql_called, remove_label_query, %{issueId: "issue-1", labelId: "label-ready"}}
     assert remove_label_query =~ "issueRemoveLabel"
     refute_receive {:graphql_called, _query, %{labelId: "codex-review"}}
+  end
+
+  test "linear adapter fails closed on idempotent comment create errors" do
+    Application.put_env(:symphony_elixir, :linear_client_module, FakeLinearClient)
+
+    Process.put(
+      {FakeLinearClient, :graphql_result},
+      {:ok, %{"data" => %{"commentCreate" => %{"success" => false}}}}
+    )
+
+    assert {:error, :comment_create_failed} =
+             Adapter.create_comment("issue-1", "comment-1", "handoff")
+
+    Process.put({FakeLinearClient, :graphql_result}, {:error, :linear_down})
+
+    assert {:error, :linear_down} =
+             Adapter.create_comment("issue-1", "comment-1", "handoff")
+
+    Process.put({FakeLinearClient, :graphql_result}, :unexpected)
+
+    assert {:error, :comment_create_failed} =
+             Adapter.create_comment("issue-1", "comment-1", "handoff")
+  end
+
+  test "linear adapter returns bounded missing and malformed comment reads" do
+    Application.put_env(:symphony_elixir, :linear_client_module, FakeLinearClient)
+
+    Process.put(
+      {FakeLinearClient, :graphql_result},
+      {:ok, %{"data" => %{"issue" => %{"comments" => %{"nodes" => []}}}}}
+    )
+
+    assert {:ok, nil} = Adapter.fetch_comment("issue-1", "comment-1")
+
+    Process.put({FakeLinearClient, :graphql_result}, {:error, :linear_down})
+    assert {:error, :linear_down} = Adapter.fetch_comment("issue-1", "comment-1")
+
+    Process.put(
+      {FakeLinearClient, :graphql_result},
+      {:ok, %{"data" => %{"issue" => %{"comments" => %{"nodes" => [%{"id" => "other"}]}}}}}
+    )
+
+    assert {:error, :comment_read_failed} = Adapter.fetch_comment("issue-1", "comment-1")
   end
 
   test "linear adapter label cleanup is idempotent when labels are missing" do

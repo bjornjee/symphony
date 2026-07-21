@@ -2,7 +2,8 @@ defmodule SymphonyElixir.LiveE2ETest do
   use SymphonyElixir.TestSupport
 
   require Logger
-  alias SymphonyElixir.SSH
+  alias SymphonyElixir.{HandoffPublisher, SSH}
+  alias SymphonyElixir.Linear.TaskContract
 
   @moduletag :live_e2e
   @moduletag timeout: 300_000
@@ -130,6 +131,75 @@ defmodule SymphonyElixir.LiveE2ETest do
     run_live_issue_flow!(:ssh)
   end
 
+  @tag skip: @live_e2e_skip_reason
+  test "publishes one real idempotent Linear handoff before state transition" do
+    run_live_handoff_flow!()
+  end
+
+  defp run_live_handoff_flow! do
+    original_workflow_path = Workflow.workflow_file_path()
+    orchestrator_pid = Process.whereis(SymphonyElixir.Orchestrator)
+    test_root = Path.join(System.tmp_dir!(), "symphony-live-handoff-#{System.unique_integer([:positive])}")
+    workflow_file = Path.join(test_root, "WORKFLOW.md")
+    team = fetch_team!(System.get_env("SYMPHONY_LIVE_LINEAR_TEAM_KEY") || @default_team_key)
+    active_state = active_state!(team)
+    handoff_state = completed_state!(team)
+    completed_project_status = completed_project_status!()
+    File.mkdir_p!(test_root)
+
+    if is_pid(orchestrator_pid) do
+      assert :ok = Supervisor.terminate_child(SymphonyElixir.Supervisor, SymphonyElixir.Orchestrator)
+    end
+
+    Workflow.set_workflow_file_path(workflow_file)
+
+    project =
+      create_project!(
+        team["id"],
+        "Symphony Live Handoff #{System.unique_integer([:positive])}"
+      )
+
+    try do
+      issue =
+        create_issue!(
+          team["id"],
+          project["id"],
+          active_state["id"],
+          "Symphony idempotent handoff for #{project["name"]}"
+        )
+
+      write_workflow_file!(workflow_file,
+        tracker_api_token: "$LINEAR_API_KEY",
+        tracker_project_slug: project["slugId"],
+        tracker_handoff_state: handoff_state["name"]
+      )
+
+      assert {:ok, contract} = TaskContract.from_issue(issue)
+
+      evidence = %{
+        artifact_digest: String.duplicate("a", 64),
+        pull_request_url: "https://github.com/bjornjee/symphony/pull/42",
+        criteria:
+          Enum.map(contract.acceptance_criteria, fn criterion ->
+            %{criterion_id: criterion.id, proof_event_id: "proof-#{criterion.id}"}
+          end)
+      }
+
+      body = HandoffPublisher.render(issue, contract, evidence)
+      assert {:ok, publication} = HandoffPublisher.publish(issue, contract, evidence, handoff_state: handoff_state["name"])
+      assert {:ok, ^publication} = HandoffPublisher.publish(issue, contract, evidence, handoff_state: handoff_state["name"])
+
+      snapshot = fetch_issue_details!(issue.id)
+      assert get_in(snapshot, ["state", "name"]) == handoff_state["name"]
+      assert count_matching_comments(snapshot, body) == 1
+      assert :ok = complete_project(project["id"], completed_project_status["id"])
+    after
+      restart_orchestrator_if_needed()
+      Workflow.set_workflow_file_path(original_workflow_path)
+      File.rm_rf(test_root)
+    end
+  end
+
   defp fetch_team!(team_key) do
     @team_query
     |> graphql_data!(%{key: team_key})
@@ -148,6 +218,11 @@ defmodule SymphonyElixir.LiveE2ETest do
       Enum.find(states, &(&1["type"] == "unstarted")) ||
       Enum.find(states, &(&1["type"] not in ["completed", "canceled"])) ||
       flunk("expected team to expose at least one non-terminal workflow state")
+  end
+
+  defp completed_state!(%{"states" => %{"nodes" => states}}) when is_list(states) do
+    Enum.find(states, &(&1["type"] == "completed")) ||
+      flunk("expected team to expose a completed workflow state")
   end
 
   defp terminal_state_names(%{"states" => %{"nodes" => states}}) when is_list(states) do
@@ -247,6 +322,13 @@ defmodule SymphonyElixir.LiveE2ETest do
 
   defp issue_has_comment?(_issue, _expected_body), do: false
 
+  defp count_matching_comments(%{"comments" => %{"nodes" => comments}}, expected_body)
+       when is_list(comments) do
+    Enum.count(comments, &(&1["body"] == expected_body))
+  end
+
+  defp count_matching_comments(_issue, _expected_body), do: 0
+
   defp update_entity(mutation, variables, mutation_name, entity_name) do
     case Client.graphql(mutation, variables) do
       {:ok, %{"data" => %{^mutation_name => %{"success" => true}}}} ->
@@ -322,78 +404,14 @@ defmodule SymphonyElixir.LiveE2ETest do
     identifier={{ issue.identifier }}
     project_slug=#{project_slug}
 
-    Step 2:
-    You must use the `linear_graphql` tool to query the current issue by `{{ issue.id }}` and read:
-    - existing comments
-    - team workflow states
-
-    A turn that only creates the file is incomplete. Do not stop after Step 1.
-
-    If the exact comment body below is not already present, post exactly one comment on the current issue with this exact body:
-    #{expected_comment("{{ issue.identifier }}", project_slug)}
-
-    Use these exact GraphQL operations:
-
-    ```graphql
-    query IssueContext($id: String!) {
-      issue(id: $id) {
-        comments(first: 20) {
-          nodes {
-            body
-          }
-        }
-        team {
-          states(first: 50) {
-            nodes {
-              id
-              name
-              type
-            }
-          }
-        }
-      }
-    }
-    ```
-
-    ```graphql
-    mutation AddComment($issueId: String!, $body: String!) {
-      commentCreate(input: {issueId: $issueId, body: $body}) {
-        success
-      }
-    }
-    ```
-
-    Step 3:
-    Use the same issue-context query result to choose a workflow state whose `type` is `completed`.
-    Then move the current issue to that state with this exact mutation:
-
-    ```graphql
-    mutation CompleteIssue($id: String!, $stateId: String!) {
-      issueUpdate(id: $id, input: {stateId: $stateId}) {
-        success
-      }
-    }
-    ```
-
-    Step 4:
-    Verify all outcomes with one final `linear_graphql` query against `{{ issue.id }}`:
-    - the exact comment body is present
-    - the issue state type is `completed`
-
-    Do not ask for approval.
-    Stop only after all three conditions are true:
-    1. the file exists with the exact contents above
-    2. the Linear comment exists with the exact body above
-    3. the Linear issue is in a completed terminal state
+    Do not call `linear_graphql`, create a Linear comment, or move the issue.
+    Symphony owns the completed-work handoff and state transition after the turn.
+    Do not ask for approval. Stop after the file exists with the exact contents above.
     """
   end
 
   defp expected_result(issue_identifier, project_slug) do
     "identifier=#{issue_identifier}\nproject_slug=#{project_slug}\n"
-  end
-
-  defp expected_comment(issue_identifier, project_slug) do
-    "Symphony live e2e comment\nidentifier=#{issue_identifier}\nproject_slug=#{project_slug}"
   end
 
   defp receive_runtime_info!(issue_id) do
@@ -466,6 +484,7 @@ defmodule SymphonyElixir.LiveE2ETest do
 
       team = fetch_team!(team_key)
       active_state = active_state!(team)
+      handoff_state = completed_state!(team)
       completed_project_status = completed_project_status!()
       terminal_states = terminal_state_names(team)
 
@@ -488,6 +507,7 @@ defmodule SymphonyElixir.LiveE2ETest do
         tracker_project_slug: project["slugId"],
         tracker_active_states: active_state_names(team),
         tracker_terminal_states: terminal_states,
+        tracker_handoff_state: handoff_state["name"],
         workspace_root: worker_setup.workspace_root,
         worker_ssh_hosts: worker_setup.ssh_worker_hosts,
         codex_command: worker_setup.codex_command,
@@ -498,7 +518,11 @@ defmodule SymphonyElixir.LiveE2ETest do
         prompt: live_prompt(project["slugId"])
       )
 
-      assert :ok = AgentRunner.run(issue, self(), max_turns: 3)
+      assert :ok =
+               AgentRunner.run(issue, self(),
+                 max_turns: 3,
+                 completion_evidence_validator: &live_handoff_evidence/5
+               )
 
       runtime_info = receive_runtime_info!(issue.id)
 
@@ -507,7 +531,8 @@ defmodule SymphonyElixir.LiveE2ETest do
 
       issue_snapshot = fetch_issue_details!(issue.id)
       assert issue_completed?(issue_snapshot)
-      assert issue_has_comment?(issue_snapshot, expected_comment(issue.identifier, project["slugId"]))
+      assert {:ok, contract} = TaskContract.from_issue(issue)
+      assert issue_has_comment?(issue_snapshot, HandoffPublisher.render(issue, contract, live_handoff_evidence(contract)))
 
       assert :ok = complete_project(project["id"], completed_project_status["id"])
     after
@@ -516,6 +541,21 @@ defmodule SymphonyElixir.LiveE2ETest do
       Workflow.set_workflow_file_path(original_workflow_path)
       File.rm_rf(test_root)
     end
+  end
+
+  defp live_handoff_evidence(_workspace, _issue, contract, _proofs, _opts) do
+    {:ok, live_handoff_evidence(contract)}
+  end
+
+  defp live_handoff_evidence(contract) do
+    %{
+      artifact_digest: String.duplicate("a", 64),
+      pull_request_url: "https://github.com/bjornjee/symphony/pull/42",
+      criteria:
+        Enum.map(contract.acceptance_criteria, fn criterion ->
+          %{criterion_id: criterion.id, proof_event_id: "proof-#{criterion.id}"}
+        end)
+    }
   end
 
   defp live_worker_setup!(:local, _run_id, test_root) when is_binary(test_root) do

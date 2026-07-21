@@ -1,0 +1,188 @@
+defmodule SymphonyElixir.HandoffPublisherTest do
+  use ExUnit.Case, async: true
+
+  import SymphonyElixir.TaskContractFixtures
+
+  alias SymphonyElixir.HandoffPublisher
+  alias SymphonyElixir.Linear.TaskContract
+
+  defmodule FakeTracker do
+    def fetch_comment(issue_id, comment_id) do
+      send(self(), {:fetch_comment, issue_id, comment_id})
+      [result | rest] = Process.get({__MODULE__, :fetch_results})
+      Process.put({__MODULE__, :fetch_results}, rest)
+      result
+    end
+
+    def create_comment(issue_id, comment_id, body) do
+      send(self(), {:create_comment, issue_id, comment_id, body})
+      Process.get({__MODULE__, :create_result}, :ok)
+    end
+
+    def update_issue_state(issue_id, state_name) do
+      send(self(), {:update_issue_state, issue_id, state_name})
+      Process.get({__MODULE__, :state_result}, :ok)
+    end
+  end
+
+  setup do
+    task = issue()
+    {:ok, contract} = TaskContract.from_issue(task)
+
+    evidence = %{
+      pull_request_url: "https://github.com/bjornjee/symphony/pull/42",
+      artifact_digest: String.duplicate("a", 64),
+      criteria:
+        Enum.map(contract.acceptance_criteria, fn criterion ->
+          %{criterion_id: criterion.id, proof_event_id: "proof-#{criterion.id}"}
+        end)
+    }
+
+    %{task: task, contract: contract, evidence: evidence}
+  end
+
+  test "renders only validated human-facing handoff fields", context do
+    body = HandoffPublisher.render(context.task, context.contract, Map.put(context.evidence, :raw_logs, "SECRET"))
+
+    assert body =~ "## Agent Handoff"
+    assert body =~ context.evidence.pull_request_url
+    assert body =~ "Verification: #{length(context.contract.acceptance_criteria)} acceptance criteria passed"
+    assert body =~ "Human action: Review and approve the pull request."
+
+    Enum.each(context.contract.acceptance_criteria, fn criterion ->
+      assert body =~ criterion.text
+      assert body =~ "passed with engine-observed command evidence"
+    end)
+
+    refute body =~ "proof-"
+    refute body =~ "SECRET"
+    refute body =~ "raw_logs"
+  end
+
+  test "escapes tracker-authored criterion markdown", context do
+    [first | rest] = context.contract.acceptance_criteria
+    unsafe = %{first | text: "[click](javascript:alert(1)) <!-- marker -->"}
+    contract = %{context.contract | acceptance_criteria: [unsafe | rest]}
+
+    body = HandoffPublisher.render(context.task, contract, context.evidence)
+
+    refute body =~ "[click](javascript:alert(1))"
+    assert body =~ "\\[click\\]\\(javascript:alert\\(1\\)\\)"
+    assert body =~ "&lt;!-- marker --&gt;"
+  end
+
+  test "reuses an exact existing handoff before transitioning state", context do
+    issue_id = context.task.id
+    comment_id = HandoffPublisher.comment_id(context.task, context.contract, context.evidence)
+    body = HandoffPublisher.render(context.task, context.contract, context.evidence)
+    Process.put({FakeTracker, :fetch_results}, [{:ok, %{id: comment_id, body: body}}])
+
+    assert {:ok, %{comment_id: ^comment_id, issue_state: "Human Review"}} =
+             publish(context)
+
+    assert_receive {:fetch_comment, ^issue_id, ^comment_id}
+    refute_receive {:create_comment, _, _, _}
+    assert_receive {:update_issue_state, ^issue_id, "Human Review"}
+  end
+
+  test "ambiguous comment creation converges through readback", context do
+    issue_id = context.task.id
+    comment_id = HandoffPublisher.comment_id(context.task, context.contract, context.evidence)
+    body = HandoffPublisher.render(context.task, context.contract, context.evidence)
+
+    Process.put({FakeTracker, :fetch_results}, [
+      {:ok, nil},
+      {:ok, %{id: comment_id, body: body}}
+    ])
+
+    Process.put({FakeTracker, :create_result}, {:error, :timeout})
+
+    assert {:ok, %{comment_id: ^comment_id, issue_state: "Human Review"}} =
+             publish(context)
+
+    assert_receive {:create_comment, ^issue_id, ^comment_id, ^body}
+    assert_receive {:update_issue_state, ^issue_id, "Human Review"}
+  end
+
+  test "does not transition when comment readback cannot verify creation", context do
+    comment_id = HandoffPublisher.comment_id(context.task, context.contract, context.evidence)
+    Process.put({FakeTracker, :fetch_results}, [{:ok, nil}, {:ok, nil}])
+
+    assert {:error, {:handoff_comment_unverified, ^comment_id, :ok}} = publish(context)
+    refute_receive {:update_issue_state, _, _}
+  end
+
+  test "fails closed on a deterministic comment id collision", context do
+    comment_id = HandoffPublisher.comment_id(context.task, context.contract, context.evidence)
+    Process.put({FakeTracker, :fetch_results}, [{:ok, %{id: comment_id, body: "different"}}])
+
+    assert {:error, {:handoff_comment_collision, ^comment_id}} = publish(context)
+    refute_receive {:create_comment, _, _, _}
+    refute_receive {:update_issue_state, _, _}
+  end
+
+  test "keeps a verified comment when the state transition must be retried", context do
+    comment_id = HandoffPublisher.comment_id(context.task, context.contract, context.evidence)
+    body = HandoffPublisher.render(context.task, context.contract, context.evidence)
+    Process.put({FakeTracker, :fetch_results}, [{:ok, %{id: comment_id, body: body}}])
+    Process.put({FakeTracker, :state_result}, {:error, :linear_down})
+
+    assert {:error, {:handoff_state_transition_failed, "Human Review", :linear_down}} =
+             publish(context)
+
+    refute_receive {:create_comment, _, _, _}
+  end
+
+  test "fails closed when initial comment readback fails", context do
+    Process.put({FakeTracker, :fetch_results}, [{:error, :linear_down}])
+
+    assert {:error, {:handoff_comment_read_failed, :linear_down}} = publish(context)
+    refute_receive {:create_comment, _, _, _}
+    refute_receive {:update_issue_state, _, _}
+  end
+
+  test "fails closed on unexpected comment read payloads", context do
+    Process.put({FakeTracker, :fetch_results}, [:unexpected])
+    assert {:error, {:handoff_comment_read_failed, :unexpected}} = publish(context)
+
+    Process.put({FakeTracker, :fetch_results}, [{:ok, nil}, :unexpected])
+
+    assert {:error, {:handoff_comment_read_failed, :unexpected, :ok}} =
+             publish(context)
+  end
+
+  test "fails closed when post-create readback returns another body", context do
+    comment_id = HandoffPublisher.comment_id(context.task, context.contract, context.evidence)
+
+    Process.put({FakeTracker, :fetch_results}, [
+      {:ok, nil},
+      {:ok, %{id: comment_id, body: "different"}}
+    ])
+
+    assert {:error, {:handoff_comment_collision, ^comment_id}} = publish(context)
+    refute_receive {:update_issue_state, _, _}
+  end
+
+  test "preserves post-create read and unexpected state failures", context do
+    Process.put({FakeTracker, :fetch_results}, [{:ok, nil}, {:error, :linear_down}])
+    Process.put({FakeTracker, :create_result}, {:error, :timeout})
+
+    assert {:error, {:handoff_comment_read_failed, :linear_down, {:error, :timeout}}} =
+             publish(context)
+
+    comment_id = HandoffPublisher.comment_id(context.task, context.contract, context.evidence)
+    body = HandoffPublisher.render(context.task, context.contract, context.evidence)
+    Process.put({FakeTracker, :fetch_results}, [{:ok, %{id: comment_id, body: body}}])
+    Process.put({FakeTracker, :state_result}, :unexpected)
+
+    assert {:error, {:handoff_state_transition_failed, "Human Review", :unexpected}} =
+             publish(context)
+  end
+
+  defp publish(context) do
+    HandoffPublisher.publish(context.task, context.contract, context.evidence,
+      tracker: FakeTracker,
+      handoff_state: "Human Review"
+    )
+  end
+end
