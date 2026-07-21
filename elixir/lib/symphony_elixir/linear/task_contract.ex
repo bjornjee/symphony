@@ -205,7 +205,7 @@ defmodule SymphonyElixir.Linear.TaskContract do
   defp require_scope_list(errors, scope, label, pattern) do
     case Regex.run(pattern, scope, capture: :all_but_first) do
       [content] ->
-        if Regex.match?(~r/^-\s+\S/m, content) do
+        if Regex.match?(~r/^[*+-]\s+\S/m, content) do
           errors
         else
           errors ++ ["Section must include #{label} with at least one bullet: ## Scope"]
