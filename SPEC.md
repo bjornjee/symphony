@@ -240,6 +240,42 @@ Fields:
 The manifest is created atomically. An existing manifest MUST match the issue identity and digest
 and MUST NOT be overwritten on plan drift.
 
+New manifests also include `acceptance_criteria`, an ordered list of stable criterion `id` and
+canonical `text` pairs. Criterion IDs are content-derived and independent of checkbox state.
+Duplicate criterion text is invalid. Older pinned manifests without this additive field remain
+readable; the current task contract is the validation authority.
+
+#### 4.1.5.2 Completion Evidence
+
+Agent-owned JSON document stored at `.symphony/completion-evidence.json` in one issue workspace.
+The agent writes a temporary sibling and atomically renames it into place after proof commands and
+the repository pull request exist. Replacing an envelope for the same issue and plan digest is
+idempotent.
+
+Fields:
+
+- `schema_version` (`1`)
+- `issue_id`
+- `issue_identifier`
+- `plan_digest`
+- `criteria`, with exactly one entry per pinned acceptance criterion:
+  - `criterion_id`
+  - `proof.kind` (`run_audit_command`)
+  - `proof.event_id`
+- `pull_request_url`
+
+Symphony owns validation. A proof event ID MUST identify a successful command completion observed
+by the engine during the current run and retained in its bounded in-memory ledger. Workspace prose,
+checkbox state, edited audit files, and agent-asserted exit status are not proof. The PR URL MUST be
+an HTTPS GitHub `/pull/<positive integer>` URL whose owner and repository match the workspace
+`origin`. Validation reads only the current issue's bounded envelope, criteria, proof ledger, and
+repository origin, plus one repository-host lookup that MUST resolve the canonical PR URL.
+
+Explicit rejection classes include missing or oversized artifacts, malformed or unsupported
+schema, issue or digest mismatch, missing/unmatched/duplicate criteria, malformed/unobserved/failed
+proof, proof-ledger overflow, missing/invalid/unavailable PR URL, repository mismatch, and unavailable
+origin.
+
 #### 4.1.6 Live Session (Agent Session Metadata)
 
 State tracked while a coding-agent subprocess is running.
@@ -1018,7 +1054,12 @@ the active turn terminates.
 
 Completion conditions:
 
-- Targeted-protocol turn completion signal -> success
+- Targeted-protocol turn completion signal while the issue remains active and routable -> continue
+  within the configured turn bound
+- Targeted-protocol turn completion signal at a handoff boundary plus valid completion evidence ->
+  success and handoff-ready
+- Targeted-protocol turn completion signal at a handoff boundary with missing or invalid completion
+  evidence -> failure
 - Targeted-protocol turn failure signal -> failure
 - Targeted-protocol turn cancellation signal -> failure
 - turn timeout (`turn_timeout_ms`) -> failure

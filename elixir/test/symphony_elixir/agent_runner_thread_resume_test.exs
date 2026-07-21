@@ -70,8 +70,17 @@ defmodule SymphonyElixir.AgentRunnerThreadResumeTest do
 
       issue_state_fetcher = fn [_issue_id] -> {:ok, [%{issue | state: "Done"}]} end
 
-      assert :ok = AgentRunner.run(issue, nil, issue_state_fetcher: issue_state_fetcher)
-      assert :ok = AgentRunner.run(issue, nil, issue_state_fetcher: issue_state_fetcher)
+      evidence_validator = fn _workspace, _issue, _contract, _proofs, _opts ->
+        {:ok, %{pull_request_url: "https://github.com/bjornjee/symphony/pull/42"}}
+      end
+
+      run_opts = [
+        issue_state_fetcher: issue_state_fetcher,
+        completion_evidence_validator: evidence_validator
+      ]
+
+      assert :ok = AgentRunner.run(issue, nil, run_opts)
+      assert :ok = AgentRunner.run(issue, nil, run_opts)
 
       assert {:ok, workspace} =
                SymphonyElixir.PathSafety.canonicalize(Path.join(workspace_root, "PIN-15"))

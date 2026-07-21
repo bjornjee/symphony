@@ -71,16 +71,22 @@ defmodule SymphonyElixir.RunAudit do
     end)
   end
 
-  @spec append_codex_update(Path.t(), Issue.t(), map()) :: :ok
+  @spec append_codex_update(Path.t(), Issue.t(), map()) ::
+          {:ok, %{event_id: String.t(), exit_code: integer()} | nil}
   def append_codex_update(workspace, %Issue{} = issue, update)
       when is_binary(workspace) and is_map(update) do
     case codex_audit_attrs(update) do
-      nil -> :ok
-      attrs -> append(workspace, issue, :codex_update, attrs)
+      nil ->
+        {:ok, nil}
+
+      attrs ->
+        {attrs, proof} = maybe_attach_command_proof(attrs)
+        append(workspace, issue, :codex_update, attrs)
+        {:ok, proof}
     end
   end
 
-  def append_codex_update(_workspace, _issue, _update), do: :ok
+  def append_codex_update(_workspace, _issue, _update), do: {:ok, nil}
 
   defp codex_audit_attrs(%{event: :session_started} = update) do
     %{
@@ -141,6 +147,29 @@ defmodule SymphonyElixir.RunAudit do
     }
   end
 
+  defp method_attrs(
+         _event,
+         "item/completed",
+         %{
+           "params" => %{
+             "item" =>
+               %{
+                 "type" => "commandExecution",
+                 "exitCode" => exit_code
+               } = item
+           }
+         }
+       )
+       when is_integer(exit_code) do
+    %{
+      phase: "command",
+      status: "completed",
+      method: "item/completed",
+      command: Map.get(item, "command"),
+      exit_code: exit_code
+    }
+  end
+
   defp method_attrs(_event, "codex/event/exec_command_begin", payload) do
     %{
       phase: "command",
@@ -179,6 +208,21 @@ defmodule SymphonyElixir.RunAudit do
   end
 
   defp method_attrs(_event, _method, _payload), do: nil
+
+  defp maybe_attach_command_proof(
+         %{
+           phase: "command",
+           status: "completed",
+           method: method,
+           exit_code: exit_code
+         } = attrs
+       )
+       when method in ["codex/event/exec_command_end", "item/completed"] and is_integer(exit_code) do
+    event_id = "proof-" <> (:crypto.strong_rand_bytes(16) |> Base.url_encode64(padding: false))
+    {Map.put(attrs, :event_id, event_id), %{event_id: event_id, exit_code: exit_code}}
+  end
+
+  defp maybe_attach_command_proof(attrs), do: {attrs, nil}
 
   defp command_from_payload(payload) do
     get_in(payload, ["params", "msg", "command"]) ||

@@ -89,6 +89,10 @@ defmodule SymphonyElixir.ExecutionManifest do
       "issue_id" => issue.id,
       "issue_identifier" => issue.identifier,
       "plan_digest" => contract.digest,
+      "acceptance_criteria" =>
+        Enum.map(contract.acceptance_criteria, fn criterion ->
+          %{"id" => criterion.id, "text" => criterion.text}
+        end),
       "source_updated_at" => format_datetime(issue.updated_at),
       "pinned_at" => DateTime.utc_now() |> DateTime.truncate(:second) |> DateTime.to_iso8601()
     }
