@@ -53,6 +53,13 @@ defmodule SymphonyElixir.HandoffPublisherTest do
     %{task: task, contract: contract, evidence: evidence}
   end
 
+  test "uses Linear's lowercase UUID representation for the deterministic comment id", context do
+    comment_id = HandoffPublisher.comment_id(context.task, context.contract, context.evidence)
+
+    assert comment_id == String.downcase(comment_id)
+    assert comment_id =~ ~r/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/
+  end
+
   test "renders only validated human-facing handoff fields", context do
     body = HandoffPublisher.render(context.task, context.contract, Map.put(context.evidence, :raw_logs, "SECRET"))
 
