@@ -26,6 +26,12 @@ defmodule SymphonyElixir.ExecutionManifestTest do
     assert manifest["issue_id"] == task.id
     assert manifest["issue_identifier"] == task.identifier
     assert manifest["plan_digest"] == contract.digest
+
+    assert manifest["acceptance_criteria"] ==
+             Enum.map(contract.acceptance_criteria, fn criterion ->
+               %{"id" => criterion.id, "text" => criterion.text}
+             end)
+
     assert manifest["source_updated_at"] == "2026-07-21T03:00:00Z"
     assert File.regular?(ExecutionManifest.path(workspace))
     refute File.exists?(ExecutionManifest.path(workspace) <> ".tmp")

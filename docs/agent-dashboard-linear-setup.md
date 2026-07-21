@@ -180,8 +180,20 @@ issue was closed without human action. The agent must create the comment, read
 it back, and only then move the issue to `Human Review`. If readback fails, the
 agent should not move the issue.
 
-For implementation work, the `## Agent Handoff` comment must include either a
-PR URL or a clear reason no PR was created, plus the exact reviewer action.
+For completed implementation work, the `## Agent Handoff` comment must include
+the validated repository PR URL plus the exact reviewer action. A run without a
+PR is not handoff-ready; use `## Agent Blocked` for a real external blocker.
+
+Before leaving the active workflow, the agent must atomically replace
+`.symphony/completion-evidence.json`. The v1 envelope is tied to the pinned plan
+digest and contains exact one-to-one entries for the stable acceptance-criterion
+IDs plus `pull_request_url`. Each entry references a successful command event ID
+from the engine-written run audit. Symphony validates those references against
+its current-run in-memory ledger, validates the PR URL against the workspace's
+`origin`, resolves the PR through `gh pr view`, and rejects the handoff on
+missing, inaccessible, malformed, stale, duplicate, or unmatched evidence.
+PIN-17 owns any future Linear publishing mutation; this validation step does
+not publish comments or change tracker state.
 
 ## Invariant-Driven Mode
 

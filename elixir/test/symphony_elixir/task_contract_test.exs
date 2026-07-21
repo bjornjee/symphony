@@ -8,6 +8,13 @@ defmodule SymphonyElixir.TaskContractTest do
     assert {:ok, contract} = TaskContract.from_issue(issue())
     assert contract.version == 1
     assert contract.digest =~ ~r/^[0-9a-f]{64}$/
+
+    assert Enum.map(contract.acceptance_criteria, & &1.text) == [
+             "The result is observable.",
+             "The failure path is covered."
+           ]
+
+    assert Enum.all?(contract.acceptance_criteria, &Regex.match?(~r/^ac-[0-9a-f]{64}$/, &1.id))
   end
 
   test "line-ending and trailing-whitespace differences preserve the digest" do
@@ -100,6 +107,38 @@ defmodule SymphonyElixir.TaskContractTest do
 
     assert {:error, errors} = TaskContract.from_issue(issue(%{description: description}))
     assert "Every acceptance criterion must be a checkbox item." in errors
+  end
+
+  test "acceptance criterion identities are stable across checkbox state changes" do
+    original = issue()
+
+    checked =
+      issue(%{
+        description: String.replace(original.description, "- [ ] The result is observable.", "- [x] The result is observable.")
+      })
+
+    assert {:ok, first} = TaskContract.from_issue(original)
+    assert {:ok, second} = TaskContract.from_issue(checked)
+
+    assert Enum.map(first.acceptance_criteria, & &1.id) == Enum.map(second.acceptance_criteria, & &1.id)
+  end
+
+  test "duplicate acceptance criteria are rejected" do
+    description =
+      valid_description(%{
+        "Acceptance Criteria" => "- [ ] The result is observable.\n- [x] The result is observable."
+      })
+
+    assert {:error, errors} = TaskContract.from_issue(issue(%{description: description}))
+    assert "Acceptance criteria must be unique." in errors
+  end
+
+  test "acceptance criteria are bounded per issue" do
+    criteria = Enum.map_join(1..101, "\n", &"- [ ] Observable result #{&1}.")
+    description = valid_description(%{"Acceptance Criteria" => criteria})
+
+    assert {:error, errors} = TaskContract.from_issue(issue(%{description: description}))
+    assert "Acceptance Criteria cannot contain more than 100 items." in errors
   end
 
   test "risk accepts only low medium or high" do

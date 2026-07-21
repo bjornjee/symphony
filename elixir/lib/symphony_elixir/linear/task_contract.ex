@@ -16,8 +16,11 @@ defmodule SymphonyElixir.Linear.TaskContract do
   ]
   @optional_headings ["Notes For Agent"]
   @all_headings @required_headings ++ @optional_headings
+  @max_acceptance_criteria 100
 
-  defstruct [:version, :digest, :title, :description, :sections, :source_updated_at]
+  defstruct [:version, :digest, :title, :description, :sections, :acceptance_criteria, :source_updated_at]
+
+  @type acceptance_criterion :: %{id: String.t(), text: String.t()}
 
   @type t :: %__MODULE__{
           version: pos_integer(),
@@ -25,6 +28,7 @@ defmodule SymphonyElixir.Linear.TaskContract do
           title: String.t(),
           description: String.t(),
           sections: %{required(String.t()) => String.t()},
+          acceptance_criteria: [acceptance_criterion()],
           source_updated_at: DateTime.t() | nil
         }
 
@@ -50,6 +54,7 @@ defmodule SymphonyElixir.Linear.TaskContract do
            title: title,
            description: description,
            sections: sections,
+           acceptance_criteria: parse_acceptance_criteria(Map.fetch!(sections, "Acceptance Criteria")),
            source_updated_at: issue.updated_at
          }}
 
@@ -215,6 +220,7 @@ defmodule SymphonyElixir.Linear.TaskContract do
 
   defp acceptance_criteria_errors(content) do
     lines = content |> String.split("\n") |> Enum.reject(&(String.trim(&1) == ""))
+    criteria = parse_acceptance_criteria(content)
 
     cond do
       not Enum.any?(lines, &Regex.match?(~r/^- \[[ xX]\] \S/, &1)) ->
@@ -223,9 +229,34 @@ defmodule SymphonyElixir.Linear.TaskContract do
       not Enum.all?(lines, &Regex.match?(~r/^- \[[ xX]\] \S/, &1)) ->
         ["Every acceptance criterion must be a checkbox item."]
 
+      length(criteria) > @max_acceptance_criteria ->
+        ["Acceptance Criteria cannot contain more than #{@max_acceptance_criteria} items."]
+
+      criteria |> Enum.map(& &1.id) |> Enum.uniq() |> length() != length(criteria) ->
+        ["Acceptance criteria must be unique."]
+
       true ->
         []
     end
+  end
+
+  defp parse_acceptance_criteria(content) when is_binary(content) do
+    content
+    |> String.split("\n")
+    |> Enum.flat_map(fn line ->
+      case Regex.run(~r/^- \[[ xX]\] (\S.*)$/, line, capture: :all_but_first) do
+        [text] -> [%{id: criterion_id(text), text: text}]
+        _ -> []
+      end
+    end)
+  end
+
+  defp criterion_id(text) do
+    [@version, "acceptance_criterion", text]
+    |> Jason.encode!()
+    |> then(&:crypto.hash(:sha256, &1))
+    |> Base.encode16(case: :lower)
+    |> then(&("ac-" <> &1))
   end
 
   defp risk_errors(nil), do: []

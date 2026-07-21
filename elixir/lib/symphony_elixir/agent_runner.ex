@@ -6,7 +6,7 @@ defmodule SymphonyElixir.AgentRunner do
   require Logger
   alias SymphonyElixir.Codex.AppServer
   alias SymphonyElixir.Codex.ThreadIdentity
-  alias SymphonyElixir.{Config, ExecutionManifest, PromptBuilder, RunAudit, Tracker, Workspace}
+  alias SymphonyElixir.{CompletionEvidence, Config, ExecutionManifest, PromptBuilder, RunAudit, Tracker, Workspace}
   alias SymphonyElixir.Linear.{Issue, TaskContract}
 
   @type worker_host :: String.t() | nil
@@ -29,6 +29,14 @@ defmodule SymphonyElixir.AgentRunner do
   def continue_with_issue_for_test(%Issue{} = issue, %TaskContract{} = contract, issue_state_fetcher)
       when is_function(issue_state_fetcher, 1) do
     continue_with_issue?(issue, contract, issue_state_fetcher)
+  end
+
+  @doc false
+  @spec validate_handoff_for_test(Path.t(), Issue.t(), TaskContract.t(), map(), keyword()) ::
+          {:ok, map()} | {:error, term()}
+  def validate_handoff_for_test(workspace, %Issue{} = issue, %TaskContract{} = contract, proofs, opts \\ [])
+      when is_binary(workspace) and is_map(proofs) do
+    validate_handoff(workspace, issue, contract, proofs, opts)
   end
 
   @spec run(Issue.t(), pid() | nil, keyword()) :: :ok | no_return()
@@ -129,9 +137,16 @@ defmodule SymphonyElixir.AgentRunner do
   defp normalize_run_result({:ok, _completion_info}), do: :ok
   defp normalize_run_result({:error, _reason} = error), do: error
 
-  defp codex_message_handler(recipient, issue, workspace) do
+  defp codex_message_handler(recipient, issue, workspace, proof_ledger) do
     fn message ->
-      RunAudit.append_codex_update(workspace, issue, message)
+      case RunAudit.append_codex_update(workspace, issue, message) do
+        {:ok, %{event_id: event_id, exit_code: exit_code}} ->
+          record_observed_proof(proof_ledger, event_id, exit_code)
+
+        {:ok, nil} ->
+          :ok
+      end
+
       send_codex_update(recipient, issue, message)
     end
   end
@@ -175,59 +190,71 @@ defmodule SymphonyElixir.AgentRunner do
     issue_state_fetcher = Keyword.get(opts, :issue_state_fetcher, &Tracker.fetch_issue_states_by_ids/1)
     task_contract = Keyword.fetch!(opts, :task_contract)
 
+    {:ok, proof_ledger} = Agent.start_link(fn -> %{} end)
+
+    runtime = %{
+      issue_state_fetcher: issue_state_fetcher,
+      opts: opts,
+      proof_ledger: proof_ledger,
+      worker_host: worker_host
+    }
+
     RunAudit.append(workspace, issue, :codex_app_server_starting, %{phase: "codex_app_server", status: "started"})
 
-    case start_codex_session(workspace, worker_host) do
-      {:ok, session} ->
-        RunAudit.append(workspace, issue, :codex_app_server_started, %{
-          phase: "codex_app_server",
-          status: "completed",
-          thread_id: session.thread_id
-        })
+    try do
+      case start_codex_session(workspace, worker_host) do
+        {:ok, session} ->
+          RunAudit.append(workspace, issue, :codex_app_server_started, %{
+            phase: "codex_app_server",
+            status: "completed",
+            thread_id: session.thread_id
+          })
 
-        try do
-          with {:ok, _thread_id} <-
-                 ThreadIdentity.pin(workspace, session.thread_id, worker_host),
-               :ok <- AppServer.set_goal(session, goal_objective(issue)) do
-            RunAudit.append(workspace, issue, :codex_goal_set, %{
-              phase: "codex_goal",
-              status: "completed",
-              goal_status: "active",
-              thread_id: session.thread_id
-            })
-
-            result =
-              do_run_codex_turns(
-                session,
-                workspace,
-                issue,
-                task_contract,
-                codex_update_recipient,
-                opts,
-                issue_state_fetcher,
-                {1, max_turns}
-              )
-
-            update_goal_for_result(session, workspace, issue, result)
-          else
-            {:error, reason} = error ->
-              RunAudit.append(workspace, issue, :codex_goal_failed, %{
+          try do
+            with {:ok, _thread_id} <-
+                   ThreadIdentity.pin(workspace, session.thread_id, worker_host),
+                 :ok <- AppServer.set_goal(session, goal_objective(issue)) do
+              RunAudit.append(workspace, issue, :codex_goal_set, %{
                 phase: "codex_goal",
-                status: "failed",
-                reason: reason,
+                status: "completed",
+                goal_status: "active",
                 thread_id: session.thread_id
               })
 
-              error
-          end
-        after
-          RunAudit.append(workspace, issue, :codex_app_server_stopping, %{phase: "codex_app_server", status: "stopping"})
-          AppServer.stop_session(session)
-        end
+              result =
+                do_run_codex_turns(
+                  session,
+                  workspace,
+                  issue,
+                  task_contract,
+                  codex_update_recipient,
+                  runtime,
+                  {1, max_turns}
+                )
 
-      {:error, reason} = error ->
-        RunAudit.append(workspace, issue, :codex_app_server_failed, %{phase: "codex_app_server", status: "failed", reason: reason})
-        error
+              update_goal_for_result(session, workspace, issue, result)
+            else
+              {:error, reason} = error ->
+                RunAudit.append(workspace, issue, :codex_goal_failed, %{
+                  phase: "codex_goal",
+                  status: "failed",
+                  reason: reason,
+                  thread_id: session.thread_id
+                })
+
+                error
+            end
+          after
+            RunAudit.append(workspace, issue, :codex_app_server_stopping, %{phase: "codex_app_server", status: "stopping"})
+            AppServer.stop_session(session)
+          end
+
+        {:error, reason} = error ->
+          RunAudit.append(workspace, issue, :codex_app_server_failed, %{phase: "codex_app_server", status: "failed", reason: reason})
+          error
+      end
+    after
+      Agent.stop(proof_ledger)
     end
   end
 
@@ -286,24 +313,23 @@ defmodule SymphonyElixir.AgentRunner do
          issue,
          task_contract,
          codex_update_recipient,
-         opts,
-         issue_state_fetcher,
+         runtime,
          {turn_number, max_turns}
        ) do
-    prompt = build_turn_prompt(issue, opts, turn_number, max_turns)
+    prompt = build_turn_prompt(issue, runtime.opts, turn_number, max_turns)
     RunAudit.append(workspace, issue, :codex_turn_started, %{phase: "codex_turn", status: "started", turn_number: turn_number})
 
     case AppServer.run_turn(
            app_session,
            prompt,
            issue,
-           on_message: codex_message_handler(codex_update_recipient, issue, workspace)
+           on_message: codex_message_handler(codex_update_recipient, issue, workspace, runtime.proof_ledger)
          ) do
       {:ok, turn_session} ->
         Logger.info("Completed agent run for #{issue_context(issue)} session_id=#{turn_session[:session_id]} workspace=#{workspace} turn=#{turn_number}/#{max_turns}")
         RunAudit.append(workspace, issue, :codex_turn_completed, %{phase: "codex_turn", status: "completed", session_id: turn_session[:session_id], turn_number: turn_number})
 
-        case continue_with_issue?(issue, task_contract, issue_state_fetcher) do
+        case continue_with_issue?(issue, task_contract, runtime.issue_state_fetcher) do
           {:continue, refreshed_issue} when turn_number < max_turns ->
             Logger.info("Continuing agent run for #{issue_context(refreshed_issue)} after normal turn completion turn=#{turn_number}/#{max_turns}")
 
@@ -323,8 +349,7 @@ defmodule SymphonyElixir.AgentRunner do
               refreshed_issue,
               task_contract,
               codex_update_recipient,
-              opts,
-              issue_state_fetcher,
+              runtime,
               {turn_number + 1, max_turns}
             )
 
@@ -335,8 +360,7 @@ defmodule SymphonyElixir.AgentRunner do
             {:ok, completion_info(refreshed_issue, :max_turns_reached)}
 
           {:done, refreshed_issue} ->
-            RunAudit.append(workspace, issue, :codex_continuation_check_completed, %{phase: "codex_turn", status: "done", turn_number: turn_number})
-            {:ok, completion_info(refreshed_issue, :done)}
+            finish_handoff(workspace, issue, refreshed_issue, task_contract, runtime, turn_number)
 
           {:error, reason} ->
             RunAudit.append(workspace, issue, :codex_continuation_check_failed, %{phase: "codex_turn", status: "failed", reason: reason, turn_number: turn_number})
@@ -361,6 +385,7 @@ defmodule SymphonyElixir.AgentRunner do
     - The original task instructions and prior turn context are already present in this thread, so do not restate them before acting.
     - First check whether the implementation is already complete but the Linear handoff is missing or stale; if so, close the Linear handoff before doing more implementation.
     - If a PR, commit, or proof result already exists, verify only the missing handoff facts instead of rerunning broad setup, research, or full test gates.
+    - Before leaving the active workflow, atomically refresh `.symphony/completion-evidence.json` with exact proof coverage and the repository PR URL required by the original prompt.
     - Record the reason for the extra turn in `.symphony/run-audit.md`, including whether it was missing handoff, missing state transition, rework, or a real blocker.
     - Focus on the remaining ticket work and do not end the turn while the issue stays active unless you are truly blocked.
     """
@@ -432,6 +457,73 @@ defmodule SymphonyElixir.AgentRunner do
         nil -> {:ok, current}
       end
     end
+  end
+
+  defp validate_handoff(workspace, issue, contract, proofs, opts) do
+    validator = Keyword.get(opts, :completion_evidence_validator, &CompletionEvidence.validate/5)
+    validator_opts = Keyword.delete(opts, :completion_evidence_validator)
+
+    case validator.(workspace, issue, contract, proofs, validator_opts) do
+      {:ok, evidence} -> {:ok, evidence}
+      {:error, reason} -> {:error, {:handoff_evidence_invalid, reason}}
+    end
+  end
+
+  defp finish_handoff(workspace, issue, refreshed_issue, task_contract, runtime, turn_number) do
+    validation_opts =
+      [worker_host: runtime.worker_host] ++
+        Keyword.take(runtime.opts, [:completion_evidence_validator])
+
+    case validate_handoff(
+           workspace,
+           refreshed_issue,
+           task_contract,
+           Agent.get(runtime.proof_ledger, & &1),
+           validation_opts
+         ) do
+      {:ok, evidence} ->
+        record_valid_handoff(workspace, issue, refreshed_issue, evidence, turn_number)
+
+      {:error, reason} = error ->
+        RunAudit.append(workspace, issue, :handoff_evidence_rejected, %{
+          phase: "handoff",
+          status: "failed",
+          reason: reason,
+          turn_number: turn_number
+        })
+
+        error
+    end
+  end
+
+  defp record_valid_handoff(workspace, issue, refreshed_issue, evidence, turn_number) do
+    RunAudit.append(workspace, issue, :codex_continuation_check_completed, %{
+      phase: "codex_turn",
+      status: "done",
+      turn_number: turn_number
+    })
+
+    RunAudit.append(workspace, issue, :handoff_evidence_validated, %{
+      phase: "handoff",
+      status: "completed",
+      pull_request_url: evidence.pull_request_url,
+      turn_number: turn_number
+    })
+
+    {:ok,
+     refreshed_issue
+     |> completion_info(:done)
+     |> Map.put(:pull_request_url, evidence.pull_request_url)}
+  end
+
+  defp record_observed_proof(proof_ledger, event_id, exit_code) do
+    Agent.update(proof_ledger, fn proofs ->
+      if map_size(proofs) < 256 do
+        Map.put(proofs, event_id, %{exit_code: exit_code})
+      else
+        Map.put(proofs, "__proof_limit_exceeded__", %{exit_code: -1})
+      end
+    end)
   end
 
   defp completion_info(%Issue{} = issue, continuation) when continuation in [:done, :max_turns_reached] do
