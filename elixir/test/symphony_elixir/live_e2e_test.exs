@@ -197,7 +197,7 @@ defmodule SymphonyElixir.LiveE2ETest do
         teamId: team_id,
         projectId: project_id,
         title: title,
-        description: title,
+        description: valid_description(),
         stateId: state_id
       })
       |> fetch_successful_entity!("issueCreate", "issue")

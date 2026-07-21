@@ -5,7 +5,8 @@ defmodule SymphonyElixir.AgentRunner do
 
   require Logger
   alias SymphonyElixir.Codex.AppServer
-  alias SymphonyElixir.{Config, Linear.Issue, PromptBuilder, RunAudit, Tracker, Workspace}
+  alias SymphonyElixir.{Config, ExecutionManifest, PromptBuilder, RunAudit, Tracker, Workspace}
+  alias SymphonyElixir.Linear.{Issue, TaskContract}
 
   @type worker_host :: String.t() | nil
 
@@ -17,20 +18,41 @@ defmodule SymphonyElixir.AgentRunner do
     continue_with_issue?(issue, issue_state_fetcher)
   end
 
-  @spec run(map(), pid() | nil, keyword()) :: :ok | no_return()
+  @doc false
+  @spec continue_with_issue_for_test(Issue.t(), TaskContract.t(), ([String.t()] -> term())) ::
+          {:continue, Issue.t()} | {:done, Issue.t()} | {:error, term()}
+  def continue_with_issue_for_test(%Issue{} = issue, %TaskContract{} = contract, issue_state_fetcher)
+      when is_function(issue_state_fetcher, 1) do
+    continue_with_issue?(issue, contract, issue_state_fetcher)
+  end
+
+  @spec run(Issue.t(), pid() | nil, keyword()) :: :ok | no_return()
   def run(issue, codex_update_recipient \\ nil, opts \\ []) do
-    # The orchestrator owns host retries so one worker lifetime never hops machines.
-    worker_host = selected_worker_host(Keyword.get(opts, :worker_host), Config.settings!().worker.ssh_hosts)
+    case task_contract_for_issue(issue, opts) do
+      {:ok, task_contract} ->
+        opts = Keyword.put(opts, :task_contract, task_contract)
+        # The orchestrator owns host retries so one worker lifetime never hops machines.
+        worker_host = selected_worker_host(Keyword.get(opts, :worker_host), Config.settings!().worker.ssh_hosts)
 
-    Logger.info("Starting agent run for #{issue_context(issue)} worker_host=#{worker_host_for_log(worker_host)}")
+        Logger.info("Starting agent run for #{issue_context(issue)} worker_host=#{worker_host_for_log(worker_host)} plan_digest=#{task_contract.digest}")
 
-    case run_on_worker_host(issue, codex_update_recipient, opts, worker_host) do
-      :ok ->
-        :ok
+        case run_on_worker_host(issue, codex_update_recipient, opts, worker_host) do
+          :ok ->
+            :ok
+
+          {:error, reason} ->
+            Logger.error("Agent run failed for #{issue_context(issue)}: #{inspect(reason)}")
+            raise RuntimeError, "Agent run failed for #{issue_context(issue)}: #{inspect(reason)}"
+        end
+
+      {:error, errors} when is_list(errors) ->
+        message = Enum.join(errors, "; ")
+        Logger.warning("Task contract invalid for #{issue_context(issue)}: #{message}")
+        raise RuntimeError, "Task contract invalid for #{issue_context(issue)}: #{message}"
 
       {:error, reason} ->
-        Logger.error("Agent run failed for #{issue_context(issue)}: #{inspect(reason)}")
-        raise RuntimeError, "Agent run failed for #{issue_context(issue)}: #{inspect(reason)}"
+        Logger.warning("Task contract rejected for #{issue_context(issue)}: #{inspect(reason)}")
+        raise RuntimeError, "Task contract rejected for #{issue_context(issue)}: #{inspect(reason)}"
     end
   end
 
@@ -39,17 +61,34 @@ defmodule SymphonyElixir.AgentRunner do
 
     case Workspace.create_for_issue(issue, worker_host) do
       {:ok, workspace} ->
-        RunAudit.start(workspace, issue, %{worker_host: worker_host_for_log(worker_host)})
-        RunAudit.append(workspace, issue, :workspace_prepared, %{phase: "workspace", status: "completed", workspace_path: workspace})
+        task_contract = Keyword.fetch!(opts, :task_contract)
 
-        send_worker_runtime_info(codex_update_recipient, issue, worker_host, workspace, RunAudit.paths(workspace))
+        case ExecutionManifest.pin(workspace, issue, task_contract, worker_host) do
+          {:ok, manifest} ->
+            RunAudit.start(workspace, issue, %{
+              worker_host: worker_host_for_log(worker_host),
+              plan_digest: manifest["plan_digest"]
+            })
 
-        try do
-          run_with_workspace(workspace, issue, codex_update_recipient, opts, worker_host)
-        after
-          RunAudit.append(workspace, issue, :after_run_hook_started, %{phase: "workspace", status: "started"})
-          Workspace.run_after_run_hook(workspace, issue, worker_host)
-          RunAudit.append(workspace, issue, :after_run_hook_completed, %{phase: "workspace", status: "completed"})
+            RunAudit.append(workspace, issue, :workspace_prepared, %{
+              phase: "workspace",
+              status: "completed",
+              workspace_path: workspace,
+              plan_digest: manifest["plan_digest"]
+            })
+
+            send_worker_runtime_info(codex_update_recipient, issue, worker_host, workspace, RunAudit.paths(workspace))
+
+            try do
+              run_with_workspace(workspace, issue, codex_update_recipient, opts, worker_host)
+            after
+              RunAudit.append(workspace, issue, :after_run_hook_started, %{phase: "workspace", status: "started"})
+              Workspace.run_after_run_hook(workspace, issue, worker_host)
+              RunAudit.append(workspace, issue, :after_run_hook_completed, %{phase: "workspace", status: "completed"})
+            end
+
+          {:error, _reason} = error ->
+            error
         end
 
       {:error, reason} ->
@@ -129,6 +168,7 @@ defmodule SymphonyElixir.AgentRunner do
   defp run_codex_turns(workspace, issue, codex_update_recipient, opts, worker_host) do
     max_turns = Keyword.get(opts, :max_turns, Config.settings!().agent.max_turns)
     issue_state_fetcher = Keyword.get(opts, :issue_state_fetcher, &Tracker.fetch_issue_states_by_ids/1)
+    task_contract = Keyword.fetch!(opts, :task_contract)
 
     RunAudit.append(workspace, issue, :codex_app_server_starting, %{phase: "codex_app_server", status: "started"})
 
@@ -145,11 +185,11 @@ defmodule SymphonyElixir.AgentRunner do
                 session,
                 workspace,
                 issue,
+                task_contract,
                 codex_update_recipient,
                 opts,
                 issue_state_fetcher,
-                1,
-                max_turns
+                {1, max_turns}
               )
 
             {:error, reason} = error ->
@@ -167,7 +207,16 @@ defmodule SymphonyElixir.AgentRunner do
     end
   end
 
-  defp do_run_codex_turns(app_session, workspace, issue, codex_update_recipient, opts, issue_state_fetcher, turn_number, max_turns) do
+  defp do_run_codex_turns(
+         app_session,
+         workspace,
+         issue,
+         task_contract,
+         codex_update_recipient,
+         opts,
+         issue_state_fetcher,
+         {turn_number, max_turns}
+       ) do
     prompt = build_turn_prompt(issue, opts, turn_number, max_turns)
     RunAudit.append(workspace, issue, :codex_turn_started, %{phase: "codex_turn", status: "started", turn_number: turn_number})
 
@@ -181,7 +230,7 @@ defmodule SymphonyElixir.AgentRunner do
         Logger.info("Completed agent run for #{issue_context(issue)} session_id=#{turn_session[:session_id]} workspace=#{workspace} turn=#{turn_number}/#{max_turns}")
         RunAudit.append(workspace, issue, :codex_turn_completed, %{phase: "codex_turn", status: "completed", session_id: turn_session[:session_id], turn_number: turn_number})
 
-        case continue_with_issue?(issue, issue_state_fetcher) do
+        case continue_with_issue?(issue, task_contract, issue_state_fetcher) do
           {:continue, refreshed_issue} when turn_number < max_turns ->
             Logger.info("Continuing agent run for #{issue_context(refreshed_issue)} after normal turn completion turn=#{turn_number}/#{max_turns}")
 
@@ -199,11 +248,11 @@ defmodule SymphonyElixir.AgentRunner do
               app_session,
               workspace,
               refreshed_issue,
+              task_contract,
               codex_update_recipient,
               opts,
               issue_state_fetcher,
-              turn_number + 1,
-              max_turns
+              {turn_number + 1, max_turns}
             )
 
           {:continue, refreshed_issue} ->
@@ -259,11 +308,16 @@ defmodule SymphonyElixir.AgentRunner do
     |> String.trim()
   end
 
-  defp continue_with_issue?(%Issue{id: issue_id} = issue, issue_state_fetcher) when is_binary(issue_id) do
+  defp continue_with_issue?(%Issue{} = issue, issue_state_fetcher) do
+    continue_with_issue?(issue, nil, issue_state_fetcher)
+  end
+
+  defp continue_with_issue?(%Issue{id: issue_id} = issue, contract, issue_state_fetcher)
+       when is_binary(issue_id) do
     case issue_state_fetcher.([issue_id]) do
       {:ok, [%Issue{} = refreshed_issue | _]} ->
         if active_issue_state?(refreshed_issue.state) and issue_routable?(refreshed_issue) do
-          {:continue, refreshed_issue}
+          continue_with_contract(refreshed_issue, contract)
         else
           {:done, refreshed_issue}
         end
@@ -276,7 +330,36 @@ defmodule SymphonyElixir.AgentRunner do
     end
   end
 
-  defp continue_with_issue?(issue, _issue_state_fetcher), do: {:done, issue}
+  defp continue_with_issue?(issue, _contract, _issue_state_fetcher), do: {:done, issue}
+
+  defp continue_with_contract(refreshed_issue, nil), do: {:continue, refreshed_issue}
+
+  defp continue_with_contract(refreshed_issue, %TaskContract{} = contract) do
+    compare_plan_revision(refreshed_issue, contract)
+  end
+
+  defp compare_plan_revision(refreshed_issue, contract) do
+    case TaskContract.from_issue(refreshed_issue) do
+      {:ok, %{digest: digest}} when digest == contract.digest ->
+        {:continue, refreshed_issue}
+
+      {:ok, %{digest: digest}} ->
+        {:error, {:plan_drift, contract.digest, digest}}
+
+      {:error, errors} ->
+        {:error, {:invalid_task_contract, errors}}
+    end
+  end
+
+  defp task_contract_for_issue(%Issue{} = issue, opts) do
+    with {:ok, current} <- TaskContract.from_issue(issue) do
+      case Keyword.get(opts, :task_contract) do
+        %TaskContract{digest: digest} when digest == current.digest -> {:ok, current}
+        %TaskContract{digest: digest} -> {:error, {:plan_drift, digest, current.digest}}
+        nil -> {:ok, current}
+      end
+    end
+  end
 
   defp completion_info(%Issue{} = issue, continuation) when continuation in [:done, :max_turns_reached] do
     %{

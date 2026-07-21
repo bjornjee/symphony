@@ -1573,16 +1573,20 @@ defmodule SymphonyElixir.CoreTest do
       )
 
       issue = %Issue{
+        id: "issue-retain-workspace",
         identifier: "S-99",
         title: "Smoke test",
-        description: "Run and keep workspace",
+        description: valid_description(),
         state: "In Progress",
         url: "https://example.org/issues/S-99",
         labels: ["backend"]
       }
 
       before = MapSet.new(File.ls!(workspace_root))
-      assert :ok = AgentRunner.run(issue)
+
+      assert :ok =
+               AgentRunner.run(issue, nil, issue_state_fetcher: fn [_issue_id] -> {:ok, [%{issue | state: "Done"}]} end)
+
       entries_after = MapSet.new(File.ls!(workspace_root))
 
       created =
@@ -1664,7 +1668,7 @@ defmodule SymphonyElixir.CoreTest do
         id: "issue-live-updates",
         identifier: "MT-99",
         title: "Smoke test",
-        description: "Capture codex updates",
+        description: valid_description(),
         state: "In Progress",
         url: "https://example.org/issues/MT-99",
         labels: ["backend"]
@@ -1767,7 +1771,7 @@ defmodule SymphonyElixir.CoreTest do
         id: "issue-audit",
         identifier: "MT-AUDIT",
         title: "Audit test",
-        description: "Capture audit files",
+        description: valid_description(),
         state: "In Progress",
         url: "https://example.org/issues/MT-AUDIT",
         labels: ["backend"]
@@ -1877,7 +1881,7 @@ defmodule SymphonyElixir.CoreTest do
         id: "issue-ssh-failover",
         identifier: "MT-SSH-FAILOVER",
         title: "Do not fail over within a single worker run",
-        description: "Surface the startup failure to the orchestrator",
+        description: valid_description(),
         state: "In Progress"
       }
 
@@ -1980,7 +1984,7 @@ defmodule SymphonyElixir.CoreTest do
              id: "issue-continue",
              identifier: "MT-247",
              title: "Continue until done",
-             description: "Still active after first turn",
+             description: valid_description(),
              state: state
            }
          ]}
@@ -1990,7 +1994,7 @@ defmodule SymphonyElixir.CoreTest do
         id: "issue-continue",
         identifier: "MT-247",
         title: "Continue until done",
-        description: "Still active after first turn",
+        description: valid_description(),
         state: "In Progress",
         url: "https://example.org/issues/MT-247",
         labels: []
@@ -2118,7 +2122,7 @@ defmodule SymphonyElixir.CoreTest do
              id: "issue-max-turns",
              identifier: "MT-248",
              title: "Stop at max turns",
-             description: "Still active",
+             description: valid_description(),
              state: "In Progress"
            }
          ]}
@@ -2128,7 +2132,7 @@ defmodule SymphonyElixir.CoreTest do
         id: "issue-max-turns",
         identifier: "MT-248",
         title: "Stop at max turns",
-        description: "Still active",
+        description: valid_description(),
         state: "In Progress",
         url: "https://example.org/issues/MT-248",
         labels: []

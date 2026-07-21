@@ -33,11 +33,12 @@ Run:
 
 ## Semantics
 
-- `Goal` is required and must describe one outcome.
+- `Goal`, `Context`, `Scope`, `Acceptance Criteria`, `Verification`, and `Risk`
+  are required, in that order. `Goal` must describe one outcome.
 - `Context` holds project-specific facts: repository, Linear project, PRs,
   Slack threads, docs, logs, screenshots, or prior issues.
-- `Scope.In` is required when code or docs may be changed.
-- `Scope.Out` is required when adjacent cleanup or expansion is plausible.
+- `Scope.In` and `Scope.Out` each require at least one bullet so execution and
+  adjacent non-goals are explicit.
 - `Acceptance Criteria` must be observable checklist items.
 - `Verification` is required. If unknown, write `agent selects smallest
   sufficient proof`.
@@ -47,9 +48,18 @@ Run:
   `Use agent-dashboard:<workflow>`, Symphony prepends
   `$agent-dashboard:<workflow>` before handing the prompt to Codex.
 
-If `Goal`, `Acceptance Criteria`, or `Verification` is missing, the agent must
-not implement. It should post one `## Agent Question` comment that asks for the
-missing decision and move the issue to `Human Review`.
+Symphony validates this shape before changing the claim state, creating a
+workspace, running a hook, or starting Codex. Empty, duplicate, out-of-order,
+placeholder, or malformed sections block dispatch with an actionable log. The
+issue must be corrected and approved again; an agent is never started to repair
+its own execution contract.
+
+For every valid dispatch, Symphony computes a versioned SHA-256 digest from the
+canonical title and description. Line-ending and trailing-whitespace differences
+are normalized; `updatedAt` is provenance only. The first attempt atomically
+writes `.symphony/execution-manifest.json`. Later attempts must match its issue
+identity and plan digest. A changed title or description stops before another
+Codex turn and never overwrites the pinned revision.
 
 ## Dispatch Rule
 

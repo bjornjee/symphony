@@ -222,6 +222,24 @@ Fields (logical):
 - `status`
 - `error` (OPTIONAL)
 
+#### 4.1.5.1 Execution Manifest
+
+Small engine-owned JSON document stored at `.symphony/execution-manifest.json` in one issue
+workspace.
+
+Fields:
+
+- `schema_version`
+- `task_contract_version`
+- `issue_id`
+- `issue_identifier`
+- `plan_digest` (versioned SHA-256 of canonical issue title and description)
+- `source_updated_at` (provenance only; not revision identity)
+- `pinned_at`
+
+The manifest is created atomically. An existing manifest MUST match the issue identity and digest
+and MUST NOT be overwritten on plan drift.
+
 #### 4.1.6 Live Session (Agent Session Metadata)
 
 State tracked while a coding-agent subprocess is running.
@@ -734,6 +752,8 @@ An issue is dispatch-eligible only if all are true:
 - Per-state concurrency slots are available.
 - Blocker rule for `Todo` state passes:
   - If the issue state is `Todo`, do not dispatch when any blocker is non-terminal.
+- Its title and description form a valid `Codex Agent Task v1` contract. Candidate-specific
+  validation runs after the final tracker refresh and before claim-state mutation.
 
 Sorting order (stable intent):
 
@@ -838,12 +858,14 @@ Input: `issue.identifier`
 
 Algorithm summary:
 
-1. Sanitize identifier to `workspace_key`.
-2. Compute workspace path under workspace root.
-3. Ensure the workspace path exists as a directory.
-4. Mark `created_now=true` only if the directory was created during this call; otherwise
+1. Validate and fingerprint the refreshed issue before entering the workspace layer.
+2. Sanitize identifier to `workspace_key`.
+3. Compute workspace path under workspace root.
+4. Ensure the workspace path exists as a directory.
+5. Mark `created_now=true` only if the directory was created during this call; otherwise
    `created_now=false`.
-5. If `created_now=true`, run `after_create` hook if configured.
+6. If `created_now=true`, run `after_create` hook if configured.
+7. Atomically create or validate the execution manifest before `before_run` or Codex startup.
 
 Notes:
 
@@ -1130,12 +1152,15 @@ The `Agent Runner` wraps workspace + prompt + app-server client.
 
 Behavior:
 
-1. Create/reuse workspace for issue.
-2. Build prompt from workflow template.
-3. Start app-server session.
-4. Set the app-server thread goal for the issue.
-5. Start the first turn and forward app-server events to orchestrator.
-6. On any error, fail the worker attempt (the orchestrator will retry).
+1. Revalidate the task contract without trusting caller-supplied metadata.
+2. Create/reuse workspace for issue.
+3. Atomically create or validate the execution manifest.
+4. Build prompt from workflow template.
+5. Start app-server session.
+6. Set the app-server thread goal for the issue.
+7. Start the first turn and forward app-server events to orchestrator.
+8. Before each continuation turn, refresh the issue and require the same plan digest.
+9. On any error, fail the worker attempt (the orchestrator will retry).
 
 Note:
 

@@ -14,12 +14,15 @@ This directory contains the current Elixir/OTP implementation of Symphony, based
 ## How it works
 
 1. Polls Linear for candidate work
-2. Creates a workspace per issue
-3. Launches Codex in [App Server mode](https://developers.openai.com/codex/app-server/) inside the
+2. Validates the issue against `Codex Agent Task v1` and fingerprints its title and description
+3. Creates a workspace per issue and atomically pins the approved revision in
+   `.symphony/execution-manifest.json`
+4. Launches Codex in [App Server mode](https://developers.openai.com/codex/app-server/) inside the
    workspace
-4. Sets a Codex app-server thread goal for the Linear issue
-5. Sends a workflow prompt to Codex
-6. Keeps Codex working on the issue until the work is done
+5. Sets a Codex app-server thread goal for the Linear issue
+6. Sends a workflow prompt to Codex
+7. Keeps Codex working on the issue until the work is done, checking the pinned digest before each
+   continuation turn
 
 During app-server sessions, Symphony also serves a client-side `linear_graphql` tool so that repo
 skills can make raw Linear GraphQL calls.
@@ -28,6 +31,11 @@ The app-server goal is the durable run objective. The workflow prompt remains th
 packet: repository conventions, issue context, worktree/env expectations, verification profile, and
 handoff rules. This keeps unattended runs goal-driven without sending slash-command text such as
 `/goal` through the prompt.
+
+Contract validation happens before the claim-state update, workspace creation, or any workspace
+hook. `updatedAt` is recorded in the execution manifest for provenance but does not identify a plan
+revision. If the title or description changes after pinning, Symphony preserves the original
+manifest and stops before another Codex turn.
 
 If a claimed issue moves to a terminal state (`Done`, `Closed`, `Cancelled`, or `Duplicate`),
 Symphony stops the active agent for that issue and cleans up matching workspaces.

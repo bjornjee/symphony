@@ -5,6 +5,7 @@ defmodule SymphonyElixir.TestSupport do
     quote do
       use ExUnit.Case
       import ExUnit.CaptureLog
+      import SymphonyElixir.TaskContractFixtures, only: [valid_description: 0]
 
       alias SymphonyElixir.AgentRunner
       alias SymphonyElixir.CLI

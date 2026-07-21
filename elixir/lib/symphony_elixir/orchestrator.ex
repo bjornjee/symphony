@@ -8,7 +8,7 @@ defmodule SymphonyElixir.Orchestrator do
   import Bitwise, only: [<<<: 2]
 
   alias SymphonyElixir.{AgentRunner, Config, StatusDashboard, Tracker, Workspace}
-  alias SymphonyElixir.Linear.Issue
+  alias SymphonyElixir.Linear.{Issue, TaskContract}
 
   @continuation_retry_delay_ms 1_000
   @failure_retry_base_ms 10_000
@@ -441,6 +441,20 @@ defmodule SymphonyElixir.Orchestrator do
   @doc false
   @spec claim_issue_for_dispatch_for_test(Issue.t()) :: {:ok, Issue.t()} | {:error, term()}
   def claim_issue_for_dispatch_for_test(%Issue{} = issue), do: claim_issue_for_dispatch(issue)
+
+  @doc false
+  @spec dispatch_issue_for_test(term(), Issue.t(), keyword()) :: term()
+  def dispatch_issue_for_test(%State{} = state, %Issue{} = issue, opts) when is_list(opts) do
+    dispatch_issue_with(
+      state,
+      issue,
+      nil,
+      nil,
+      Keyword.fetch!(opts, :issue_fetcher),
+      Keyword.fetch!(opts, :claim),
+      Keyword.fetch!(opts, :dispatch)
+    )
+  end
 
   @doc false
   @spec sort_issues_for_dispatch_for_test([Issue.t()]) :: [Issue.t()]
@@ -997,22 +1011,36 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   defp dispatch_issue(%State{} = state, issue, attempt \\ nil, preferred_worker_host \\ nil) do
-    case revalidate_issue_for_dispatch(issue, &Tracker.fetch_issue_states_by_ids/1, terminal_state_set()) do
+    dispatch_issue_with(
+      state,
+      issue,
+      attempt,
+      preferred_worker_host,
+      &Tracker.fetch_issue_states_by_ids/1,
+      &claim_issue_for_dispatch/1,
+      &do_dispatch_issue/5
+    )
+  end
+
+  defp dispatch_issue_with(
+         %State{} = state,
+         issue,
+         attempt,
+         preferred_worker_host,
+         issue_fetcher,
+         claim,
+         dispatch
+       ) do
+    case revalidate_issue_for_dispatch(issue, issue_fetcher, terminal_state_set()) do
       {:ok, %Issue{} = refreshed_issue} ->
-        case claim_issue_for_dispatch(refreshed_issue) do
-          {:ok, %Issue{} = claimed_issue} ->
-            do_dispatch_issue(state, claimed_issue, attempt, preferred_worker_host)
-
-          {:error, reason} ->
-            Logger.warning("Skipping dispatch; claim state update failed for #{issue_context(refreshed_issue)}: #{inspect(reason)}")
-
-            schedule_issue_retry(state, refreshed_issue.id, attempt, %{
-              identifier: refreshed_issue.identifier,
-              issue_url: refreshed_issue.url,
-              error: "claim state update failed: #{inspect(reason)}",
-              worker_host: preferred_worker_host
-            })
-        end
+        dispatch_validated_contract(
+          state,
+          refreshed_issue,
+          attempt,
+          preferred_worker_host,
+          claim,
+          dispatch
+        )
 
       {:skip, :missing} ->
         Logger.info("Skipping dispatch; issue no longer active or visible: #{issue_context(issue)}")
@@ -1029,7 +1057,35 @@ defmodule SymphonyElixir.Orchestrator do
     end
   end
 
-  defp do_dispatch_issue(%State{} = state, issue, attempt, preferred_worker_host) do
+  defp dispatch_validated_contract(state, issue, attempt, preferred_worker_host, claim, dispatch) do
+    case TaskContract.from_issue(issue) do
+      {:ok, contract} ->
+        claim_validated_issue(state, issue, contract, attempt, preferred_worker_host, claim, dispatch)
+
+      {:error, errors} ->
+        Logger.warning("Skipping dispatch; invalid task contract for #{issue_context(issue)}: #{Enum.join(errors, "; ")}")
+        state
+    end
+  end
+
+  defp claim_validated_issue(state, issue, contract, attempt, preferred_worker_host, claim, dispatch) do
+    case claim.(issue) do
+      {:ok, %Issue{} = claimed_issue} ->
+        dispatch.(state, claimed_issue, contract, attempt, preferred_worker_host)
+
+      {:error, reason} ->
+        Logger.warning("Skipping dispatch; claim state update failed for #{issue_context(issue)}: #{inspect(reason)}")
+
+        schedule_issue_retry(state, issue.id, attempt, %{
+          identifier: issue.identifier,
+          issue_url: issue.url,
+          error: "claim state update failed: #{inspect(reason)}",
+          worker_host: preferred_worker_host
+        })
+    end
+  end
+
+  defp do_dispatch_issue(%State{} = state, issue, contract, attempt, preferred_worker_host) do
     recipient = self()
 
     case select_worker_host(state, preferred_worker_host) do
@@ -1038,13 +1094,17 @@ defmodule SymphonyElixir.Orchestrator do
         state
 
       worker_host ->
-        spawn_issue_on_worker_host(state, issue, attempt, recipient, worker_host)
+        spawn_issue_on_worker_host(state, issue, contract, attempt, recipient, worker_host)
     end
   end
 
-  defp spawn_issue_on_worker_host(%State{} = state, issue, attempt, recipient, worker_host) do
+  defp spawn_issue_on_worker_host(%State{} = state, issue, contract, attempt, recipient, worker_host) do
     case Task.Supervisor.start_child(SymphonyElixir.TaskSupervisor, fn ->
-           AgentRunner.run(issue, recipient, attempt: attempt, worker_host: worker_host)
+           AgentRunner.run(issue, recipient,
+             attempt: attempt,
+             worker_host: worker_host,
+             task_contract: contract
+           )
          end) do
       {:ok, pid} ->
         ref = Process.monitor(pid)
@@ -1057,6 +1117,7 @@ defmodule SymphonyElixir.Orchestrator do
             ref: ref,
             identifier: issue.identifier,
             issue: issue,
+            plan_digest: contract.digest,
             worker_host: worker_host,
             workspace_path: nil,
             session_id: nil,
