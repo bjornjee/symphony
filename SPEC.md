@@ -35,9 +35,11 @@ stricter approvals or sandboxing.
 
 Important boundary:
 
-- Symphony is a scheduler/runner and tracker reader.
-- Ticket writes (state transitions, comments, PR links) are typically performed by the coding agent
-  using tools available in the workflow/runtime environment.
+- Symphony is a scheduler/runner, tracker reader, and the publisher for validated completed-work
+  handoffs.
+- After validated completion evidence and a repository PR exist, Symphony owns the deterministic
+  handoff comment, readback verification, and configured handoff-state transition. Other ticket
+  writes remain workflow/tooling concerns unless another contract explicitly assigns ownership.
 - A successful run can end at a workflow-defined handoff state (for example `Human Review`), not
   necessarily `Done`.
 
@@ -60,8 +62,8 @@ Important boundary:
 - Rich web UI or multi-tenant control plane.
 - Prescribing a specific dashboard or terminal UI implementation.
 - General-purpose workflow engine or distributed job scheduler.
-- Built-in business logic for how to edit tickets, PRs, or comments. (That logic lives in the
-  workflow prompt and agent tooling.)
+- General-purpose business logic for editing tickets, PRs, or comments beyond the validated
+  completed-work handoff contract.
 - Mandating strong sandbox controls beyond what the coding agent and host OS provide.
 - Mandating a single default approval, sandbox, or operator-confirmation posture for all
   implementations.
@@ -275,6 +277,16 @@ Explicit rejection classes include missing or oversized artifacts, malformed or 
 schema, issue or digest mismatch, missing/unmatched/duplicate criteria, malformed/unobserved/failed
 proof, proof-ledger overflow, missing/invalid/unavailable PR URL, repository mismatch, and unavailable
 origin.
+
+After validation, Symphony derives a deterministic SHA-256 key from the issue ID, pinned plan
+digest, and validated semantic completion-artifact digest (criterion set plus PR URL). Current-run
+proof event IDs are excluded from the external identity and output so proof reruns converge. It
+renders one allowlisted `## Agent Handoff`, uses a
+UUIDv4 derived from that key as Linear's caller-supplied comment ID, and reads the exact comment back
+from the current issue with `first: 1`. Only then may it move the issue to
+`tracker.handoff_state`. Retries, restarts, concurrent attempts, and ambiguous comment-create
+responses reuse the same ID and verify the same body. A body collision, failed readback, or failed
+state transition fails the attempt without advancing unverified state.
 
 #### 4.1.6 Live Session (Agent Session Metadata)
 
@@ -634,6 +646,7 @@ not require recognizing or validating extension fields unless that extension is 
 - `tracker.api_key`: string or `$VAR`, canonical env `LINEAR_API_KEY` when `tracker.kind=linear`
 - `tracker.project_slug`: string, REQUIRED when `tracker.kind=linear`
 - `tracker.required_labels`: list of strings, default `[]`
+- `tracker.handoff_state`: non-empty string, default `Human Review`
 - `tracker.active_states`: list of strings, default `["Todo", "In Progress"]`
 - `tracker.terminal_states`: list of strings, default `["Closed", "Cancelled", "Canceled", "Duplicate", "Done"]`
 - `polling.interval_ms`: integer, default `30000`
@@ -1237,6 +1250,15 @@ An implementation MUST support these tracker adapter operations:
 3. `fetch_issue_states_by_ids(issue_ids)`
    - Used for active-run reconciliation.
 
+4. `fetch_comment(issue_id, comment_id)`
+   - Reads at most one exact comment from the current issue for semantic handoff verification.
+
+5. `create_comment(issue_id, comment_id, body)`
+   - Creates a comment with a caller-supplied deterministic UUIDv4.
+
+6. `update_issue_state(issue_id, state_name)`
+   - Resolves and applies the configured handoff state after comment readback.
+
 ### 11.2 Query Semantics (Linear)
 
 Linear-specific requirements for `tracker.kind == "linear"`:
@@ -1296,15 +1318,16 @@ Orchestrator behavior on tracker errors:
 
 ### 11.5 Tracker Writes (Important Boundary)
 
-Symphony does not require first-class tracker write APIs in the orchestrator.
+Symphony owns one narrow tracker mutation sequence for validated completed work:
 
-- Ticket mutations (state transitions, comments, PR metadata) are typically handled by the coding
-  agent using tools defined by the workflow prompt.
-- The service remains a scheduler/runner and tracker reader.
-- Workflow-specific success often means "reached the next handoff state" (for example
-  `Human Review`) rather than tracker terminal state `Done`.
-- If the `linear_graphql` client-side tool extension is implemented, it is still part of the agent
-  toolchain rather than orchestrator business logic.
+- The coding agent creates the repository PR and atomically writes completion evidence, but MUST NOT
+  publish the completed-work handoff comment or advance the issue state.
+- Symphony validates PIN-16 evidence, renders the handoff from allowlisted validated fields, ensures
+  and reads back the deterministic comment, then updates `tracker.handoff_state`.
+- Comment creation/readback or state-transition failure fails the attempt and is retried by existing
+  orchestrator scheduling; the state MUST NOT advance without a verified matching comment.
+- Other ticket mutations remain workflow/tooling concerns. The raw `linear_graphql` extension stays
+  available to the agent but is not the completed-work handoff authority.
 
 ## 12. Prompt Construction and Context Assembly
 
@@ -2206,8 +2229,8 @@ Use the same validation profiles as Section 17:
   Codex thread identity is already persisted per workspace.
 - TODO: Make observability settings configurable in workflow front matter without prescribing UI
   implementation details.
-- TODO: Add first-class tracker write APIs (comments/state transitions) in the orchestrator instead
-  of only via agent tools.
+- TODO: Extend first-class tracker write ownership beyond validated completed-work handoffs only when
+  another explicit semantic contract requires it.
 - TODO: Add pluggable issue tracker adapters beyond Linear.
 
 ### 18.3 Operational Validation Before Production (RECOMMENDED)

@@ -176,9 +176,10 @@ Linear comments are human-facing and semantic:
 - `## Agent Decomposition`: proposed child issues and approval needed.
 
 At Human Review, exactly one semantic agent comment should exist unless the
-issue was closed without human action. The agent must create the comment, read
-it back, and only then move the issue to `Human Review`. If readback fails, the
-agent should not move the issue.
+issue was closed without human action. For completed implementation work,
+Symphony creates the deterministic comment, reads it back, and only then moves
+the issue to the configured handoff state. The coding agent only writes the
+completion artifact and must not perform those completed-work Linear writes.
 
 For completed implementation work, the `## Agent Handoff` comment must include
 the validated repository PR URL plus the exact reviewer action. A run without a
@@ -192,8 +193,14 @@ from the engine-written run audit. Symphony validates those references against
 its current-run in-memory ledger, validates the PR URL against the workspace's
 `origin`, resolves the PR through `gh pr view`, and rejects the handoff on
 missing, inaccessible, malformed, stale, duplicate, or unmatched evidence.
-PIN-17 owns any future Linear publishing mutation; this validation step does
-not publish comments or change tracker state.
+Symphony hashes the issue ID, pinned plan digest, and validated semantic
+artifact identity (criterion set plus PR URL; not volatile proof event IDs)
+to derive the hidden handoff marker and a caller-supplied UUIDv4 Linear comment
+ID. It queries only that ID under the current issue with `first: 1`, creates it
+when absent, reads the exact body back even after ambiguous create outcomes,
+and only then updates `tracker.handoff_state`. Collisions, readback failures,
+and state failures fail closed and retry without creating another semantic
+handoff.
 
 ## Invariant-Driven Mode
 
@@ -226,9 +233,8 @@ agent-dashboard verification profile.
 - Do not silently overwrite external state.
 - Do not mutate Linear, GitHub, or Slack outside the issue/project scope.
 - Do not expand scope; create or propose follow-up issues instead.
-- Move to `Human Review` only after the matching semantic Linear comment has
-  been created and read back for the plan, proof, PR, question, blocker, or
-  decomposition.
+- For completed work, leave the issue active after writing evidence; Symphony
+  moves it only after its matching semantic handoff has been read back.
 
 ## Running Symphony
 

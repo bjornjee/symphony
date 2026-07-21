@@ -17,7 +17,13 @@ defmodule SymphonyElixir.CompletionEvidence do
   def path(workspace) when is_binary(workspace), do: Path.join(workspace, @artifact_path)
 
   @spec validate(Path.t(), Issue.t(), TaskContract.t(), observed_proofs(), keyword()) ::
-          {:ok, %{pull_request_url: String.t()}} | {:error, term()}
+          {:ok,
+           %{
+             artifact_digest: String.t(),
+             criteria: [%{criterion_id: String.t(), proof_event_id: String.t()}],
+             pull_request_url: String.t()
+           }}
+          | {:error, term()}
   def validate(workspace, %Issue{} = issue, %TaskContract{} = contract, observed_proofs, opts \\ [])
       when is_binary(workspace) and is_map(observed_proofs) do
     with :ok <- validate_observed_proof_limit(observed_proofs),
@@ -26,7 +32,12 @@ defmodule SymphonyElixir.CompletionEvidence do
          :ok <- validate_envelope(evidence, issue, contract),
          :ok <- validate_criteria(evidence, contract, observed_proofs),
          {:ok, pull_request_url} <- validate_pull_request(evidence, workspace, opts) do
-      {:ok, %{pull_request_url: pull_request_url}}
+      {:ok,
+       %{
+         artifact_digest: semantic_artifact_digest(evidence),
+         criteria: criterion_summaries(evidence),
+         pull_request_url: pull_request_url
+       }}
     end
   end
 
@@ -150,6 +161,37 @@ defmodule SymphonyElixir.CompletionEvidence do
         {:error, _reason} = error -> {:halt, error}
       end
     end)
+  end
+
+  defp criterion_summaries(evidence) do
+    Enum.map(evidence["criteria"], fn criterion ->
+      %{
+        criterion_id: criterion["criterion_id"],
+        proof_event_id: get_in(criterion, ["proof", "event_id"])
+      }
+    end)
+  end
+
+  defp semantic_artifact_digest(evidence) do
+    criterion_ids = Enum.map(evidence["criteria"], & &1["criterion_id"])
+
+    :crypto.hash(
+      :sha256,
+      [
+        "completion-evidence:v1",
+        0,
+        evidence["issue_id"],
+        0,
+        evidence["issue_identifier"],
+        0,
+        evidence["plan_digest"],
+        0,
+        Enum.intersperse(criterion_ids, <<0>>),
+        0,
+        evidence["pull_request_url"]
+      ]
+    )
+    |> Base.encode16(case: :lower)
   end
 
   defp validate_proof(

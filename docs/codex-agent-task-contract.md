@@ -98,9 +98,12 @@ Agents must:
   successful command proof event from the current run
 - include an HTTPS GitHub pull request URL for the workspace's `origin`
   repository
+- do not create the completed-work Linear handoff comment or move the issue;
+  Symphony owns those writes after evidence validation
 
-Symphony validates the completion envelope after a normal Codex turn and before
-accepting a handoff transition. Free-form proof, issue checkbox state, edited
+Symphony validates the completion envelope after a normal Codex turn, renders
+one deterministic semantic handoff, reads it back, and only then performs the
+configured handoff transition. Free-form proof, issue checkbox state, edited
 audit JSON, agent-supplied exit codes, stale plan digests, partial or duplicate
 criterion coverage, and non-PR or cross-repository URLs fail closed. The audit
 file exposes proof event IDs for the agent and reviewer, while the in-memory

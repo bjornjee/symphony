@@ -28,12 +28,60 @@ defmodule SymphonyElixir.CompletionEvidenceTest do
     observed = observed_proofs(context.contract)
     write_evidence(context, valid_evidence(context, observed))
 
-    assert {:ok, %{pull_request_url: @pr_url}} =
+    assert {:ok,
+            %{
+              pull_request_url: @pr_url,
+              artifact_digest: artifact_digest,
+              criteria: criteria
+            }} =
              CompletionEvidence.validate(
                context.workspace,
                context.task,
                context.contract,
                observed,
+               validation_opts()
+             )
+
+    assert artifact_digest =~ ~r/^[a-f0-9]{64}$/
+
+    assert Enum.map(criteria, & &1.criterion_id) ==
+             Enum.map(context.contract.acceptance_criteria, & &1.id)
+
+    assert Enum.all?(criteria, &String.starts_with?(&1.proof_event_id, "proof-"))
+  end
+
+  test "keeps semantic artifact identity stable when a retry regenerates proof event ids", context do
+    observed = observed_proofs(context.contract)
+    evidence = valid_evidence(context, observed)
+    write_evidence(context, evidence)
+
+    assert {:ok, %{artifact_digest: first_digest}} =
+             CompletionEvidence.validate(
+               context.workspace,
+               context.task,
+               context.contract,
+               observed,
+               validation_opts()
+             )
+
+    retried_criteria =
+      evidence["criteria"]
+      |> Enum.with_index(1)
+      |> Enum.map(fn {criterion, index} ->
+        put_in(criterion, ["proof", "event_id"], "retry-proof-#{index}")
+      end)
+
+    retried_observed =
+      Map.new(1..length(retried_criteria), &{"retry-proof-#{&1}", %{exit_code: 0}})
+
+    write_evidence(context, %{evidence | "criteria" => retried_criteria})
+
+    assert {:ok, %{artifact_digest: ^first_digest}} =
+             CompletionEvidence.validate(
+               context.workspace,
+               context.task,
+               context.contract,
+               retried_observed,
                validation_opts()
              )
   end
