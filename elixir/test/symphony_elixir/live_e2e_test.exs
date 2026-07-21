@@ -640,8 +640,8 @@ defmodule SymphonyElixir.LiveE2ETest do
       hook_after_create: pilot_after_create_hook(context.pilot?),
       codex_command: context.worker_setup.codex_command,
       codex_approval_policy: "never",
-      codex_turn_timeout_ms: 600_000,
-      codex_stall_timeout_ms: 600_000,
+      codex_turn_timeout_ms: if(context.pilot?, do: 240_000, else: 600_000),
+      codex_stall_timeout_ms: if(context.pilot?, do: 180_000, else: 600_000),
       observability_enabled: false,
       prompt: live_issue_prompt(context.pilot?, project["slugId"])
     )
