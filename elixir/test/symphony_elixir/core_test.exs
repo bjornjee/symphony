@@ -1,6 +1,42 @@
 defmodule SymphonyElixir.CoreTest do
   use SymphonyElixir.TestSupport
 
+  alias SymphonyElixir.Linear.TaskContract
+  alias SymphonyElixir.TaskContractFixtures
+
+  defp valid_handoff_evidence(_workspace, _issue, contract, _proofs, _opts) do
+    {:ok,
+     %{
+       pull_request_url: "https://github.com/bjornjee/symphony/pull/42",
+       artifact_digest: String.duplicate("a", 64),
+       criteria:
+         Enum.map(contract.acceptance_criteria, fn criterion ->
+           %{criterion_id: criterion.id, proof_event_id: "proof-#{criterion.id}"}
+         end)
+     }}
+  end
+
+  defp valid_handoff_publisher(_issue, _contract, _evidence, opts) do
+    {:ok,
+     %{
+       comment_id: "123e4567-e89b-42d3-a456-426614174000",
+       issue_state: Keyword.fetch!(opts, :handoff_state)
+     }}
+  end
+
+  test "agent runner maps every run outcome to a supported Codex goal state" do
+    assert AgentRunner.goal_status_for_result_for_test({:ok, %{issue_active: true, issue_routable: true}}) == "active"
+
+    assert AgentRunner.goal_status_for_result_for_test({:ok, %{issue_active: false, issue_routable: true}}) == "complete"
+
+    assert AgentRunner.goal_status_for_result_for_test({:ok, %{issue_active: true, issue_routable: false}}) == "complete"
+
+    assert AgentRunner.goal_status_for_result_for_test({:error, {:turn_input_required, %{}}}) == "blocked"
+
+    assert AgentRunner.goal_status_for_result_for_test({:error, {:approval_required, %{}}}) == "blocked"
+    assert AgentRunner.goal_status_for_result_for_test({:error, :turn_timeout}) == "active"
+  end
+
   test "config defaults and validation checks" do
     write_workflow_file!(Workflow.workflow_file_path(),
       tracker_api_token: nil,
@@ -17,6 +53,7 @@ defmodule SymphonyElixir.CoreTest do
     assert config.tracker.terminal_states == ["Closed", "Cancelled", "Canceled", "Duplicate", "Done"]
     assert config.tracker.assignee == nil
     assert config.tracker.claim_state == nil
+    assert config.tracker.handoff_state == "Human Review"
     assert config.agent.max_turns == 20
 
     write_workflow_file!(Workflow.workflow_file_path(), poll_interval_ms: "invalid")
@@ -37,6 +74,13 @@ defmodule SymphonyElixir.CoreTest do
 
     write_workflow_file!(Workflow.workflow_file_path(), max_turns: 5)
     assert Config.settings!().agent.max_turns == 5
+
+    write_workflow_file!(Workflow.workflow_file_path(), tracker_handoff_state: "Code Review")
+    assert Config.settings!().tracker.handoff_state == "Code Review"
+
+    write_workflow_file!(Workflow.workflow_file_path(), tracker_handoff_state: "")
+    assert {:error, {:invalid_workflow_config, message}} = Config.validate!()
+    assert message =~ "handoff_state"
 
     write_workflow_file!(Workflow.workflow_file_path(), tracker_active_states: "Todo,  Review,")
     assert {:error, {:invalid_workflow_config, message}} = Config.validate!()
@@ -1294,6 +1338,212 @@ defmodule SymphonyElixir.CoreTest do
     assert prompt =~ "Ticket S-4"
   end
 
+  test "prompt builder supplies the pinned machine-evidence contract" do
+    write_workflow_file!(Workflow.workflow_file_path(), prompt: "Ticket {{ issue.identifier }}")
+    issue = TaskContractFixtures.issue(%{identifier: "PIN-16"})
+    assert {:ok, contract} = TaskContract.from_issue(issue)
+
+    prompt = PromptBuilder.build_prompt(issue, task_contract: contract)
+
+    assert prompt =~ ".symphony/completion-evidence.json"
+    assert prompt =~ contract.digest
+    assert prompt =~ "run_audit_command"
+    assert prompt =~ "pull_request_url"
+
+    for criterion <- contract.acceptance_criteria do
+      assert prompt =~ criterion.id
+      assert prompt =~ criterion.text
+    end
+  end
+
+  test "agent runner rejects handoff when completion evidence is missing" do
+    workspace =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-handoff-evidence-#{System.unique_integer([:positive, :monotonic])}"
+      )
+
+    File.mkdir_p!(workspace)
+    on_exit(fn -> File.rm_rf(workspace) end)
+
+    issue = TaskContractFixtures.issue(%{state: "Human Review"})
+    assert {:ok, contract} = TaskContract.from_issue(issue)
+
+    assert {:error, {:handoff_evidence_invalid, :completion_evidence_missing}} =
+             AgentRunner.validate_handoff_for_test(
+               workspace,
+               issue,
+               contract,
+               %{},
+               origin_url: "git@github.com:bjornjee/symphony.git"
+             )
+  end
+
+  test "agent runner publishes validated evidence before completing an active issue" do
+    issue = TaskContractFixtures.issue(%{state: "In Progress"})
+    assert {:ok, contract} = TaskContract.from_issue(issue)
+    parent = self()
+
+    publisher = fn published_issue, published_contract, evidence, opts ->
+      send(parent, {:handoff_published, published_issue, published_contract, evidence, opts})
+      {:ok, %{comment_id: "comment-1", issue_state: "Human Review"}}
+    end
+
+    assert {:ok,
+            %{
+              continuation: :done,
+              issue_state: "Human Review",
+              pull_request_url: "https://github.com/bjornjee/symphony/pull/42",
+              handoff_comment_id: "comment-1"
+            }} =
+             AgentRunner.handoff_after_turn_for_test(
+               System.tmp_dir!(),
+               issue,
+               issue,
+               contract,
+               %{},
+               completion_evidence_validator: &valid_handoff_evidence/5,
+               handoff_publisher: publisher,
+               handoff_state: "Human Review"
+             )
+
+    assert_receive {:handoff_published, ^issue, ^contract, _evidence, publish_opts}
+    assert publish_opts[:handoff_state] == "Human Review"
+    assert is_function(publish_opts[:event_sink], 2)
+  end
+
+  test "agent runner continues when an active issue has no completion artifact" do
+    issue = TaskContractFixtures.issue(%{state: "In Progress"})
+    assert {:ok, contract} = TaskContract.from_issue(issue)
+
+    assert {:continue, ^issue} =
+             AgentRunner.handoff_after_turn_for_test(
+               System.tmp_dir!(),
+               issue,
+               issue,
+               contract,
+               %{},
+               completion_evidence_validator: fn _, _, _, _, _ ->
+                 {:error, :completion_evidence_missing}
+               end,
+               handoff_state: "Human Review"
+             )
+  end
+
+  test "agent runner reconciles a tracker state already at the configured handoff target" do
+    issue = TaskContractFixtures.issue(%{state: "In Progress"})
+    advanced_issue = %{issue | state: "Human Review"}
+    assert {:ok, contract} = TaskContract.from_issue(issue)
+    parent = self()
+
+    publisher = fn published_issue, _published_contract, _evidence, _opts ->
+      send(parent, {:handoff_reconciled, published_issue})
+      {:ok, %{comment_id: "comment-1", issue_state: "Human Review"}}
+    end
+
+    assert {:ok, %{issue_state: "Human Review", handoff_comment_id: "comment-1"}} =
+             AgentRunner.handoff_after_turn_for_test(
+               System.tmp_dir!(),
+               issue,
+               advanced_issue,
+               contract,
+               %{},
+               completion_evidence_validator: &valid_handoff_evidence/5,
+               handoff_publisher: publisher,
+               handoff_state: "Human Review"
+             )
+
+    assert_receive {:handoff_reconciled, ^advanced_issue}
+  end
+
+  test "agent runner rejects missing evidence at the configured handoff target" do
+    issue = TaskContractFixtures.issue(%{state: "In Progress"})
+    advanced_issue = %{issue | state: "Human Review"}
+    assert {:ok, contract} = TaskContract.from_issue(issue)
+
+    assert {:error, {:handoff_evidence_invalid, :completion_evidence_missing}} =
+             AgentRunner.handoff_after_turn_for_test(
+               System.tmp_dir!(),
+               issue,
+               advanced_issue,
+               contract,
+               %{},
+               completion_evidence_validator: fn _, _, _, _, _ ->
+                 {:error, :completion_evidence_missing}
+               end,
+               handoff_state: "Human Review"
+             )
+  end
+
+  test "agent runner rejects plan drift before reconciling the configured handoff target" do
+    issue = TaskContractFixtures.issue(%{state: "In Progress"})
+    assert {:ok, contract} = TaskContract.from_issue(issue)
+
+    advanced_issue = %{
+      issue
+      | state: "Human Review",
+        description:
+          String.replace(
+            issue.description,
+            "Deliver one concrete outcome.",
+            "Deliver a changed outcome."
+          )
+    }
+
+    assert {:ok, advanced_contract} = TaskContract.from_issue(advanced_issue)
+    refute advanced_contract.digest == contract.digest
+
+    assert {:error, {:plan_drift, contract_digest, advanced_digest}} =
+             AgentRunner.handoff_after_turn_for_test(
+               System.tmp_dir!(),
+               issue,
+               advanced_issue,
+               contract,
+               %{},
+               completion_evidence_validator: &valid_handoff_evidence/5,
+               handoff_publisher: &valid_handoff_publisher/4,
+               handoff_state: "Human Review"
+             )
+
+    assert contract_digest == contract.digest
+    assert advanced_digest == advanced_contract.digest
+  end
+
+  test "agent runner rejects tracker state advanced beyond the configured handoff target" do
+    issue = TaskContractFixtures.issue(%{state: "In Progress"})
+    advanced_issue = %{issue | state: "Done"}
+    assert {:ok, contract} = TaskContract.from_issue(issue)
+
+    assert {:error, {:handoff_state_advanced_before_publish, "Done"}} =
+             AgentRunner.handoff_after_turn_for_test(
+               System.tmp_dir!(),
+               issue,
+               advanced_issue,
+               contract,
+               %{},
+               completion_evidence_validator: &valid_handoff_evidence/5,
+               handoff_state: "Human Review"
+             )
+  end
+
+  test "handoff publisher uses configured tracker and default handoff state" do
+    write_workflow_file!(Workflow.workflow_file_path(), tracker_kind: "memory")
+    Application.put_env(:symphony_elixir, :memory_tracker_recipient, self())
+    on_exit(fn -> Application.delete_env(:symphony_elixir, :memory_tracker_recipient) end)
+
+    issue = TaskContractFixtures.issue(%{state: "In Progress"})
+    issue_id = issue.id
+    Application.put_env(:symphony_elixir, :memory_tracker_issues, [issue])
+    assert {:ok, contract} = TaskContract.from_issue(issue)
+    assert {:ok, evidence} = valid_handoff_evidence(nil, issue, contract, %{}, [])
+
+    assert {:ok, %{comment_id: comment_id, issue_state: "Human Review"}} =
+             SymphonyElixir.HandoffPublisher.publish(issue, contract, evidence)
+
+    assert_receive {:memory_tracker_comment, ^issue_id, ^comment_id, _body}
+    assert_receive {:memory_tracker_state_update, ^issue_id, "Human Review"}
+  end
+
   test "prompt builder does not duplicate an existing agent-dashboard invocation" do
     write_workflow_file!(Workflow.workflow_file_path(), prompt: "$agent-dashboard:chore\n\nTicket {{ issue.identifier }}")
 
@@ -1556,7 +1806,9 @@ defmodule SymphonyElixir.CoreTest do
           5)
             printf '%s\\n' '{\"id\":3,\"result\":{\"turn\":{\"id\":\"turn-1\"}}}'
             printf '%s\\n' '{\"method\":\"turn/completed\"}'
-            exit 0
+            ;;
+          6)
+            printf '%s\\n' '{\"id\":4,\"result\":{\"goal\":{\"status\":\"complete\"}}}'
             ;;
           *)
             ;;
@@ -1573,16 +1825,24 @@ defmodule SymphonyElixir.CoreTest do
       )
 
       issue = %Issue{
+        id: "issue-retain-workspace",
         identifier: "S-99",
         title: "Smoke test",
-        description: "Run and keep workspace",
+        description: valid_description(),
         state: "In Progress",
         url: "https://example.org/issues/S-99",
         labels: ["backend"]
       }
 
       before = MapSet.new(File.ls!(workspace_root))
-      assert :ok = AgentRunner.run(issue)
+
+      assert :ok =
+               AgentRunner.run(issue, nil,
+                 issue_state_fetcher: fn [_issue_id] -> {:ok, [issue]} end,
+                 completion_evidence_validator: &valid_handoff_evidence/5,
+                 handoff_publisher: &valid_handoff_publisher/4
+               )
+
       entries_after = MapSet.new(File.ls!(workspace_root))
 
       created =
@@ -1645,6 +1905,9 @@ defmodule SymphonyElixir.CoreTest do
               printf '%s\\n' '{\"id\":3,\"result\":{\"turn\":{\"id\":\"turn-live\"}}}'
               printf '%s\\n' '{\"method\":\"turn/completed\"}'
               ;;
+            6)
+              printf '%s\\n' '{\"id\":4,\"result\":{\"goal\":{\"status\":\"complete\"}}}'
+              ;;
             *)
               ;;
           esac
@@ -1664,7 +1927,7 @@ defmodule SymphonyElixir.CoreTest do
         id: "issue-live-updates",
         identifier: "MT-99",
         title: "Smoke test",
-        description: "Capture codex updates",
+        description: valid_description(),
         state: "In Progress",
         url: "https://example.org/issues/MT-99",
         labels: ["backend"]
@@ -1676,7 +1939,9 @@ defmodule SymphonyElixir.CoreTest do
                AgentRunner.run(
                  issue,
                  test_pid,
-                 issue_state_fetcher: fn [_issue_id] -> {:ok, [%{issue | state: "Done"}]} end
+                 issue_state_fetcher: fn [_issue_id] -> {:ok, [issue]} end,
+                 completion_evidence_validator: &valid_handoff_evidence/5,
+                 handoff_publisher: &valid_handoff_publisher/4
                )
 
       assert_receive {:codex_worker_update, "issue-live-updates",
@@ -1692,7 +1957,7 @@ defmodule SymphonyElixir.CoreTest do
       assert_receive {:worker_completion_info, "issue-live-updates",
                       %{
                         continuation: :done,
-                        issue_state: "Done",
+                        issue_state: "Human Review",
                         issue_active: false
                       }},
                      500
@@ -1748,6 +2013,9 @@ defmodule SymphonyElixir.CoreTest do
               printf '%s\\n' '{\"method\":\"codex/event/exec_command_end\",\"params\":{\"msg\":{\"exit_code\":0}}}'
               printf '%s\\n' '{\"method\":\"turn/completed\",\"params\":{\"turn\":{\"status\":\"completed\"}}}'
               ;;
+            6)
+              printf '%s\\n' '{\"id\":4,\"result\":{\"goal\":{\"status\":\"complete\"}}}'
+              ;;
             *)
               ;;
           esac
@@ -1767,7 +2035,7 @@ defmodule SymphonyElixir.CoreTest do
         id: "issue-audit",
         identifier: "MT-AUDIT",
         title: "Audit test",
-        description: "Capture audit files",
+        description: valid_description(),
         state: "In Progress",
         url: "https://example.org/issues/MT-AUDIT",
         labels: ["backend"]
@@ -1777,7 +2045,9 @@ defmodule SymphonyElixir.CoreTest do
                AgentRunner.run(
                  issue,
                  self(),
-                 issue_state_fetcher: fn [_issue_id] -> {:ok, [%{issue | state: "Done"}]} end
+                 issue_state_fetcher: fn [_issue_id] -> {:ok, [issue]} end,
+                 completion_evidence_validator: &valid_handoff_evidence/5,
+                 handoff_publisher: &valid_handoff_publisher/4
                )
 
       assert {:ok, workspace} = SymphonyElixir.PathSafety.canonicalize(Path.join(workspace_root, "MT-AUDIT"))
@@ -1803,6 +2073,13 @@ defmodule SymphonyElixir.CoreTest do
 
       assert Enum.any?(audit_events, &(&1["event"] == "workspace_prepared"))
       assert Enum.any?(audit_events, &(&1["event"] == "codex_turn_completed"))
+
+      assert Enum.any?(audit_events, fn event ->
+               event["event"] == "handoff_published" and
+                 event["comment_id"] == "123e4567-e89b-42d3-a456-426614174000" and
+                 event["issue_state"] == "Human Review"
+             end)
+
       assert Enum.any?(audit_events, &(&1["event"] == "run_completed"))
       assert Enum.any?(audit_events, &(&1["phase"] == "command" and &1["command"] == "mix test"))
       refute Enum.any?(audit_events, &(&1["detail"] == "downloading dependency chunk 1"))
@@ -1877,7 +2154,7 @@ defmodule SymphonyElixir.CoreTest do
         id: "issue-ssh-failover",
         identifier: "MT-SSH-FAILOVER",
         title: "Do not fail over within a single worker run",
-        description: "Surface the startup failure to the orchestrator",
+        description: valid_description(),
         state: "In Progress"
       }
 
@@ -1944,6 +2221,9 @@ defmodule SymphonyElixir.CoreTest do
             printf '%s\\n' '{"id":3,"result":{"turn":{"id":"turn-cont-2"}}}'
             printf '%s\\n' '{"method":"turn/completed"}'
             ;;
+          7)
+            printf '%s\\n' '{"id":4,"result":{"goal":{"status":"complete"}}}'
+            ;;
         esac
       done
       """)
@@ -1967,36 +2247,46 @@ defmodule SymphonyElixir.CoreTest do
         Process.put(:agent_turn_fetch_count, attempt)
         send(parent, {:issue_state_fetch, attempt})
 
-        state =
-          if attempt == 1 do
-            "In Progress"
-          else
-            "Done"
-          end
-
         {:ok,
          [
            %Issue{
              id: "issue-continue",
              identifier: "MT-247",
              title: "Continue until done",
-             description: "Still active after first turn",
-             state: state
+             description: valid_description(),
+             state: "In Progress"
            }
          ]}
+      end
+
+      evidence_validator = fn workspace, validated_issue, contract, proofs, opts ->
+        count = Process.get(:agent_turn_validation_count, 0) + 1
+        Process.put(:agent_turn_validation_count, count)
+
+        if count == 1 do
+          {:error, :completion_evidence_missing}
+        else
+          valid_handoff_evidence(workspace, validated_issue, contract, proofs, opts)
+        end
       end
 
       issue = %Issue{
         id: "issue-continue",
         identifier: "MT-247",
         title: "Continue until done",
-        description: "Still active after first turn",
+        description: valid_description(),
         state: "In Progress",
         url: "https://example.org/issues/MT-247",
         labels: []
       }
 
-      assert :ok = AgentRunner.run(issue, nil, issue_state_fetcher: state_fetcher)
+      assert :ok =
+               AgentRunner.run(issue, nil,
+                 issue_state_fetcher: state_fetcher,
+                 completion_evidence_validator: evidence_validator,
+                 handoff_publisher: &valid_handoff_publisher/4
+               )
+
       assert_receive {:issue_state_fetch, 1}
       assert_receive {:issue_state_fetch, 2}
 
@@ -2004,7 +2294,16 @@ defmodule SymphonyElixir.CoreTest do
 
       assert length(Enum.filter(lines, &String.starts_with?(&1, "RUN:"))) == 1
       assert length(Enum.filter(lines, &String.contains?(&1, "\"method\":\"thread/start\""))) == 1
-      assert length(Enum.filter(lines, &String.contains?(&1, "\"method\":\"thread/goal/set\""))) == 1
+      assert length(Enum.filter(lines, &String.contains?(&1, "\"method\":\"thread/goal/set\""))) == 2
+
+      assert lines
+             |> Enum.filter(&String.starts_with?(&1, "JSON:"))
+             |> Enum.map(&String.trim_leading(&1, "JSON:"))
+             |> Enum.map(&Jason.decode!/1)
+             |> Enum.any?(fn payload ->
+               payload["method"] == "thread/goal/set" and
+                 payload["params"]["status"] == "complete"
+             end)
 
       turn_texts =
         lines
@@ -2022,7 +2321,8 @@ defmodule SymphonyElixir.CoreTest do
       refute Enum.at(turn_texts, 1) =~ "You are an agent for this repository."
       assert Enum.at(turn_texts, 1) =~ "Continuation guidance:"
       assert Enum.at(turn_texts, 1) =~ "continuation turn #2 of 3"
-      assert Enum.at(turn_texts, 1) =~ "close the Linear handoff before doing more implementation"
+      assert Enum.at(turn_texts, 1) =~ "refresh that artifact before doing more implementation"
+      assert Enum.at(turn_texts, 1) =~ "Symphony owns those external writes after validation"
       assert Enum.at(turn_texts, 1) =~ "If a PR, commit, or proof result already exists"
       assert Enum.at(turn_texts, 1) =~ "Record the reason for the extra turn in `.symphony/run-audit.md`"
 
@@ -2035,7 +2335,7 @@ defmodule SymphonyElixir.CoreTest do
         |> Enum.map(&Jason.decode!/1)
         |> Enum.find(&(&1["event"] == "codex_turn_continuing"))
 
-      assert continuation_audit["reason"] == "issue_still_active_and_routable"
+      assert continuation_audit["reason"] == "handoff_evidence_pending"
       assert continuation_audit["issue_state"] == "In Progress"
       assert continuation_audit["previous_turn_number"] == 1
       assert continuation_audit["turn_number"] == 2
@@ -2095,6 +2395,9 @@ defmodule SymphonyElixir.CoreTest do
             printf '%s\\n' '{"id":3,"result":{"turn":{"id":"turn-max-2"}}}'
             printf '%s\\n' '{"method":"turn/completed"}'
             ;;
+          7)
+            printf '%s\\n' '{"id":4,"result":{"goal":{"status":"active"}}}'
+            ;;
         esac
       done
       """)
@@ -2118,7 +2421,7 @@ defmodule SymphonyElixir.CoreTest do
              id: "issue-max-turns",
              identifier: "MT-248",
              title: "Stop at max turns",
-             description: "Still active",
+             description: valid_description(),
              state: "In Progress"
            }
          ]}
@@ -2128,7 +2431,7 @@ defmodule SymphonyElixir.CoreTest do
         id: "issue-max-turns",
         identifier: "MT-248",
         title: "Stop at max turns",
-        description: "Still active",
+        description: valid_description(),
         state: "In Progress",
         url: "https://example.org/issues/MT-248",
         labels: []
@@ -2138,7 +2441,8 @@ defmodule SymphonyElixir.CoreTest do
 
       trace = File.read!(trace_file)
       assert length(String.split(trace, "RUN", trim: true)) == 1
-      assert length(Regex.scan(~r/"method":"thread\/goal\/set"/, trace)) == 1
+      assert length(Regex.scan(~r/"method":"thread\/goal\/set"/, trace)) == 2
+      assert trace =~ ~s/"status":"active","threadId":"thread-max"/
       assert length(Regex.scan(~r/"method":"turn\/start"/, trace)) == 2
     after
       System.delete_env("SYMP_TEST_CODEx_TRACE")

@@ -41,8 +41,32 @@ defmodule SymphonyElixir.Tracker.Memory do
     :ok
   end
 
+  @spec create_comment(String.t(), String.t(), String.t()) :: :ok | {:error, term()}
+  def create_comment(issue_id, comment_id, body) do
+    comments = Process.get({__MODULE__, :comments}, %{})
+    Process.put({__MODULE__, :comments}, Map.put_new(comments, {issue_id, comment_id}, body))
+    send_event({:memory_tracker_comment, issue_id, comment_id, body})
+    :ok
+  end
+
+  @spec fetch_comment(String.t(), String.t()) ::
+          {:ok, %{id: String.t(), body: String.t()} | nil} | {:error, term()}
+  def fetch_comment(issue_id, comment_id) do
+    case Process.get({__MODULE__, :comments}, %{}) do
+      %{{^issue_id, ^comment_id} => body} -> {:ok, %{id: comment_id, body: body}}
+      _ -> {:ok, nil}
+    end
+  end
+
   @spec update_issue_state(String.t(), String.t()) :: :ok | {:error, term()}
   def update_issue_state(issue_id, state_name) do
+    updated_issues =
+      Enum.map(configured_issues(), fn
+        %Issue{id: ^issue_id} = issue -> %{issue | state: state_name}
+        issue -> issue
+      end)
+
+    Application.put_env(:symphony_elixir, :memory_tracker_issues, updated_issues)
     send_event({:memory_tracker_state_update, issue_id, state_name})
     :ok
   end

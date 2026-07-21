@@ -15,6 +15,27 @@ defmodule SymphonyElixir.Linear.Adapter do
   }
   """
 
+  @create_idempotent_comment_mutation """
+  mutation SymphonyCreateIdempotentComment($issueId: String!, $commentId: String!, $body: String!) {
+    commentCreate(input: {issueId: $issueId, id: $commentId, body: $body}) {
+      success
+    }
+  }
+  """
+
+  @comment_read_query """
+  query SymphonyReadIssueComment($issueId: String!, $commentId: ID!, $first: Int!) {
+    issue(id: $issueId) {
+      comments(first: $first, filter: {id: {eq: $commentId}}) {
+        nodes {
+          id
+          body
+        }
+      }
+    }
+  }
+  """
+
   @update_state_mutation """
   mutation SymphonyUpdateIssueState($issueId: String!, $stateId: String!) {
     issueUpdate(id: $issueId, input: {stateId: $stateId}) {
@@ -66,6 +87,41 @@ defmodule SymphonyElixir.Linear.Adapter do
     end
   end
 
+  @spec create_comment(String.t(), String.t(), String.t()) :: :ok | {:error, term()}
+  def create_comment(issue_id, comment_id, body)
+      when is_binary(issue_id) and is_binary(comment_id) and is_binary(body) do
+    with {:ok, response} <-
+           client_module().graphql(@create_idempotent_comment_mutation, %{
+             issueId: issue_id,
+             commentId: comment_id,
+             body: body
+           }),
+         true <- get_in(response, ["data", "commentCreate", "success"]) == true do
+      :ok
+    else
+      false -> {:error, :comment_create_failed}
+      {:error, reason} -> {:error, reason}
+      _ -> {:error, :comment_create_failed}
+    end
+  end
+
+  @spec fetch_comment(String.t(), String.t()) ::
+          {:ok, %{id: String.t(), body: String.t()} | nil} | {:error, term()}
+  def fetch_comment(issue_id, comment_id) when is_binary(issue_id) and is_binary(comment_id) do
+    with {:ok, response} <-
+           client_module().graphql(@comment_read_query, %{
+             issueId: issue_id,
+             commentId: comment_id,
+             first: 1
+           }),
+         nodes when is_list(nodes) <- get_in(response, ["data", "issue", "comments", "nodes"]) do
+      decode_comment(nodes, comment_id)
+    else
+      {:error, reason} -> {:error, reason}
+      _ -> {:error, :comment_read_failed}
+    end
+  end
+
   @spec update_issue_state(String.t(), String.t()) :: :ok | {:error, term()}
   def update_issue_state(issue_id, state_name)
       when is_binary(issue_id) and is_binary(state_name) do
@@ -94,6 +150,15 @@ defmodule SymphonyElixir.Linear.Adapter do
   defp client_module do
     Application.get_env(:symphony_elixir, :linear_client_module, Client)
   end
+
+  defp decode_comment([], _comment_id), do: {:ok, nil}
+
+  defp decode_comment([%{"id" => comment_id, "body" => body}], comment_id)
+       when is_binary(body) do
+    {:ok, %{id: comment_id, body: body}}
+  end
+
+  defp decode_comment(_nodes, _comment_id), do: {:error, :comment_read_failed}
 
   defp attached_cleanup_labels(issue, label_names) do
     label_names

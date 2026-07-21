@@ -1151,6 +1151,29 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
            }
   end
 
+  test "schema normalizes atom-keyed tracker cleanup callbacks and rejects malformed entries" do
+    assert {:ok, settings} =
+             Schema.parse(%{
+               tracker: %{
+                 cleanup_callbacks: %{
+                   completed: %{remove_labels: [" Codex-Ready "]},
+                   blocked: %{remove_labels: []}
+                 }
+               }
+             })
+
+    assert settings.tracker.cleanup_callbacks == %{
+             "completed" => %{"remove_labels" => ["codex-ready"]}
+           }
+
+    assert {:error, {:invalid_workflow_config, message}} =
+             Schema.parse(%{
+               tracker: %{cleanup_callbacks: %{"completed" => %{"remove_labels" => "invalid"}}}
+             })
+
+    assert message =~ "cleanup_callbacks"
+  end
+
   test "schema keeps workspace roots raw while sandbox helpers expand only for local use" do
     assert {:ok, settings} =
              Schema.parse(%{

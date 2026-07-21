@@ -11,8 +11,53 @@ defmodule SymphonyElixir.RunAudit do
   @jsonl_file "run-audit.jsonl"
   @markdown_file "run-audit.md"
   @max_preview_chars 160
+  @handoff_events [
+    :handoff_publish_started,
+    :handoff_comment_result,
+    :handoff_transition_reused,
+    :handoff_transition_updated,
+    :handoff_transition_ambiguous,
+    :handoff_transition_result,
+    :handoff_publish_result,
+    :handoff_publish_rejected,
+    :handoff_evidence_pending,
+    :handoff_evidence_rejected,
+    :handoff_publish_failed,
+    :handoff_evidence_validated,
+    :handoff_published
+  ]
+  @handoff_attr_keys [
+    :phase,
+    :status,
+    :thread_id,
+    :plan_digest,
+    :artifact_digest,
+    :evidence_result,
+    :comment_id,
+    :marker_key,
+    :transition_target,
+    :transition_result,
+    :issue_state,
+    :result,
+    :retry,
+    :ambiguous
+  ]
 
   @type event_name :: atom() | String.t()
+  @type handoff_event ::
+          :handoff_publish_started
+          | :handoff_comment_result
+          | :handoff_transition_reused
+          | :handoff_transition_updated
+          | :handoff_transition_ambiguous
+          | :handoff_transition_result
+          | :handoff_publish_result
+          | :handoff_publish_rejected
+          | :handoff_evidence_pending
+          | :handoff_evidence_rejected
+          | :handoff_publish_failed
+          | :handoff_evidence_validated
+          | :handoff_published
 
   @spec paths(Path.t()) :: %{audit_path: Path.t(), audit_events_path: Path.t()}
   def paths(workspace) when is_binary(workspace) do
@@ -71,16 +116,35 @@ defmodule SymphonyElixir.RunAudit do
     end)
   end
 
-  @spec append_codex_update(Path.t(), Issue.t(), map()) :: :ok
-  def append_codex_update(workspace, %Issue{} = issue, update)
-      when is_binary(workspace) and is_map(update) do
-    case codex_audit_attrs(update) do
-      nil -> :ok
-      attrs -> append(workspace, issue, :codex_update, attrs)
+  @spec append_handoff_event(Path.t(), Issue.t(), handoff_event(), map()) :: :ok
+  def append_handoff_event(workspace, %Issue{} = issue, event, attrs \\ %{})
+      when is_binary(workspace) and is_map(attrs) do
+    if event in @handoff_events do
+      attrs
+      |> Map.take(@handoff_attr_keys)
+      |> Map.filter(fn {_key, value} -> scalar?(value) end)
+      |> then(&append(workspace, issue, event, &1))
+    else
+      :ok
     end
   end
 
-  def append_codex_update(_workspace, _issue, _update), do: :ok
+  @spec append_codex_update(Path.t(), Issue.t(), map()) ::
+          {:ok, %{event_id: String.t(), exit_code: integer()} | nil}
+  def append_codex_update(workspace, %Issue{} = issue, update)
+      when is_binary(workspace) and is_map(update) do
+    case codex_audit_attrs(update) do
+      nil ->
+        {:ok, nil}
+
+      attrs ->
+        {attrs, proof} = maybe_attach_command_proof(attrs)
+        append(workspace, issue, :codex_update, attrs)
+        {:ok, proof}
+    end
+  end
+
+  def append_codex_update(_workspace, _issue, _update), do: {:ok, nil}
 
   defp codex_audit_attrs(%{event: :session_started} = update) do
     %{
@@ -141,6 +205,29 @@ defmodule SymphonyElixir.RunAudit do
     }
   end
 
+  defp method_attrs(
+         _event,
+         "item/completed",
+         %{
+           "params" => %{
+             "item" =>
+               %{
+                 "type" => "commandExecution",
+                 "exitCode" => exit_code
+               } = item
+           }
+         }
+       )
+       when is_integer(exit_code) do
+    %{
+      phase: "command",
+      status: "completed",
+      method: "item/completed",
+      command: Map.get(item, "command"),
+      exit_code: exit_code
+    }
+  end
+
   defp method_attrs(_event, "codex/event/exec_command_begin", payload) do
     %{
       phase: "command",
@@ -179,6 +266,21 @@ defmodule SymphonyElixir.RunAudit do
   end
 
   defp method_attrs(_event, _method, _payload), do: nil
+
+  defp maybe_attach_command_proof(
+         %{
+           phase: "command",
+           status: "completed",
+           method: method,
+           exit_code: exit_code
+         } = attrs
+       )
+       when method in ["codex/event/exec_command_end", "item/completed"] and is_integer(exit_code) do
+    event_id = "proof-" <> (:crypto.strong_rand_bytes(16) |> Base.url_encode64(padding: false))
+    {Map.put(attrs, :event_id, event_id), %{event_id: event_id, exit_code: exit_code}}
+  end
+
+  defp maybe_attach_command_proof(attrs), do: {attrs, nil}
 
   defp command_from_payload(payload) do
     get_in(payload, ["params", "msg", "command"]) ||
@@ -220,12 +322,17 @@ defmodule SymphonyElixir.RunAudit do
 
   defp normalize_value(%DateTime{} = value), do: DateTime.to_iso8601(value)
   defp normalize_value(value) when is_binary(value), do: preview(value)
+  defp normalize_value(value) when is_boolean(value), do: value
   defp normalize_value(value) when is_atom(value), do: to_string(value)
   defp normalize_value(value) when is_integer(value), do: value
   defp normalize_value(value) when is_float(value), do: value
-  defp normalize_value(value) when is_boolean(value), do: value
   defp normalize_value(nil), do: nil
   defp normalize_value(value), do: preview(value)
+
+  defp scalar?(value) do
+    is_binary(value) or is_atom(value) or is_integer(value) or is_float(value) or
+      is_boolean(value) or is_nil(value)
+  end
 
   defp drop_nil_values(map) do
     Map.reject(map, fn {_key, value} -> is_nil(value) end)

@@ -1,0 +1,47 @@
+{
+  "attempts": [
+    {
+      "attempt": 1,
+      "evidence_result": "pending",
+      "goal_status": "active",
+      "thread_id": "019f83fb-7423-7022-a1ff-b17b3dd32262"
+    },
+    {
+      "attempt": 2,
+      "evidence_result": "validated",
+      "goal_status": "complete",
+      "thread_id": "019f83fb-7423-7022-a1ff-b17b3dd32262"
+    }
+  ],
+  "command": "mise exec -- make pilot",
+  "completed_at": "2026-07-21T09:23:00.216505Z",
+  "criteria": [
+    {
+      "criterion_id": "ac-5e0952b7d37daa2d1394b7730cf5a8a9b5cb093b749f1c5645338115be481c63",
+      "outcome": "passed"
+    },
+    {
+      "criterion_id": "ac-fe0d8fcfc99d86a88f82855ae116d68dfb5f15e99dcaecf0050e2082ebe1ffb6",
+      "outcome": "passed"
+    }
+  ],
+  "evidence_result": "accepted",
+  "final_state": "Closed",
+  "handoff_comment_id": "336cf4f3-2388-4b79-84aa-08570d894a11",
+  "linear_issue": {
+    "id": "9d52a2db-928a-421c-ad48-45cc997d2e89",
+    "identifier": "PIN-24",
+    "url": "https://linear.app/pinkgu/issue/PIN-24/symphony-live-e2e-local-issue-for-symphony-live-e2e-local-1893"
+  },
+  "linear_project": {
+    "id": "606cf3ad-cfff-40d2-b058-fa7c4b2b61b2",
+    "url": "https://linear.app/pinkgu/project/symphony-live-e2e-local-1893-0f86ffd1667e"
+  },
+  "manifest_reused": true,
+  "manifest_sha256": "30ac6b989cf75f31b70883115f709228653fa2cc4519f6569a1f6e7bec1e9c1c",
+  "plan_digest": "6f63c2a43ed1e81159def6bc41ca047210c3000f32b4e54c619cc23e6a891c2b",
+  "pull_request_url": "https://github.com/bjornjee/symphony/pull/16",
+  "schema_version": 1,
+  "started_at": "2026-07-21T09:21:59.300594Z",
+  "thread_id": "019f83fb-7423-7022-a1ff-b17b3dd32262"
+}

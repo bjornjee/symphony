@@ -35,9 +35,11 @@ stricter approvals or sandboxing.
 
 Important boundary:
 
-- Symphony is a scheduler/runner and tracker reader.
-- Ticket writes (state transitions, comments, PR links) are typically performed by the coding agent
-  using tools available in the workflow/runtime environment.
+- Symphony is a scheduler/runner, tracker reader, and the publisher for validated completed-work
+  handoffs.
+- After validated completion evidence and a repository PR exist, Symphony owns the deterministic
+  handoff comment, readback verification, and configured handoff-state transition. Other ticket
+  writes remain workflow/tooling concerns unless another contract explicitly assigns ownership.
 - A successful run can end at a workflow-defined handoff state (for example `Human Review`), not
   necessarily `Done`.
 
@@ -60,8 +62,8 @@ Important boundary:
 - Rich web UI or multi-tenant control plane.
 - Prescribing a specific dashboard or terminal UI implementation.
 - General-purpose workflow engine or distributed job scheduler.
-- Built-in business logic for how to edit tickets, PRs, or comments. (That logic lives in the
-  workflow prompt and agent tooling.)
+- General-purpose business logic for editing tickets, PRs, or comments beyond the validated
+  completed-work handoff contract.
 - Mandating strong sandbox controls beyond what the coding agent and host OS provide.
 - Mandating a single default approval, sandbox, or operator-confirmation posture for all
   implementations.
@@ -221,6 +223,70 @@ Fields (logical):
 - `started_at`
 - `status`
 - `error` (OPTIONAL)
+
+#### 4.1.5.1 Execution Manifest
+
+Small engine-owned JSON document stored at `.symphony/execution-manifest.json` in one issue
+workspace.
+
+Fields:
+
+- `schema_version`
+- `task_contract_version`
+- `issue_id`
+- `issue_identifier`
+- `plan_digest` (versioned SHA-256 of canonical issue title and description)
+- `source_updated_at` (provenance only; not revision identity)
+- `pinned_at`
+
+The manifest is created atomically. An existing manifest MUST match the issue identity and digest
+and MUST NOT be overwritten on plan drift.
+
+New manifests also include `acceptance_criteria`, an ordered list of stable criterion `id` and
+canonical `text` pairs. Criterion IDs are content-derived and independent of checkbox state.
+Duplicate criterion text is invalid. Older pinned manifests without this additive field remain
+readable; the current task contract is the validation authority.
+
+#### 4.1.5.2 Completion Evidence
+
+Agent-owned JSON document stored at `.symphony/completion-evidence.json` in one issue workspace.
+The agent writes a temporary sibling and atomically renames it into place after proof commands and
+the repository pull request exist. Replacing an envelope for the same issue and plan digest is
+idempotent.
+
+Fields:
+
+- `schema_version` (`1`)
+- `issue_id`
+- `issue_identifier`
+- `plan_digest`
+- `criteria`, with exactly one entry per pinned acceptance criterion:
+  - `criterion_id`
+  - `proof.kind` (`run_audit_command`)
+  - `proof.event_id`
+- `pull_request_url`
+
+Symphony owns validation. A proof event ID MUST identify a successful command completion observed
+by the engine during the current run and retained in its bounded in-memory ledger. Workspace prose,
+checkbox state, edited audit files, and agent-asserted exit status are not proof. The PR URL MUST be
+an HTTPS GitHub `/pull/<positive integer>` URL whose owner and repository match the workspace
+`origin`. Validation reads only the current issue's bounded envelope, criteria, proof ledger, and
+repository origin, plus one repository-host lookup that MUST resolve the canonical PR URL.
+
+Explicit rejection classes include missing or oversized artifacts, malformed or unsupported
+schema, issue or digest mismatch, missing/unmatched/duplicate criteria, malformed/unobserved/failed
+proof, proof-ledger overflow, missing/invalid/unavailable PR URL, repository mismatch, and unavailable
+origin.
+
+After validation, Symphony derives a deterministic SHA-256 key from the issue ID, pinned plan
+digest, and validated semantic completion-artifact digest (criterion set plus PR URL). Current-run
+proof event IDs are excluded from the external identity and output so proof reruns converge. It
+renders one allowlisted `## Agent Handoff`, uses a
+UUIDv4 derived from that key as Linear's caller-supplied comment ID, and reads the exact comment back
+from the current issue with `first: 1`. Only then may it move the issue to
+`tracker.handoff_state`. Retries, restarts, concurrent attempts, and ambiguous comment-create
+responses reuse the same ID and verify the same body. A body collision, failed readback, or failed
+state transition fails the attempt without advancing unverified state.
 
 #### 4.1.6 Live Session (Agent Session Metadata)
 
@@ -580,6 +646,7 @@ not require recognizing or validating extension fields unless that extension is 
 - `tracker.api_key`: string or `$VAR`, canonical env `LINEAR_API_KEY` when `tracker.kind=linear`
 - `tracker.project_slug`: string, REQUIRED when `tracker.kind=linear`
 - `tracker.required_labels`: list of strings, default `[]`
+- `tracker.handoff_state`: non-empty string, default `Human Review`
 - `tracker.active_states`: list of strings, default `["Todo", "In Progress"]`
 - `tracker.terminal_states`: list of strings, default `["Closed", "Cancelled", "Canceled", "Duplicate", "Done"]`
 - `polling.interval_ms`: integer, default `30000`
@@ -734,6 +801,8 @@ An issue is dispatch-eligible only if all are true:
 - Per-state concurrency slots are available.
 - Blocker rule for `Todo` state passes:
   - If the issue state is `Todo`, do not dispatch when any blocker is non-terminal.
+- Its title and description form a valid `Codex Agent Task v1` contract. Candidate-specific
+  validation runs after the final tracker refresh and before claim-state mutation.
 
 Sorting order (stable intent):
 
@@ -838,12 +907,17 @@ Input: `issue.identifier`
 
 Algorithm summary:
 
-1. Sanitize identifier to `workspace_key`.
-2. Compute workspace path under workspace root.
-3. Ensure the workspace path exists as a directory.
-4. Mark `created_now=true` only if the directory was created during this call; otherwise
+1. Validate and fingerprint the refreshed issue before entering the workspace layer.
+2. Sanitize identifier to `workspace_key`.
+3. Compute workspace path under workspace root.
+4. Ensure the workspace path exists as a directory.
+5. Mark `created_now=true` only if the directory was created during this call; otherwise
    `created_now=false`.
-5. If `created_now=true`, run `after_create` hook if configured.
+6. If `created_now=true`, run `after_create` hook if configured.
+7. Atomically create or validate the execution manifest before `before_run` or Codex startup.
+8. After the first successful `thread/start`, atomically create
+   `.symphony/codex-thread.json` with schema version 1 and the returned thread id. On later attempts,
+   validate and reuse that create-only identity; never overwrite a different id.
 
 Notes:
 
@@ -956,8 +1030,17 @@ client to:
 - Start the app-server subprocess in the per-issue workspace.
 - Initialize the app-server session using the targeted Codex app-server protocol.
 - Create or resume a coding-agent thread according to the targeted protocol.
+- When a workspace has a persisted canonical thread id, resume it with `thread/resume` and that
+  exact `threadId`. A missing/rejected persisted thread is an attempt failure; the client MUST NOT
+  silently fall back to `thread/start`.
 - Set a durable thread goal for the current issue when the targeted protocol supports it. The goal
   MUST be set through the app-server protocol, not by sending slash-command text in the prompt.
+- Map lifecycle outcomes to supported goal states as a total operation:
+  - active work, retryable failures, max-turn handoff, and retry/restart -> `active`
+  - operator input or approval required -> `blocked`
+  - non-active, non-routable, or terminal tracker handoff -> `complete`
+- Failure to update a goal state fails the worker attempt. A resume failure leaves the durable
+  identity unchanged so a retry cannot fork history.
 - Supply the absolute per-issue workspace path as the thread/turn working directory wherever the
   targeted protocol accepts cwd.
 - Start the first turn with the rendered issue prompt.
@@ -975,6 +1058,7 @@ Session identifiers:
 - Extract `turn_id` from each turn identity returned by the targeted Codex app-server protocol.
 - Emit `session_id = "<thread_id>-<turn_id>"`
 - Reuse the same `thread_id` for all continuation turns inside one worker run
+- Reuse the persisted `thread_id` for later worker and process attempts in the same issue workspace
 
 ### 10.3 Streaming Turn Processing
 
@@ -983,7 +1067,12 @@ the active turn terminates.
 
 Completion conditions:
 
-- Targeted-protocol turn completion signal -> success
+- Targeted-protocol turn completion signal while the issue remains active and routable -> continue
+  within the configured turn bound
+- Targeted-protocol turn completion signal at a handoff boundary plus valid completion evidence ->
+  success and handoff-ready
+- Targeted-protocol turn completion signal at a handoff boundary with missing or invalid completion
+  evidence -> failure
 - Targeted-protocol turn failure signal -> failure
 - Targeted-protocol turn cancellation signal -> failure
 - turn timeout (`turn_timeout_ms`) -> failure
@@ -1130,12 +1219,17 @@ The `Agent Runner` wraps workspace + prompt + app-server client.
 
 Behavior:
 
-1. Create/reuse workspace for issue.
-2. Build prompt from workflow template.
-3. Start app-server session.
-4. Set the app-server thread goal for the issue.
-5. Start the first turn and forward app-server events to orchestrator.
-6. On any error, fail the worker attempt (the orchestrator will retry).
+1. Revalidate the task contract without trusting caller-supplied metadata.
+2. Create/reuse workspace for issue.
+3. Atomically create or validate the execution manifest.
+4. Read the workspace's canonical Codex thread identity, if present.
+5. Start app-server and either create the first thread or resume the exact canonical thread.
+6. Persist a newly created thread identity with an atomic create-only write before any turn.
+7. Set the app-server thread goal for the issue to `active`.
+8. Start the first turn and forward app-server events to orchestrator.
+9. Before each continuation turn, refresh the issue and require the same plan digest.
+10. Map the final attempt outcome to `active`, `blocked`, or `complete` and update the goal.
+11. On any error, fail the worker attempt (the orchestrator will retry).
 
 Note:
 
@@ -1155,6 +1249,15 @@ An implementation MUST support these tracker adapter operations:
 
 3. `fetch_issue_states_by_ids(issue_ids)`
    - Used for active-run reconciliation.
+
+4. `fetch_comment(issue_id, comment_id)`
+   - Reads at most one exact comment from the current issue for semantic handoff verification.
+
+5. `create_comment(issue_id, comment_id, body)`
+   - Creates a comment with a caller-supplied deterministic UUIDv4.
+
+6. `update_issue_state(issue_id, state_name)`
+   - Resolves and applies the configured handoff state after comment readback.
 
 ### 11.2 Query Semantics (Linear)
 
@@ -1215,15 +1318,16 @@ Orchestrator behavior on tracker errors:
 
 ### 11.5 Tracker Writes (Important Boundary)
 
-Symphony does not require first-class tracker write APIs in the orchestrator.
+Symphony owns one narrow tracker mutation sequence for validated completed work:
 
-- Ticket mutations (state transitions, comments, PR metadata) are typically handled by the coding
-  agent using tools defined by the workflow prompt.
-- The service remains a scheduler/runner and tracker reader.
-- Workflow-specific success often means "reached the next handoff state" (for example
-  `Human Review`) rather than tracker terminal state `Done`.
-- If the `linear_graphql` client-side tool extension is implemented, it is still part of the agent
-  toolchain rather than orchestrator business logic.
+- The coding agent creates the repository PR and atomically writes completion evidence, but MUST NOT
+  publish the completed-work handoff comment or advance the issue state.
+- Symphony validates PIN-16 evidence, renders the handoff from allowlisted validated fields, ensures
+  and reads back the deterministic comment, then updates `tracker.handoff_state`.
+- Comment creation/readback or state-transition failure fails the attempt and is retried by existing
+  orchestrator scheduling; the state MUST NOT advance without a verified matching comment.
+- Other ticket mutations remain workflow/tooling concerns. The raw `linear_graphql` extension stays
+  available to the agent but is not the completed-work handoff authority.
 
 ## 12. Prompt Construction and Context Assembly
 
@@ -1604,6 +1708,10 @@ After restart:
   - startup terminal workspace cleanup
   - fresh polling of active issues
   - re-dispatching eligible work
+- Re-dispatched work reads `.symphony/codex-thread.json` from that issue's preserved workspace and
+  resumes the exact Codex thread. Scheduler retry timing and live process state are not restored.
+- If the persisted thread is missing from or rejected by Codex app-server, the attempt fails without
+  replacing the durable identity or creating a new thread.
 
 ### 14.4 Operator Intervention Points
 
@@ -2023,6 +2131,10 @@ Unless otherwise noted, Sections 17.1 through 17.7 are `Core Conformance`. Bulle
 - Policy-related startup payloads use the implementation's documented approval/sandbox settings
 - Thread goal setup uses the targeted protocol when supported and fails the worker attempt if the
   app-server rejects the goal request
+- A create-only per-workspace thread identity survives worker/process retries locally and over SSH
+- A retry calls `thread/resume` with the exact persisted id and never falls back to `thread/start`
+- Active/retry, input-required, and terminal/non-active/non-routable outcomes map respectively to
+  `active`, `blocked`, and `complete`, and goal update failures fail the attempt
 - Thread and turn identities exposed by the targeted protocol are extracted and used to emit
   `session_started`
 - Request/response read timeout is enforced
@@ -2113,11 +2225,12 @@ Use the same validation profiles as Section 17:
   exposes the baseline endpoints/error semantics in Section 13.7 if shipped.
 - `linear_graphql` client-side tool extension exposes raw Linear GraphQL access through the
   app-server session using configured Symphony auth.
-- TODO: Persist retry queue and session metadata across process restarts.
+- TODO: Persist scheduler retry timing and live runtime metadata across process restarts; canonical
+  Codex thread identity is already persisted per workspace.
 - TODO: Make observability settings configurable in workflow front matter without prescribing UI
   implementation details.
-- TODO: Add first-class tracker write APIs (comments/state transitions) in the orchestrator instead
-  of only via agent tools.
+- TODO: Extend first-class tracker write ownership beyond validated completed-work handoffs only when
+  another explicit semantic contract requires it.
 - TODO: Add pluggable issue tracker adapters beyond Linear.
 
 ### 18.3 Operational Validation Before Production (RECOMMENDED)

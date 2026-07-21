@@ -17,17 +17,73 @@ defmodule SymphonyElixir.PromptBuilder do
       |> prompt_template!()
       |> parse_template!()
 
-    template
-    |> Solid.render!(
-      %{
-        "attempt" => Keyword.get(opts, :attempt),
-        "issue" => issue |> Map.from_struct() |> to_solid_map()
-      },
-      @render_opts
-    )
-    |> IO.iodata_to_binary()
-    |> maybe_prepend_agent_dashboard_invocation(issue)
+    prompt =
+      template
+      |> Solid.render!(
+        %{
+          "attempt" => Keyword.get(opts, :attempt),
+          "issue" => issue |> Map.from_struct() |> to_solid_map()
+        },
+        @render_opts
+      )
+      |> IO.iodata_to_binary()
+      |> maybe_prepend_agent_dashboard_invocation(issue)
+
+    maybe_append_completion_evidence_contract(prompt, Keyword.get(opts, :task_contract))
   end
+
+  defp maybe_append_completion_evidence_contract(prompt, %SymphonyElixir.Linear.TaskContract{} = contract) do
+    criteria =
+      Enum.map(contract.acceptance_criteria, fn criterion ->
+        %{
+          "criterion_id" => criterion.id,
+          "proof" => %{
+            "kind" => "run_audit_command",
+            "event_id" => "<engine-observed proof event_id>"
+          }
+        }
+      end)
+
+    envelope = %{
+      "schema_version" => 1,
+      "issue_id" => "<current issue id>",
+      "issue_identifier" => "<current issue identifier>",
+      "plan_digest" => contract.digest,
+      "criteria" => criteria,
+      "pull_request_url" => "https://github.com/<owner>/<repository>/pull/<number>"
+    }
+
+    criterion_index =
+      Enum.map_join(contract.acceptance_criteria, "\n", fn criterion ->
+        "- `#{criterion.id}`: #{criterion.text}"
+      end)
+
+    """
+    #{prompt}
+
+    Machine-validated handoff evidence (required before the configured handoff state):
+
+    - Write `.symphony/completion-evidence.json` only after the proof commands and repository PR exist.
+    - Copy `issue_id`, `issue_identifier`, and `plan_digest` exactly from `.symphony/execution-manifest.json`; do not infer them from prose or tracker state.
+    - Write a temporary file in `.symphony/`, then atomically rename it to that path. Replacing the same plan-digest envelope is idempotent.
+    - For every criterion below, reference an `event_id` from an engine-written command-completion audit event whose `exit_code` is `0` and whose proof command covers that criterion.
+    - Do not use prose, checkbox state, edited audit JSON, or your own claimed exit code as proof; Symphony validates references against its in-memory event ledger.
+    - `pull_request_url` must be an existing HTTPS GitHub pull request URL for this workspace's `origin` repository. Symphony resolves it with `gh pr view`; an invented, inaccessible, issue, compare, branch, or cross-repository URL is rejected.
+    - Do not create the completed-work `## Agent Handoff` comment or move the issue to the configured handoff state. Symphony validates this artifact, publishes and reads back the deterministic handoff, then performs that state transition.
+
+    Pinned acceptance criteria:
+    #{criterion_index}
+
+    Completion evidence v1 shape:
+
+    ```json
+    #{Jason.encode!(envelope, pretty: true)}
+    ```
+    """
+    |> String.trim()
+  end
+
+  defp maybe_append_completion_evidence_contract(prompt, _contract), do: prompt
 
   defp maybe_prepend_agent_dashboard_invocation(prompt, issue) when is_binary(prompt) do
     if Regex.match?(@agent_dashboard_prompt_start, String.trim_leading(prompt)) do
@@ -62,7 +118,7 @@ defmodule SymphonyElixir.PromptBuilder do
     - use the smallest sufficient proof during the edit loop; record known unrelated broad-gate failures once instead of retrying blindly
     - use RED/GREEN/REFACTOR when changing behavior and a test adds value
     - make the smallest scoped implementation, commit with `feat:`, and open a PR
-    - before moving the Linear issue to `Human Review`, leave exactly one human-facing comment with a PR URL or a real external blocker plus a concise audit summary
+    - after the PR and proof exist, atomically write the required completion evidence and leave completed-work Linear comment/state mutation to Symphony
     """
     |> String.trim()
   end

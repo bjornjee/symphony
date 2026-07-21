@@ -5,6 +5,7 @@ defmodule SymphonyElixir.TestSupport do
     quote do
       use ExUnit.Case
       import ExUnit.CaptureLog
+      import SymphonyElixir.TaskContractFixtures, only: [valid_description: 0]
 
       alias SymphonyElixir.AgentRunner
       alias SymphonyElixir.CLI
@@ -99,6 +100,7 @@ defmodule SymphonyElixir.TestSupport do
           tracker_assignee: nil,
           tracker_required_labels: [],
           tracker_claim_state: nil,
+          tracker_handoff_state: "Human Review",
           tracker_active_states: ["Todo", "In Progress"],
           tracker_terminal_states: ["Closed", "Cancelled", "Canceled", "Duplicate", "Done"],
           tracker_cleanup_callbacks: %{},
@@ -139,6 +141,7 @@ defmodule SymphonyElixir.TestSupport do
     tracker_assignee = Keyword.get(config, :tracker_assignee)
     tracker_required_labels = Keyword.get(config, :tracker_required_labels)
     tracker_claim_state = Keyword.get(config, :tracker_claim_state)
+    tracker_handoff_state = Keyword.get(config, :tracker_handoff_state)
     tracker_active_states = Keyword.get(config, :tracker_active_states)
     tracker_terminal_states = Keyword.get(config, :tracker_terminal_states)
     tracker_cleanup_callbacks = Keyword.get(config, :tracker_cleanup_callbacks)
@@ -180,6 +183,7 @@ defmodule SymphonyElixir.TestSupport do
         "  assignee: #{yaml_value(tracker_assignee)}",
         "  required_labels: #{yaml_value(tracker_required_labels)}",
         "  claim_state: #{yaml_value(tracker_claim_state)}",
+        "  handoff_state: #{yaml_value(tracker_handoff_state)}",
         "  active_states: #{yaml_value(tracker_active_states)}",
         "  terminal_states: #{yaml_value(tracker_terminal_states)}",
         "  cleanup_callbacks: #{yaml_value(tracker_cleanup_callbacks)}",
