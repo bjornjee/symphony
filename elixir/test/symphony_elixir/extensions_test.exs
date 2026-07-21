@@ -275,6 +275,7 @@ defmodule SymphonyElixir.ExtensionsTest do
 
     assert_receive {:graphql_called, comment_read_query, %{commentId: "comment-1", issueId: "issue-1", first: 1}}
 
+    assert comment_read_query =~ "$commentId: ID!"
     assert comment_read_query =~ "comments(first: $first"
     assert comment_read_query =~ "id: {eq: $commentId}"
 

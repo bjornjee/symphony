@@ -24,7 +24,7 @@ defmodule SymphonyElixir.Linear.Adapter do
   """
 
   @comment_read_query """
-  query SymphonyReadIssueComment($issueId: String!, $commentId: String!, $first: Int!) {
+  query SymphonyReadIssueComment($issueId: String!, $commentId: ID!, $first: Int!) {
     issue(id: $issueId) {
       comments(first: $first, filter: {id: {eq: $commentId}}) {
         nodes {
