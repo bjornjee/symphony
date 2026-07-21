@@ -866,6 +866,9 @@ Algorithm summary:
    `created_now=false`.
 6. If `created_now=true`, run `after_create` hook if configured.
 7. Atomically create or validate the execution manifest before `before_run` or Codex startup.
+8. After the first successful `thread/start`, atomically create
+   `.symphony/codex-thread.json` with schema version 1 and the returned thread id. On later attempts,
+   validate and reuse that create-only identity; never overwrite a different id.
 
 Notes:
 
@@ -978,8 +981,17 @@ client to:
 - Start the app-server subprocess in the per-issue workspace.
 - Initialize the app-server session using the targeted Codex app-server protocol.
 - Create or resume a coding-agent thread according to the targeted protocol.
+- When a workspace has a persisted canonical thread id, resume it with `thread/resume` and that
+  exact `threadId`. A missing/rejected persisted thread is an attempt failure; the client MUST NOT
+  silently fall back to `thread/start`.
 - Set a durable thread goal for the current issue when the targeted protocol supports it. The goal
   MUST be set through the app-server protocol, not by sending slash-command text in the prompt.
+- Map lifecycle outcomes to supported goal states as a total operation:
+  - active work, retryable failures, max-turn handoff, and retry/restart -> `active`
+  - operator input or approval required -> `blocked`
+  - non-active, non-routable, or terminal tracker handoff -> `complete`
+- Failure to update a goal state fails the worker attempt. A resume failure leaves the durable
+  identity unchanged so a retry cannot fork history.
 - Supply the absolute per-issue workspace path as the thread/turn working directory wherever the
   targeted protocol accepts cwd.
 - Start the first turn with the rendered issue prompt.
@@ -997,6 +1009,7 @@ Session identifiers:
 - Extract `turn_id` from each turn identity returned by the targeted Codex app-server protocol.
 - Emit `session_id = "<thread_id>-<turn_id>"`
 - Reuse the same `thread_id` for all continuation turns inside one worker run
+- Reuse the persisted `thread_id` for later worker and process attempts in the same issue workspace
 
 ### 10.3 Streaming Turn Processing
 
@@ -1155,12 +1168,14 @@ Behavior:
 1. Revalidate the task contract without trusting caller-supplied metadata.
 2. Create/reuse workspace for issue.
 3. Atomically create or validate the execution manifest.
-4. Build prompt from workflow template.
-5. Start app-server session.
-6. Set the app-server thread goal for the issue.
-7. Start the first turn and forward app-server events to orchestrator.
-8. Before each continuation turn, refresh the issue and require the same plan digest.
-9. On any error, fail the worker attempt (the orchestrator will retry).
+4. Read the workspace's canonical Codex thread identity, if present.
+5. Start app-server and either create the first thread or resume the exact canonical thread.
+6. Persist a newly created thread identity with an atomic create-only write before any turn.
+7. Set the app-server thread goal for the issue to `active`.
+8. Start the first turn and forward app-server events to orchestrator.
+9. Before each continuation turn, refresh the issue and require the same plan digest.
+10. Map the final attempt outcome to `active`, `blocked`, or `complete` and update the goal.
+11. On any error, fail the worker attempt (the orchestrator will retry).
 
 Note:
 
@@ -1629,6 +1644,10 @@ After restart:
   - startup terminal workspace cleanup
   - fresh polling of active issues
   - re-dispatching eligible work
+- Re-dispatched work reads `.symphony/codex-thread.json` from that issue's preserved workspace and
+  resumes the exact Codex thread. Scheduler retry timing and live process state are not restored.
+- If the persisted thread is missing from or rejected by Codex app-server, the attempt fails without
+  replacing the durable identity or creating a new thread.
 
 ### 14.4 Operator Intervention Points
 
@@ -2048,6 +2067,10 @@ Unless otherwise noted, Sections 17.1 through 17.7 are `Core Conformance`. Bulle
 - Policy-related startup payloads use the implementation's documented approval/sandbox settings
 - Thread goal setup uses the targeted protocol when supported and fails the worker attempt if the
   app-server rejects the goal request
+- A create-only per-workspace thread identity survives worker/process retries locally and over SSH
+- A retry calls `thread/resume` with the exact persisted id and never falls back to `thread/start`
+- Active/retry, input-required, and terminal/non-active/non-routable outcomes map respectively to
+  `active`, `blocked`, and `complete`, and goal update failures fail the attempt
 - Thread and turn identities exposed by the targeted protocol are extracted and used to emit
   `session_started`
 - Request/response read timeout is enforced
@@ -2138,7 +2161,8 @@ Use the same validation profiles as Section 17:
   exposes the baseline endpoints/error semantics in Section 13.7 if shipped.
 - `linear_graphql` client-side tool extension exposes raw Linear GraphQL access through the
   app-server session using configured Symphony auth.
-- TODO: Persist retry queue and session metadata across process restarts.
+- TODO: Persist scheduler retry timing and live runtime metadata across process restarts; canonical
+  Codex thread identity is already persisted per workspace.
 - TODO: Make observability settings configurable in workflow front matter without prescribing UI
   implementation details.
 - TODO: Add first-class tracker write APIs (comments/state transitions) in the orchestrator instead

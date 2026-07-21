@@ -1,6 +1,119 @@
 defmodule SymphonyElixir.AppServerTest do
   use SymphonyElixir.TestSupport
 
+  test "app server resumes the exact persisted thread without starting a replacement" do
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-app-server-resume-#{System.unique_integer([:positive])}"
+      )
+
+    try do
+      workspace_root = Path.join(test_root, "workspaces")
+      workspace = Path.join(workspace_root, "PIN-15")
+      codex_binary = Path.join(test_root, "fake-codex")
+      trace_file = Path.join(test_root, "codex-resume.trace")
+      File.mkdir_p!(workspace)
+
+      File.write!(codex_binary, """
+      #!/bin/sh
+      count=0
+      while IFS= read -r line; do
+        count=$((count + 1))
+        printf 'JSON:%s\n' "$line" >> "#{trace_file}"
+        case "$count" in
+          1) printf '%s\n' '{"id":1,"result":{}}' ;;
+          3) printf '%s\n' '{"id":5,"result":{"thread":{"id":"thread-persisted"},"cwd":"#{workspace}","approvalPolicy":"never","approvalsReviewer":"user","model":"test","modelProvider":"test","sandbox":"workspace-write"}}' ;;
+          4) printf '%s\n' '{"id":4,"result":{"goal":{"status":"blocked"}}}' ;;
+        esac
+      done
+      """)
+
+      File.chmod!(codex_binary, 0o755)
+
+      write_workflow_file!(Workflow.workflow_file_path(),
+        workspace_root: workspace_root,
+        codex_command: "#{codex_binary} app-server",
+        codex_approval_policy: "never"
+      )
+
+      assert {:ok, session} = AppServer.start_session(workspace, thread_id: "thread-persisted")
+      assert session.thread_id == "thread-persisted"
+      assert :ok = AppServer.set_goal_status(session, "blocked")
+
+      assert {:error, {:unsupported_goal_status, "paused"}} =
+               AppServer.set_goal_status(session, "paused")
+
+      assert :ok = AppServer.stop_session(session)
+
+      requests =
+        trace_file
+        |> File.read!()
+        |> String.split("\n", trim: true)
+        |> Enum.map(&String.trim_leading(&1, "JSON:"))
+        |> Enum.map(&Jason.decode!/1)
+
+      refute Enum.any?(requests, &(&1["method"] == "thread/start"))
+
+      assert resume = Enum.find(requests, &(&1["method"] == "thread/resume"))
+      assert resume["params"]["threadId"] == "thread-persisted"
+      assert {:ok, canonical_workspace} = SymphonyElixir.PathSafety.canonicalize(workspace)
+      assert resume["params"]["cwd"] == canonical_workspace
+      assert resume["params"]["approvalPolicy"] == "never"
+      assert resume["params"]["sandbox"] == "workspace-write"
+
+      assert goal_update = Enum.find(requests, &(&1["method"] == "thread/goal/set"))
+      assert goal_update["params"] == %{"threadId" => "thread-persisted", "status" => "blocked"}
+    after
+      File.rm_rf(test_root)
+    end
+  end
+
+  test "app server returns resume rejection without starting a replacement" do
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-app-server-resume-rejected-#{System.unique_integer([:positive])}"
+      )
+
+    try do
+      workspace_root = Path.join(test_root, "workspaces")
+      workspace = Path.join(workspace_root, "PIN-15")
+      codex_binary = Path.join(test_root, "fake-codex")
+      trace_file = Path.join(test_root, "codex-resume-rejected.trace")
+      File.mkdir_p!(workspace)
+
+      File.write!(codex_binary, """
+      #!/bin/sh
+      count=0
+      while IFS= read -r line; do
+        count=$((count + 1))
+        printf 'JSON:%s\n' "$line" >> "#{trace_file}"
+        case "$count" in
+          1) printf '%s\n' '{"id":1,"result":{}}' ;;
+          3) printf '%s\n' '{"id":5,"error":{"code":-32602,"message":"thread not found"}}' ;;
+        esac
+      done
+      """)
+
+      File.chmod!(codex_binary, 0o755)
+
+      write_workflow_file!(Workflow.workflow_file_path(),
+        workspace_root: workspace_root,
+        codex_command: "#{codex_binary} app-server"
+      )
+
+      assert {:error, {:response_error, %{"message" => "thread not found"}}} =
+               AppServer.start_session(workspace, thread_id: "thread-missing")
+
+      requests = File.read!(trace_file)
+      assert requests =~ "\"method\":\"thread/resume\""
+      refute requests =~ "\"method\":\"thread/start\""
+    after
+      File.rm_rf(test_root)
+    end
+  end
+
   test "app server rejects the workspace root and paths outside workspace root" do
     test_root =
       Path.join(

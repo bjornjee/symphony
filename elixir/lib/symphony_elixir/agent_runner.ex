@@ -5,10 +5,15 @@ defmodule SymphonyElixir.AgentRunner do
 
   require Logger
   alias SymphonyElixir.Codex.AppServer
+  alias SymphonyElixir.Codex.ThreadIdentity
   alias SymphonyElixir.{Config, ExecutionManifest, PromptBuilder, RunAudit, Tracker, Workspace}
   alias SymphonyElixir.Linear.{Issue, TaskContract}
 
   @type worker_host :: String.t() | nil
+
+  @doc false
+  @spec goal_status_for_result_for_test({:ok, map()} | {:error, term()}) :: String.t()
+  def goal_status_for_result_for_test(result), do: goal_status_for_result(result)
 
   @doc false
   @spec continue_with_issue_for_test(Issue.t(), ([String.t()] -> term())) ::
@@ -172,15 +177,26 @@ defmodule SymphonyElixir.AgentRunner do
 
     RunAudit.append(workspace, issue, :codex_app_server_starting, %{phase: "codex_app_server", status: "started"})
 
-    case AppServer.start_session(workspace, worker_host: worker_host) do
+    case start_codex_session(workspace, worker_host) do
       {:ok, session} ->
-        RunAudit.append(workspace, issue, :codex_app_server_started, %{phase: "codex_app_server", status: "completed"})
+        RunAudit.append(workspace, issue, :codex_app_server_started, %{
+          phase: "codex_app_server",
+          status: "completed",
+          thread_id: session.thread_id
+        })
 
         try do
-          case AppServer.set_goal(session, goal_objective(issue)) do
-            :ok ->
-              RunAudit.append(workspace, issue, :codex_goal_set, %{phase: "codex_goal", status: "completed"})
+          with {:ok, _thread_id} <-
+                 ThreadIdentity.pin(workspace, session.thread_id, worker_host),
+               :ok <- AppServer.set_goal(session, goal_objective(issue)) do
+            RunAudit.append(workspace, issue, :codex_goal_set, %{
+              phase: "codex_goal",
+              status: "completed",
+              goal_status: "active",
+              thread_id: session.thread_id
+            })
 
+            result =
               do_run_codex_turns(
                 session,
                 workspace,
@@ -192,8 +208,16 @@ defmodule SymphonyElixir.AgentRunner do
                 {1, max_turns}
               )
 
+            update_goal_for_result(session, workspace, issue, result)
+          else
             {:error, reason} = error ->
-              RunAudit.append(workspace, issue, :codex_goal_failed, %{phase: "codex_goal", status: "failed", reason: reason})
+              RunAudit.append(workspace, issue, :codex_goal_failed, %{
+                phase: "codex_goal",
+                status: "failed",
+                reason: reason,
+                thread_id: session.thread_id
+              })
+
               error
           end
         after
@@ -206,6 +230,55 @@ defmodule SymphonyElixir.AgentRunner do
         error
     end
   end
+
+  defp start_codex_session(workspace, worker_host) do
+    case ThreadIdentity.read(workspace, worker_host) do
+      :missing ->
+        AppServer.start_session(workspace, worker_host: worker_host)
+
+      {:ok, thread_id} ->
+        AppServer.start_session(workspace, worker_host: worker_host, thread_id: thread_id)
+
+      {:error, _reason} = error ->
+        error
+    end
+  end
+
+  defp update_goal_for_result(session, workspace, issue, result) do
+    goal_status = goal_status_for_result(result)
+
+    case AppServer.set_goal_status(session, goal_status) do
+      :ok ->
+        RunAudit.append(workspace, issue, :codex_goal_updated, %{
+          phase: "codex_goal",
+          status: "completed",
+          goal_status: goal_status,
+          thread_id: session.thread_id
+        })
+
+        result
+
+      {:error, reason} ->
+        RunAudit.append(workspace, issue, :codex_goal_failed, %{
+          phase: "codex_goal",
+          status: "failed",
+          goal_status: goal_status,
+          reason: reason,
+          thread_id: session.thread_id
+        })
+
+        {:error, {:goal_state_update_failed, goal_status, reason}}
+    end
+  end
+
+  defp goal_status_for_result({:ok, %{issue_active: false}}), do: "complete"
+  defp goal_status_for_result({:ok, %{issue_routable: false}}), do: "complete"
+
+  defp goal_status_for_result({:error, {reason, _details}})
+       when reason in [:turn_input_required, :approval_required],
+       do: "blocked"
+
+  defp goal_status_for_result(_result), do: "active"
 
   defp do_run_codex_turns(
          app_session,

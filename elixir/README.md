@@ -17,11 +17,13 @@ This directory contains the current Elixir/OTP implementation of Symphony, based
 2. Validates the issue against `Codex Agent Task v1` and fingerprints its title and description
 3. Creates a workspace per issue and atomically pins the approved revision in
    `.symphony/execution-manifest.json`
-4. Launches Codex in [App Server mode](https://developers.openai.com/codex/app-server/) inside the
+4. Atomically pins the first Codex thread id in `.symphony/codex-thread.json`, then resumes that
+   exact thread on later worker or process attempts
+5. Launches Codex in [App Server mode](https://developers.openai.com/codex/app-server/) inside the
    workspace
-5. Sets a Codex app-server thread goal for the Linear issue
-6. Sends a workflow prompt to Codex
-7. Keeps Codex working on the issue until the work is done, checking the pinned digest before each
+6. Sets a Codex app-server thread goal for the Linear issue
+7. Sends a workflow prompt to Codex
+8. Keeps Codex working on the issue until the work is done, checking the pinned digest before each
    continuation turn
 
 During app-server sessions, Symphony also serves a client-side `linear_graphql` tool so that repo
@@ -30,7 +32,9 @@ skills can make raw Linear GraphQL calls.
 The app-server goal is the durable run objective. The workflow prompt remains the detailed task
 packet: repository conventions, issue context, worktree/env expectations, verification profile, and
 handoff rules. This keeps unattended runs goal-driven without sending slash-command text such as
-`/goal` through the prompt.
+`/goal` through the prompt. Active and retryable attempts use goal status `active`, input-required
+outcomes use `blocked`, and non-active, non-routable, or terminal Linear handoffs use `complete`. A
+retry resumes the pinned thread and moves its goal back to `active` before starting another turn.
 
 Contract validation happens before the claim-state update, workspace creation, or any workspace
 hook. `updatedAt` is recorded in the execution manifest for provenance but does not identify a plan
@@ -44,6 +48,10 @@ If Codex reports that operator input, approval, or MCP elicitation is required, 
 issue claimed and exposes it as blocked in the runtime state, JSON API, and dashboard. Blocked
 entries are in memory only; restarting the orchestrator clears that blocked map, so any still-active
 Linear issue can become a dispatch candidate again after restart.
+
+The blocked scheduler entry is not durable, but the Codex thread and goal are. Re-dispatch resumes
+the pinned thread; if Codex rejects or cannot find that thread, Symphony fails the attempt and does
+not silently create a replacement.
 
 ## How to use it
 
