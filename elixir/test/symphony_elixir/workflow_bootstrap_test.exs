@@ -6,7 +6,7 @@ defmodule SymphonyElixir.WorkflowBootstrapTest do
 
   test "generates multiple workflow files from shared defaults" do
     in_temp_dir(fn root ->
-      manifest_path = Path.join(root, "WORKFLOWS.yml")
+      manifest_path = Path.join(root, "workflow-manifest.yml")
 
       File.write!(manifest_path, """
       defaults:
@@ -27,13 +27,13 @@ defmodule SymphonyElixir.WorkflowBootstrapTest do
         You are working on Linear issue `{{ issue.identifier }}`.
       workflows:
         - name: agent-dashboard
-          output_path: workflows/agent-dashboard/WORKFLOW.md
+          output_path: workflows/agent-dashboard/workflow.md
           tracker:
             project_slug: agent-project
           repository:
             url: git@github.com:bjornjee/agent-dashboard.git
         - name: symphony
-          output_path: workflows/symphony/WORKFLOW.md
+          output_path: workflows/symphony/workflow.md
           tracker:
             project_slug: symphony-project
           repository:
@@ -43,8 +43,8 @@ defmodule SymphonyElixir.WorkflowBootstrapTest do
       assert {:ok, workflows} = WorkflowBootstrap.bootstrap(manifest_path)
       assert Enum.map(workflows, & &1.name) == ["agent-dashboard", "symphony"]
 
-      agent_workflow_path = Path.join(root, "workflows/agent-dashboard/WORKFLOW.md")
-      symphony_workflow_path = Path.join(root, "workflows/symphony/WORKFLOW.md")
+      agent_workflow_path = Path.join(root, "workflows/agent-dashboard/workflow.md")
+      symphony_workflow_path = Path.join(root, "workflows/symphony/workflow.md")
 
       assert File.read!(agent_workflow_path) =~ "project_slug: \"agent-project\""
       assert File.read!(agent_workflow_path) =~ "root: \"~/Code/bjornjee/worktrees/agent-dashboard\""
@@ -62,8 +62,8 @@ defmodule SymphonyElixir.WorkflowBootstrapTest do
 
   test "check mode passes for current outputs and fails for stale outputs" do
     in_temp_dir(fn root ->
-      manifest_path = Path.join(root, "WORKFLOWS.yml")
-      output_path = Path.join(root, "generated/WORKFLOW.md")
+      manifest_path = Path.join(root, "workflow-manifest.yml")
+      output_path = Path.join(root, "generated/workflow.md")
 
       File.write!(manifest_path, """
       defaults:
@@ -73,7 +73,7 @@ defmodule SymphonyElixir.WorkflowBootstrapTest do
         First prompt.
       workflows:
         - name: sample
-          output_path: generated/WORKFLOW.md
+          output_path: generated/workflow.md
           tracker:
             project_slug: sample-project
       """)

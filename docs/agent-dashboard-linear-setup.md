@@ -238,14 +238,14 @@ agent-dashboard verification profile.
 
 ## Running Symphony
 
-`WORKFLOWS.yml` is the source of truth for production workflow setup. After
+`workflow-manifest.yml` is the source of truth for production workflow setup. After
 changing tracker, workspace, repository, or prompt settings, regenerate and
 check the workflow output:
 
 ```bash
 cd /Users/bjornjee/Code/bjornjee/symphony/elixir
-mise exec -- mix workflow.bootstrap --manifest ../WORKFLOWS.yml
-mise exec -- mix workflow.bootstrap --manifest ../WORKFLOWS.yml --check
+mise exec -- mix workflow.bootstrap --manifest ../workflow-manifest.yml
+mise exec -- mix workflow.bootstrap --manifest ../workflow-manifest.yml --check
 ```
 
 Run Symphony with the generated agent-dashboard workflow:
@@ -256,7 +256,7 @@ export LINEAR_API_KEY=...
 mise exec -- ./bin/symphony \
   --i-understand-that-this-will-be-running-without-the-usual-guardrails \
   --port 4000 \
-  /Users/bjornjee/Code/bjornjee/symphony/workflows/agent-dashboard/WORKFLOW.md
+  /Users/bjornjee/Code/bjornjee/symphony/workflows/agent-dashboard/workflow.md
 ```
 
 The dashboard is available on the selected port when `--port` is provided.

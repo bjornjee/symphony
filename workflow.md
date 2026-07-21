@@ -1,6 +1,6 @@
 ---
 agent:
-  max_concurrent_agents: 1
+  max_concurrent_agents: 2
   max_turns: 12
 codex:
   approval_policy: "never"
@@ -17,6 +17,7 @@ tracker:
   active_states: ["Todo", "In Progress", "Merging", "Rework"]
   api_key: "$LINEAR_API_KEY"
   claim_state: "In Progress"
+  handoff_state: "Human Review"
   kind: "linear"
   project_slug: "d42b2f1089ce"
   required_labels: ["codex-ready"]
@@ -104,11 +105,12 @@ The local workpad should include:
 - verification profile and proof command
 - invariant contract only when risk requires it
 
-Linear comments are human-facing only. Exactly one semantic agent comment must
-exist before moving the issue to `Human Review`, unless the issue is being
-closed without human action. Create the comment, read it back, then move the
-issue. If comment creation or readback fails, do not move the issue; leave one
-local workpad note and stop.
+Linear comments are human-facing only. For completed implementation work,
+atomically write `.symphony/completion-evidence.json` and leave the issue
+active. Do not create `## Agent Handoff` or move the issue: Symphony renders
+one deterministic handoff from validated evidence, reads it back, and only
+then performs `tracker.handoff_state`. Questions, blockers, and decomposition
+remain governed by their existing semantic comment contracts.
 
 ## Run audit and latency control
 
@@ -133,10 +135,11 @@ Keep latency bounded without weakening quality:
 - if blocked by missing human input, external auth, or unavailable services,
   stop with one semantic Linear comment instead of waiting live
 
-The final `## Agent Handoff`, `## Agent Blocked`, or `## Agent Question`
-Linear comment must include a concise `Audit:` line summarizing the local audit
-path, total runtime when known, slowest phase, and any proof gap. Do not paste
-raw logs or the full audit into Linear.
+Agent-authored `## Agent Blocked`, `## Agent Question`, or decomposition
+comments must include a concise `Audit:` line summarizing the local audit path,
+total runtime when known, slowest phase, and any proof gap. The completed-work
+handoff is Symphony-rendered from validated fields only. Do not paste raw logs
+or the full audit into Linear.
 
 ## Workflow selection
 
@@ -200,20 +203,20 @@ comment with the proposed child issue bodies and stop.
 ## Handoffs and guardrails
 
 - Do not wait live in the Codex session for human input.
-- Convert questions, approvals, blockers, and risky decisions into one concise
-  human-facing Linear comment: `## Agent Question`, `## Agent Handoff`, or
-  `## Agent Blocked`.
+- Convert questions, blockers, and risky decisions into one concise
+  human-facing Linear comment: `## Agent Question` or `## Agent Blocked`.
 - Fail closed on ambiguity.
 - Do not mutate Linear, GitHub, Slack, or any external system outside the issue
   and project scope.
 - Do not expand scope for adjacent cleanup; create or propose a follow-up issue.
-- Move to `Human Review` only after the matching semantic Linear comment has
-  been created and read back: proof, PR, blocker, question, or decomposition.
+- For completed work, do not create `## Agent Handoff` or move the issue;
+  atomically write completion evidence and let Symphony publish, read back,
+  and transition to `tracker.handoff_state`.
 - When implementation changes repository files, prefer a branch, commit, and PR
   before handoff. The human-facing comment must include either the PR URL or
   the reason no PR was created.
-- If a PR is created, the `## Agent Handoff` comment must include the PR URL and
-  the exact reviewer action before the issue enters `Human Review`.
+- If a PR is created, completion evidence must contain its validated URL;
+  Symphony includes it and the exact reviewer action in `## Agent Handoff`.
 - Human-facing Linear comments must follow this convention:
   - `## Agent Handoff`: completed work, PR/diff link, verification, and action needed.
   - `## Agent Question`: exact question, options/tradeoffs, and why the agent stopped.

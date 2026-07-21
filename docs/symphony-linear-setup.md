@@ -14,16 +14,16 @@ Use the same lifecycle states described in
 `docs/agent-dashboard-linear-setup.md` and the canonical issue shape in
 `docs/codex-agent-task-contract.md`. The workflow remains project-agnostic;
 project specificity lives in the Linear project, issue content, repository URL,
-and workspace root configured in `WORKFLOWS.yml`.
+and workspace root configured in `workflow-manifest.yml`.
 
 ## Bootstrap
 
-Regenerate and check the workflow output after changing `WORKFLOWS.yml`:
+Regenerate and check the workflow output after changing `workflow-manifest.yml`:
 
 ```bash
 cd /Users/bjornjee/Code/bjornjee/symphony/elixir
-mise exec -- mix workflow.bootstrap --manifest ../WORKFLOWS.yml
-mise exec -- mix workflow.bootstrap --manifest ../WORKFLOWS.yml --check
+mise exec -- mix workflow.bootstrap --manifest ../workflow-manifest.yml
+mise exec -- mix workflow.bootstrap --manifest ../workflow-manifest.yml --check
 ```
 
 ## Run
@@ -36,7 +36,7 @@ export LINEAR_API_KEY=...
 mise exec -- ./bin/symphony \
   --i-understand-that-this-will-be-running-without-the-usual-guardrails \
   --port 4000 \
-  /Users/bjornjee/Code/bjornjee/symphony/workflows/symphony/WORKFLOW.md
+  /Users/bjornjee/Code/bjornjee/symphony/workflows/symphony/workflow.md
 ```
 
 Only add `codex-ready` when an issue is safe to dispatch. Use `Todo` for queued

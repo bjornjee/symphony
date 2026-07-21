@@ -1,6 +1,6 @@
 defmodule SymphonyElixir.CLI do
   @moduledoc """
-  Escript entrypoint for running Symphony with an explicit WORKFLOW.md path.
+  Escript entrypoint for running Symphony with an explicit workflow.md path.
   """
 
   alias SymphonyElixir.LogFile
@@ -36,7 +36,7 @@ defmodule SymphonyElixir.CLI do
         with :ok <- require_guardrails_acknowledgement(opts),
              :ok <- maybe_set_logs_root(opts, deps),
              :ok <- maybe_set_server_port(opts, deps) do
-          run(Path.expand("WORKFLOW.md"), deps)
+          run(Path.expand("workflow.md"), deps)
         end
 
       {opts, [workflow_path], []} ->
@@ -72,7 +72,7 @@ defmodule SymphonyElixir.CLI do
 
   @spec usage_message() :: String.t()
   defp usage_message do
-    "Usage: symphony [--logs-root <path>] [--port <port>] [path-to-WORKFLOW.md]"
+    "Usage: symphony [--logs-root <path>] [--port <port>] [path-to-workflow.md]"
   end
 
   @spec runtime_deps() :: deps()

@@ -1,11 +1,11 @@
 defmodule SymphonyElixir.Workflow do
   @moduledoc """
-  Loads workflow configuration and prompt from WORKFLOW.md.
+  Loads workflow configuration and prompt from workflow.md.
   """
 
   alias SymphonyElixir.WorkflowStore
 
-  @workflow_file_name "WORKFLOW.md"
+  @workflow_file_name "workflow.md"
 
   @spec workflow_file_path() :: Path.t()
   def workflow_file_path do

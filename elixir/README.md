@@ -59,14 +59,14 @@ not silently create a replacement.
    [Harness engineering](https://openai.com/index/harness-engineering/).
 2. Get a new personal token in Linear via Settings → Security & access → Personal API keys, and
    set it as the `LINEAR_API_KEY` environment variable.
-3. Copy this directory's `WORKFLOW.md` to your repo, or use a `WORKFLOWS.yml`
+3. Copy this directory's `workflow.md` to your repo, or use a `workflow-manifest.yml`
    manifest and `mix workflow.bootstrap` to generate project-specific workflow
    files from shared lifecycle doctrine.
 4. Optionally copy the `commit`, `push`, `pull`, `land`, and `linear` skills to your repo.
    - The `linear` skill expects Symphony's `linear_graphql` app-server tool for raw Linear GraphQL
      operations such as comment editing or upload flows.
-5. Customize the copied `WORKFLOW.md` file for your project, or add a project
-   entry to `WORKFLOWS.yml` and regenerate.
+5. Customize the copied `workflow.md` file for your project, or add a project
+   entry to `workflow-manifest.yml` and regenerate.
    - To get your project's slug, right-click the project and copy its URL. The slug is part of the
      URL.
    - When creating a workflow based on this repo, note that it depends on non-standard Linear
@@ -74,7 +74,7 @@ not silently create a replacement.
      Team Settings → Workflow in Linear.
    - `tracker.handoff_state` defaults to `Human Review`. After validated completion evidence,
      Symphony publishes and reads back one deterministic handoff before applying this state.
-   - For the `agent-dashboard` operating setup, use `../WORKFLOW.md` and follow
+   - For the `agent-dashboard` operating setup, use `../workflow.md` and follow
      `../docs/agent-dashboard-linear-setup.md` for the Linear setup, issue template, minimal
      labels, decomposition rules, and invariant-driven guardrails.
 6. Follow the instructions below to install the required runtime dependencies and start the service.
@@ -97,7 +97,7 @@ mise trust
 mise install
 mise exec -- mix setup
 mise exec -- mix build
-mise exec -- ./bin/symphony ./WORKFLOW.md
+mise exec -- ./bin/symphony ./workflow.md
 ```
 
 ## Configuration
@@ -105,29 +105,29 @@ mise exec -- ./bin/symphony ./WORKFLOW.md
 Pass a custom workflow file path to `./bin/symphony` when starting the service:
 
 ```bash
-./bin/symphony /path/to/custom/WORKFLOW.md
+./bin/symphony /path/to/custom/workflow.md
 ```
 
-If no path is passed, Symphony defaults to `./WORKFLOW.md`.
+If no path is passed, Symphony defaults to `./workflow.md`.
 
 Optional flags:
 
 - `--logs-root` tells Symphony to write logs under a different directory (default: `./log`)
 - `--port` also starts the Phoenix observability service (default: disabled)
 
-The `WORKFLOW.md` file uses YAML front matter for configuration, plus a Markdown body used as the
+The `workflow.md` file uses YAML front matter for configuration, plus a Markdown body used as the
 Codex session prompt.
 
 For multiple Linear projects or repositories, keep the shared lifecycle prompt
-in a `WORKFLOWS.yml` manifest and generate concrete workflow files:
+in a `workflow-manifest.yml` manifest and generate concrete workflow files:
 
 ```bash
 cd elixir
-mise exec -- mix workflow.bootstrap --manifest ../WORKFLOWS.yml
-mise exec -- mix workflow.bootstrap --manifest ../WORKFLOWS.yml --check
+mise exec -- mix workflow.bootstrap --manifest ../workflow-manifest.yml
+mise exec -- mix workflow.bootstrap --manifest ../workflow-manifest.yml --check
 ```
 
-Each `workflows[].output_path` receives a runnable `WORKFLOW.md`. The runtime
+Each `workflows[].output_path` receives a runnable `workflow.md`. The runtime
 still accepts one workflow file at a time; the manifest is the bootstrap source
 of truth for keeping project-specific workflow files consistent.
 
@@ -199,7 +199,7 @@ codex:
   command: "$CODEX_BIN --config 'model=\"gpt-5.5\"' app-server"
 ```
 
-- If `WORKFLOW.md` is missing or has invalid YAML at startup, Symphony does not boot.
+- If `workflow.md` is missing or has invalid YAML at startup, Symphony does not boot.
 - If a later reload fails, Symphony keeps running with the last known good workflow and logs the
   reload error until the file is fixed.
 - `server.port` or CLI `--port` enables the optional Phoenix LiveView dashboard and JSON API at
@@ -219,7 +219,7 @@ The observability UI now runs on a minimal Phoenix stack:
 
 - `lib/`: application code and Mix tasks
 - `test/`: ExUnit coverage for runtime behavior
-- `WORKFLOW.md`: in-repo workflow contract used by local runs
+- `workflow.md`: in-repo workflow contract used by local runs
 - `../.codex/`: repository-local Codex skills and setup helpers
 
 ## Testing
@@ -254,7 +254,7 @@ the transport representative without depending on long-lived external machines.
 
 Set `SYMPHONY_LIVE_SSH_WORKER_HOSTS` if you want `make e2e` to target real SSH hosts instead.
 
-The live test creates a temporary Linear project and issue, writes a temporary `WORKFLOW.md`, runs
+The live test creates a temporary Linear project and issue, writes a temporary `workflow.md`, runs
 a real agent turn, verifies the workspace side effect, requires Codex to comment on and close the
 Linear issue, then marks the project completed so the run remains visible in Linear.
 

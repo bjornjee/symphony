@@ -1,6 +1,6 @@
 ---
 agent:
-  max_concurrent_agents: 1
+  max_concurrent_agents: 2
   max_turns: 12
 codex:
   approval_policy: "never"
@@ -10,7 +10,7 @@ codex:
   turn_sandbox_policy:
     type: "dangerFullAccess"
 hooks:
-  after_create: "git clone 'git@github.com:bjornjee/agent-dashboard.git' ."
+  after_create: "git clone 'git@github.com:bjornjee/symphony.git' ."
 polling:
   interval_ms: 30000
 tracker:
@@ -19,11 +19,11 @@ tracker:
   claim_state: "In Progress"
   handoff_state: "Human Review"
   kind: "linear"
-  project_slug: "d42b2f1089ce"
+  project_slug: "4c620c712be7"
   required_labels: ["codex-ready"]
   terminal_states: ["Closed", "Cancelled", "Canceled", "Duplicate", "Done"]
 workspace:
-  root: "~/Code/bjornjee/worktrees/agent-dashboard"
+  root: "~/Code/bjornjee/worktrees/symphony"
 ---
 
 You are working on Linear issue `{{ issue.identifier }}`.
