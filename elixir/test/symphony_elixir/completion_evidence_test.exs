@@ -1,5 +1,5 @@
 defmodule SymphonyElixir.CompletionEvidenceTest do
-  use ExUnit.Case, async: true
+  use ExUnit.Case
 
   import SymphonyElixir.TaskContractFixtures
   alias SymphonyElixir.CompletionEvidence
@@ -386,6 +386,119 @@ defmodule SymphonyElixir.CompletionEvidenceTest do
              )
   end
 
+  test "validates and rejects completion evidence through the SSH boundary", context do
+    original_path = System.get_env("PATH")
+    original_gh_failure = System.get_env("FAKE_GH_FAIL")
+    original_origin_failure = System.get_env("FAKE_ORIGIN_FAIL")
+    fake_bin = Path.join(context.workspace, "fake-bin")
+    fake_ssh = Path.join(fake_bin, "ssh")
+    fake_gh = Path.join(fake_bin, "gh")
+    File.mkdir_p!(fake_bin)
+
+    File.write!(fake_ssh, """
+    #!/bin/sh
+    for arg in "$@"; do remote_command="$arg"; done
+    case "$remote_command" in
+      *"gh pr view"*)
+        if [ "${FAKE_GH_FAIL:-}" = "1" ]; then echo failed; exit 7; fi
+        echo "#{@pr_url}"
+        ;;
+      *"remote get-url origin"*)
+        if [ "${FAKE_ORIGIN_FAIL:-}" = "1" ]; then echo missing; exit 2; fi
+        echo "#{@origin_url}"
+        ;;
+      *) eval "$remote_command" ;;
+    esac
+    """)
+
+    File.write!(fake_gh, """
+    #!/bin/sh
+    if [ "${FAKE_GH_FAIL:-}" = "1" ]; then
+      echo failed
+      exit 7
+    fi
+    for arg in "$@"; do
+      case "$arg" in
+        https://github.com/*/pull/*) printf '%s\n' "$arg"; exit 0 ;;
+      esac
+    done
+    exit 8
+    """)
+
+    File.chmod!(fake_ssh, 0o755)
+    File.chmod!(fake_gh, 0o755)
+    System.put_env("PATH", fake_bin <> ":" <> (original_path || ""))
+
+    on_exit(fn ->
+      restore_env("PATH", original_path)
+      restore_env("FAKE_GH_FAIL", original_gh_failure)
+      restore_env("FAKE_ORIGIN_FAIL", original_origin_failure)
+    end)
+
+    System.cmd("git", ["-C", context.workspace, "init", "-b", "main"])
+    System.cmd("git", ["-C", context.workspace, "remote", "add", "origin", @origin_url])
+
+    observed = observed_proofs(context.contract)
+    evidence = valid_evidence(context, observed)
+    write_evidence(context, evidence)
+    opts = [worker_host: "worker-a"]
+
+    assert {:ok, %{pull_request_url: @pr_url}} =
+             CompletionEvidence.validate(
+               context.workspace,
+               context.task,
+               context.contract,
+               observed,
+               opts
+             )
+
+    System.put_env("FAKE_GH_FAIL", "1")
+
+    assert {:error, {:pull_request_unavailable, {"worker-a", 7, "failed"}}} =
+             CompletionEvidence.validate(
+               context.workspace,
+               context.task,
+               context.contract,
+               observed,
+               opts
+             )
+
+    System.delete_env("FAKE_GH_FAIL")
+    File.rm!(CompletionEvidence.path(context.workspace))
+
+    assert {:error, :completion_evidence_missing} =
+             CompletionEvidence.validate(
+               context.workspace,
+               context.task,
+               context.contract,
+               observed,
+               opts
+             )
+
+    File.write!(CompletionEvidence.path(context.workspace), String.duplicate("x", 131_073))
+
+    assert {:error, {:completion_evidence_too_large, 131_072}} =
+             CompletionEvidence.validate(
+               context.workspace,
+               context.task,
+               context.contract,
+               observed,
+               opts
+             )
+
+    write_evidence(context, evidence)
+    System.put_env("FAKE_ORIGIN_FAIL", "1")
+
+    assert {:error, {:repository_origin_unavailable, {"worker-a", 2, _output}}} =
+             CompletionEvidence.validate(
+               context.workspace,
+               context.task,
+               context.contract,
+               observed,
+               opts
+             )
+  end
+
   test "rejects mismatched and malformed PR verifier results", context do
     observed = observed_proofs(context.contract)
     write_evidence(context, valid_evidence(context, observed))
@@ -539,4 +652,7 @@ defmodule SymphonyElixir.CompletionEvidenceTest do
       pull_request_verifier: fn url, _workspace, _worker_host -> {:ok, url} end
     ]
   end
+
+  defp restore_env(name, nil), do: System.delete_env(name)
+  defp restore_env(name, value), do: System.put_env(name, value)
 end
