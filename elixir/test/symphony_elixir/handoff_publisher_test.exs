@@ -7,6 +7,13 @@ defmodule SymphonyElixir.HandoffPublisherTest do
   alias SymphonyElixir.Linear.TaskContract
 
   defmodule FakeTracker do
+    def fetch_issue_states_by_ids(issue_ids) do
+      send(self(), {:fetch_issue_states_by_ids, issue_ids})
+      [result | rest] = Process.get({__MODULE__, :state_fetch_results})
+      Process.put({__MODULE__, :state_fetch_results}, rest)
+      result
+    end
+
     def fetch_comment(issue_id, comment_id) do
       send(self(), {:fetch_comment, issue_id, comment_id})
       [result | rest] = Process.get({__MODULE__, :fetch_results})
@@ -28,6 +35,11 @@ defmodule SymphonyElixir.HandoffPublisherTest do
   setup do
     task = issue()
     {:ok, contract} = TaskContract.from_issue(task)
+
+    Process.put({FakeTracker, :state_fetch_results}, [
+      {:ok, [task]},
+      {:ok, [%{task | state: "Human Review"}]}
+    ])
 
     evidence = %{
       pull_request_url: "https://github.com/bjornjee/symphony/pull/42",
@@ -104,6 +116,118 @@ defmodule SymphonyElixir.HandoffPublisherTest do
     assert_receive {:update_issue_state, ^issue_id, "Human Review"}
   end
 
+  test "emits bounded deterministic handoff identity and transition results", context do
+    comment_id = HandoffPublisher.comment_id(context.task, context.contract, context.evidence)
+    body = HandoffPublisher.render(context.task, context.contract, context.evidence)
+    Process.put({FakeTracker, :fetch_results}, [{:ok, %{id: comment_id, body: body}}])
+    parent = self()
+
+    assert {:ok, %{comment_id: ^comment_id, issue_state: "Human Review"}} =
+             publish(context,
+               thread_id: "thread-123",
+               event_sink: fn event, attrs -> send(parent, {:handoff_event, event, attrs}) end
+             )
+
+    assert_receive {:handoff_event, :handoff_publish_started,
+                    %{
+                      phase: "handoff",
+                      thread_id: "thread-123",
+                      plan_digest: plan_digest,
+                      artifact_digest: artifact_digest,
+                      evidence_result: "accepted",
+                      comment_id: ^comment_id,
+                      marker_key: marker_key,
+                      transition_target: "Human Review"
+                    }}
+
+    assert plan_digest == context.contract.digest
+    assert artifact_digest == context.evidence.artifact_digest
+    assert marker_key =~ ~r/^[a-f0-9]{64}$/
+
+    assert_receive {:handoff_event, :handoff_transition_updated, %{transition_result: "updated", result: "completed", ambiguous: false}}
+
+    assert_receive {:handoff_event, :handoff_transition_result, %{transition_result: "updated", result: "completed", retry: false}}
+
+    refute_receive {:handoff_event, _, %{body: _}}
+    refute_receive {:handoff_event, _, %{criteria: _}}
+  end
+
+  test "reuses an already completed state transition without another mutation", context do
+    comment_id = HandoffPublisher.comment_id(context.task, context.contract, context.evidence)
+    body = HandoffPublisher.render(context.task, context.contract, context.evidence)
+    Process.put({FakeTracker, :fetch_results}, [{:ok, %{id: comment_id, body: body}}])
+    Process.put({FakeTracker, :state_fetch_results}, [{:ok, [%{context.task | state: "Human Review"}]}])
+    parent = self()
+
+    assert {:ok, %{issue_state: "Human Review"}} =
+             publish(context,
+               event_sink: fn event, attrs -> send(parent, {:handoff_event, event, attrs}) end
+             )
+
+    refute_receive {:update_issue_state, _, _}
+
+    assert_receive {:handoff_event, :handoff_transition_reused, %{transition_result: "reused", result: "completed", retry: false}}
+  end
+
+  test "accepts an ambiguous transition response when readback reached the target", context do
+    comment_id = HandoffPublisher.comment_id(context.task, context.contract, context.evidence)
+    body = HandoffPublisher.render(context.task, context.contract, context.evidence)
+    Process.put({FakeTracker, :fetch_results}, [{:ok, %{id: comment_id, body: body}}])
+    Process.put({FakeTracker, :state_result}, {:error, :timeout})
+    parent = self()
+
+    assert {:ok, %{issue_state: "Human Review"}} =
+             publish(context,
+               event_sink: fn event, attrs -> send(parent, {:handoff_event, event, attrs}) end
+             )
+
+    assert_receive {:handoff_event, :handoff_transition_ambiguous,
+                    %{
+                      transition_result: "ambiguous",
+                      result: "pending",
+                      ambiguous: true,
+                      retry: true
+                    }}
+
+    assert_receive {:handoff_event, :handoff_transition_result, %{transition_result: "reconciled", result: "completed", retry: false}}
+  end
+
+  test "fails closed when a successful transition response does not match readback", context do
+    comment_id = HandoffPublisher.comment_id(context.task, context.contract, context.evidence)
+    body = HandoffPublisher.render(context.task, context.contract, context.evidence)
+    Process.put({FakeTracker, :fetch_results}, [{:ok, %{id: comment_id, body: body}}])
+
+    Process.put({FakeTracker, :state_fetch_results}, [
+      {:ok, [context.task]},
+      {:ok, [context.task]}
+    ])
+
+    assert {:error, {:handoff_state_transition_unverified, "Human Review", "Todo"}} =
+             publish(context)
+  end
+
+  test "fails closed before mutation when transition state cannot be read", context do
+    comment_id = HandoffPublisher.comment_id(context.task, context.contract, context.evidence)
+    body = HandoffPublisher.render(context.task, context.contract, context.evidence)
+    Process.put({FakeTracker, :fetch_results}, [{:ok, %{id: comment_id, body: body}}])
+    Process.put({FakeTracker, :state_fetch_results}, [{:error, :linear_down}])
+
+    assert {:error, {:handoff_state_read_failed, :linear_down}} = publish(context)
+    refute_receive {:update_issue_state, _, _}
+  end
+
+  test "fails closed when tracker state changes after the runner refresh", context do
+    comment_id = HandoffPublisher.comment_id(context.task, context.contract, context.evidence)
+    body = HandoffPublisher.render(context.task, context.contract, context.evidence)
+    Process.put({FakeTracker, :fetch_results}, [{:ok, %{id: comment_id, body: body}}])
+    Process.put({FakeTracker, :state_fetch_results}, [{:ok, [%{context.task | state: "Done"}]}])
+
+    assert {:error, {:handoff_state_source_mismatch, "Todo", "Done", "Human Review"}} =
+             publish(context)
+
+    refute_receive {:update_issue_state, _, _}
+  end
+
   test "does not transition when comment readback cannot verify creation", context do
     comment_id = HandoffPublisher.comment_id(context.task, context.contract, context.evidence)
     Process.put({FakeTracker, :fetch_results}, [{:ok, nil}, {:ok, nil}])
@@ -126,6 +250,11 @@ defmodule SymphonyElixir.HandoffPublisherTest do
     body = HandoffPublisher.render(context.task, context.contract, context.evidence)
     Process.put({FakeTracker, :fetch_results}, [{:ok, %{id: comment_id, body: body}}])
     Process.put({FakeTracker, :state_result}, {:error, :linear_down})
+
+    Process.put({FakeTracker, :state_fetch_results}, [
+      {:ok, [context.task]},
+      {:ok, [context.task]}
+    ])
 
     assert {:error, {:handoff_state_transition_failed, "Human Review", :linear_down}} =
              publish(context)
@@ -163,7 +292,7 @@ defmodule SymphonyElixir.HandoffPublisherTest do
     refute_receive {:update_issue_state, _, _}
   end
 
-  test "preserves post-create read and unexpected state failures", context do
+  test "preserves post-create read failures and reconciles an unexpected state response", context do
     Process.put({FakeTracker, :fetch_results}, [{:ok, nil}, {:error, :linear_down}])
     Process.put({FakeTracker, :create_result}, {:error, :timeout})
 
@@ -175,14 +304,15 @@ defmodule SymphonyElixir.HandoffPublisherTest do
     Process.put({FakeTracker, :fetch_results}, [{:ok, %{id: comment_id, body: body}}])
     Process.put({FakeTracker, :state_result}, :unexpected)
 
-    assert {:error, {:handoff_state_transition_failed, "Human Review", :unexpected}} =
-             publish(context)
+    assert {:ok, %{issue_state: "Human Review"}} = publish(context)
   end
 
-  defp publish(context) do
-    HandoffPublisher.publish(context.task, context.contract, context.evidence,
-      tracker: FakeTracker,
-      handoff_state: "Human Review"
+  defp publish(context, opts \\ []) do
+    HandoffPublisher.publish(
+      context.task,
+      context.contract,
+      context.evidence,
+      Keyword.merge([tracker: FakeTracker, handoff_state: "Human Review"], opts)
     )
   end
 end

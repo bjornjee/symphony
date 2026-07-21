@@ -1407,7 +1407,9 @@ defmodule SymphonyElixir.CoreTest do
                handoff_state: "Human Review"
              )
 
-    assert_receive {:handoff_published, ^issue, ^contract, _evidence, [handoff_state: "Human Review"]}
+    assert_receive {:handoff_published, ^issue, ^contract, _evidence, publish_opts}
+    assert publish_opts[:handoff_state] == "Human Review"
+    assert is_function(publish_opts[:event_sink], 2)
   end
 
   test "agent runner continues when an active issue has no completion artifact" do
@@ -1428,12 +1430,91 @@ defmodule SymphonyElixir.CoreTest do
              )
   end
 
-  test "agent runner rejects tracker state advanced before Symphony handoff" do
+  test "agent runner reconciles a tracker state already at the configured handoff target" do
+    issue = TaskContractFixtures.issue(%{state: "In Progress"})
+    advanced_issue = %{issue | state: "Human Review"}
+    assert {:ok, contract} = TaskContract.from_issue(issue)
+    parent = self()
+
+    publisher = fn published_issue, _published_contract, _evidence, _opts ->
+      send(parent, {:handoff_reconciled, published_issue})
+      {:ok, %{comment_id: "comment-1", issue_state: "Human Review"}}
+    end
+
+    assert {:ok, %{issue_state: "Human Review", handoff_comment_id: "comment-1"}} =
+             AgentRunner.handoff_after_turn_for_test(
+               System.tmp_dir!(),
+               issue,
+               advanced_issue,
+               contract,
+               %{},
+               completion_evidence_validator: &valid_handoff_evidence/5,
+               handoff_publisher: publisher,
+               handoff_state: "Human Review"
+             )
+
+    assert_receive {:handoff_reconciled, ^advanced_issue}
+  end
+
+  test "agent runner rejects missing evidence at the configured handoff target" do
     issue = TaskContractFixtures.issue(%{state: "In Progress"})
     advanced_issue = %{issue | state: "Human Review"}
     assert {:ok, contract} = TaskContract.from_issue(issue)
 
-    assert {:error, {:handoff_state_advanced_before_publish, "Human Review"}} =
+    assert {:error, {:handoff_evidence_invalid, :completion_evidence_missing}} =
+             AgentRunner.handoff_after_turn_for_test(
+               System.tmp_dir!(),
+               issue,
+               advanced_issue,
+               contract,
+               %{},
+               completion_evidence_validator: fn _, _, _, _, _ ->
+                 {:error, :completion_evidence_missing}
+               end,
+               handoff_state: "Human Review"
+             )
+  end
+
+  test "agent runner rejects plan drift before reconciling the configured handoff target" do
+    issue = TaskContractFixtures.issue(%{state: "In Progress"})
+    assert {:ok, contract} = TaskContract.from_issue(issue)
+
+    advanced_issue = %{
+      issue
+      | state: "Human Review",
+        description:
+          String.replace(
+            issue.description,
+            "Deliver one concrete outcome.",
+            "Deliver a changed outcome."
+          )
+    }
+
+    assert {:ok, advanced_contract} = TaskContract.from_issue(advanced_issue)
+    refute advanced_contract.digest == contract.digest
+
+    assert {:error, {:plan_drift, contract_digest, advanced_digest}} =
+             AgentRunner.handoff_after_turn_for_test(
+               System.tmp_dir!(),
+               issue,
+               advanced_issue,
+               contract,
+               %{},
+               completion_evidence_validator: &valid_handoff_evidence/5,
+               handoff_publisher: &valid_handoff_publisher/4,
+               handoff_state: "Human Review"
+             )
+
+    assert contract_digest == contract.digest
+    assert advanced_digest == advanced_contract.digest
+  end
+
+  test "agent runner rejects tracker state advanced beyond the configured handoff target" do
+    issue = TaskContractFixtures.issue(%{state: "In Progress"})
+    advanced_issue = %{issue | state: "Done"}
+    assert {:ok, contract} = TaskContract.from_issue(issue)
+
+    assert {:error, {:handoff_state_advanced_before_publish, "Done"}} =
              AgentRunner.handoff_after_turn_for_test(
                System.tmp_dir!(),
                issue,
@@ -1452,6 +1533,7 @@ defmodule SymphonyElixir.CoreTest do
 
     issue = TaskContractFixtures.issue(%{state: "In Progress"})
     issue_id = issue.id
+    Application.put_env(:symphony_elixir, :memory_tracker_issues, [issue])
     assert {:ok, contract} = TaskContract.from_issue(issue)
     assert {:ok, evidence} = valid_handoff_evidence(nil, issue, contract, %{}, [])
 

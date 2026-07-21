@@ -258,6 +258,9 @@ The live test creates a temporary Linear project and issue, writes a temporary `
 a real agent turn, verifies the workspace side effect, requires Codex to comment on and close the
 Linear issue, then marks the project completed so the run remains visible in Linear.
 
+For a bounded dogfood pilot, including exact preflight, startup, evidence, retry, and rollback
+steps, follow the [PIN-18 operational pilot runbook](../docs/pin-18-operational-pilot-runbook.md).
+
 ## FAQ
 
 ### Why Elixir?

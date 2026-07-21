@@ -239,6 +239,8 @@ defmodule SymphonyElixir.AgentRunner do
           })
 
           try do
+            runtime = Map.put(runtime, :thread_id, session.thread_id)
+
             with {:ok, _thread_id} <-
                    ThreadIdentity.pin(workspace, session.thread_id, worker_host),
                  :ok <- AppServer.set_goal(session, goal_objective(issue)) do
@@ -574,7 +576,7 @@ defmodule SymphonyElixir.AgentRunner do
 
   defp finish_handoff(workspace, issue, refreshed_issue, task_contract, runtime, turn_number) do
     opts =
-      [worker_host: runtime.worker_host] ++
+      [worker_host: runtime.worker_host, thread_id: Map.get(runtime, :thread_id)] ++
         Keyword.take(runtime.opts, [:completion_evidence_validator, :handoff_publisher, :handoff_state])
 
     handoff_after_turn(
@@ -589,24 +591,46 @@ defmodule SymphonyElixir.AgentRunner do
   end
 
   defp handoff_after_turn(workspace, issue, refreshed_issue, task_contract, proofs, opts, turn_number) do
-    if active_issue_state?(refreshed_issue.state) do
-      validate_and_publish_handoff(
-        workspace,
-        issue,
-        refreshed_issue,
-        task_contract,
-        proofs,
-        opts,
-        turn_number
-      )
+    handoff_state =
+      Keyword.get_lazy(opts, :handoff_state, fn -> Config.settings!().tracker.handoff_state end)
+
+    if active_issue_state?(refreshed_issue.state) or
+         same_issue_state?(refreshed_issue.state, handoff_state) do
+      case compare_plan_revision(refreshed_issue, task_contract) do
+        {:continue, current_issue} ->
+          validate_and_publish_handoff(
+            workspace,
+            issue,
+            current_issue,
+            task_contract,
+            proofs,
+            opts,
+            turn_number
+          )
+
+        {:error, _reason} = error ->
+          append_handoff_audit(workspace, issue, :handoff_publish_rejected, task_contract, opts, %{
+            status: "failed",
+            evidence_result: "rejected",
+            transition_target: handoff_state,
+            result: "failed",
+            retry: false,
+            ambiguous: false
+          })
+
+          error
+      end
     else
       reason = {:handoff_state_advanced_before_publish, refreshed_issue.state}
 
-      RunAudit.append(workspace, issue, :handoff_publish_rejected, %{
-        phase: "handoff",
+      append_handoff_audit(workspace, issue, :handoff_publish_rejected, task_contract, opts, %{
         status: "failed",
-        reason: reason,
-        turn_number: turn_number
+        evidence_result: "rejected",
+        issue_state: refreshed_issue.state,
+        transition_target: handoff_state,
+        result: "failed",
+        retry: false,
+        ambiguous: false
       })
 
       {:error, reason}
@@ -633,25 +657,36 @@ defmodule SymphonyElixir.AgentRunner do
         publish_handoff(workspace, issue, refreshed_issue, task_contract, evidence, opts, turn_number)
 
       {:error, {:handoff_evidence_invalid, :completion_evidence_missing}} = error ->
-        if issue_routable?(refreshed_issue) do
-          RunAudit.append(workspace, issue, :handoff_evidence_pending, %{
-            phase: "handoff",
+        if active_issue_state?(refreshed_issue.state) and issue_routable?(refreshed_issue) do
+          append_handoff_audit(workspace, issue, :handoff_evidence_pending, task_contract, opts, %{
             status: "pending",
-            reason: "completion_evidence_missing",
-            turn_number: turn_number
+            evidence_result: "pending",
+            result: "pending",
+            retry: true,
+            ambiguous: false
           })
 
           {:continue, refreshed_issue}
         else
+          append_handoff_audit(workspace, issue, :handoff_evidence_rejected, task_contract, opts, %{
+            status: "failed",
+            evidence_result: "rejected",
+            transition_target: Keyword.get(opts, :handoff_state),
+            result: "failed",
+            retry: false,
+            ambiguous: false
+          })
+
           error
         end
 
-      {:error, reason} = error ->
-        RunAudit.append(workspace, issue, :handoff_evidence_rejected, %{
-          phase: "handoff",
+      {:error, _reason} = error ->
+        append_handoff_audit(workspace, issue, :handoff_evidence_rejected, task_contract, opts, %{
           status: "failed",
-          reason: reason,
-          turn_number: turn_number
+          evidence_result: "rejected",
+          result: "failed",
+          retry: true,
+          ambiguous: false
         })
 
         error
@@ -664,29 +699,50 @@ defmodule SymphonyElixir.AgentRunner do
     handoff_state =
       Keyword.get_lazy(opts, :handoff_state, fn -> Config.settings!().tracker.handoff_state end)
 
-    case publisher.(refreshed_issue, task_contract, evidence, handoff_state: handoff_state) do
+    publisher_opts =
+      [
+        handoff_state: handoff_state,
+        event_sink: handoff_event_sink(workspace, issue)
+      ]
+      |> maybe_put_thread_id(Keyword.get(opts, :thread_id))
+
+    case publisher.(refreshed_issue, task_contract, evidence, publisher_opts) do
       {:ok, publication} ->
         record_published_handoff(
           workspace,
           issue,
           refreshed_issue,
+          task_contract,
           evidence,
           publication,
-          turn_number
+          turn_number,
+          opts
         )
 
       {:error, reason} = error ->
-        RunAudit.append(workspace, issue, :handoff_publish_failed, %{
-          phase: "handoff",
+        append_handoff_audit(workspace, issue, :handoff_publish_failed, task_contract, opts, %{
           status: "failed",
-          reason: reason,
+          evidence_result: "publish_failed",
+          transition_target: handoff_state,
           artifact_digest: evidence.artifact_digest,
-          turn_number: turn_number
+          result: "failed",
+          retry: true,
+          ambiguous: handoff_ambiguous?(reason)
         })
 
         error
 
       other ->
+        append_handoff_audit(workspace, issue, :handoff_publish_failed, task_contract, opts, %{
+          status: "failed",
+          evidence_result: "publish_failed",
+          transition_target: handoff_state,
+          artifact_digest: evidence.artifact_digest,
+          result: "failed",
+          retry: true,
+          ambiguous: false
+        })
+
         {:error, {:handoff_publish_failed, other}}
     end
   end
@@ -695,9 +751,11 @@ defmodule SymphonyElixir.AgentRunner do
          workspace,
          issue,
          refreshed_issue,
+         task_contract,
          evidence,
          publication,
-         turn_number
+         turn_number,
+         opts
        ) do
     RunAudit.append(workspace, issue, :codex_continuation_check_completed, %{
       phase: "codex_turn",
@@ -705,21 +763,25 @@ defmodule SymphonyElixir.AgentRunner do
       turn_number: turn_number
     })
 
-    RunAudit.append(workspace, issue, :handoff_evidence_validated, %{
-      phase: "handoff",
+    append_handoff_audit(workspace, issue, :handoff_evidence_validated, task_contract, opts, %{
       status: "completed",
-      pull_request_url: evidence.pull_request_url,
+      evidence_result: "validated",
       artifact_digest: evidence.artifact_digest,
-      turn_number: turn_number
+      result: "completed",
+      retry: false,
+      ambiguous: false
     })
 
-    RunAudit.append(workspace, issue, :handoff_published, %{
-      phase: "handoff",
+    append_handoff_audit(workspace, issue, :handoff_published, task_contract, opts, %{
       status: "completed",
+      evidence_result: "published",
       comment_id: publication.comment_id,
       issue_state: publication.issue_state,
+      transition_target: publication.issue_state,
       artifact_digest: evidence.artifact_digest,
-      turn_number: turn_number
+      result: "completed",
+      retry: false,
+      ambiguous: false
     })
 
     {:ok,
@@ -789,6 +851,48 @@ defmodule SymphonyElixir.AgentRunner do
     |> String.trim()
     |> String.downcase()
   end
+
+  defp same_issue_state?(left, right) when is_binary(left) and is_binary(right) do
+    normalize_issue_state(left) == normalize_issue_state(right)
+  end
+
+  defp same_issue_state?(_left, _right), do: false
+
+  defp handoff_event_sink(workspace, issue) do
+    fn event, attrs -> RunAudit.append_handoff_event(workspace, issue, event, attrs) end
+  end
+
+  defp append_handoff_audit(workspace, issue, event, task_contract, opts, attrs) do
+    common = %{
+      phase: "handoff",
+      plan_digest: task_contract.digest,
+      thread_id: Keyword.get(opts, :thread_id)
+    }
+
+    RunAudit.append_handoff_event(workspace, issue, event, Map.merge(common, attrs))
+  end
+
+  defp maybe_put_thread_id(opts, thread_id) when is_binary(thread_id) and thread_id != "" do
+    Keyword.put(opts, :thread_id, thread_id)
+  end
+
+  defp maybe_put_thread_id(opts, _thread_id), do: opts
+
+  defp handoff_ambiguous?({reason, _one, _two})
+       when reason in [
+              :handoff_comment_unverified,
+              :handoff_comment_read_failed,
+              :handoff_state_transition_failed,
+              :handoff_state_transition_read_failed,
+              :handoff_state_transition_unverified
+            ],
+       do: true
+
+  defp handoff_ambiguous?({reason, _rest})
+       when reason in [:handoff_comment_collision, :handoff_comment_read_failed, :handoff_state_read_failed],
+       do: true
+
+  defp handoff_ambiguous?(_reason), do: false
 
   defp issue_context(%Issue{id: issue_id, identifier: identifier}) do
     "issue_id=#{issue_id} issue_identifier=#{identifier}"

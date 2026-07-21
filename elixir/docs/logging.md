@@ -19,12 +19,21 @@ When logging Codex execution lifecycle events, include:
 
 - `session_id`: combined Codex thread/turn identifier.
 
+For operational-pilot lifecycle events, use the structured contract in
+[`docs/pin-18-operational-pilot-runbook.md`](../../docs/pin-18-operational-pilot-runbook.md):
+include `phase` and `status`, then add `thread_id`, `plan_digest`, bounded
+evidence and transition results, deterministic handoff comment identity, and
+the resulting issue state or boolean retry/ambiguity decisions only when
+applicable.
+
 ## Message Design
 
 - Use explicit `key=value` pairs in message text for high-signal fields.
 - Prefer deterministic wording for recurring lifecycle events.
 - Include the action outcome (`completed`, `failed`, `retrying`) and the reason/error when available.
-- Avoid logging large payloads unless required for debugging.
+- Never log raw model reasoning, secrets, full prompts, environment dumps,
+  command output streams, tracker payloads, or other unbounded payloads. Use a
+  bounded preview or categorized result when debugging context is required.
 
 ## Scope Guidance
 
@@ -38,3 +47,6 @@ When logging Codex execution lifecycle events, include:
 - Is this event tied to a Codex session? Include `session_id`.
 - Is the failure reason present and concise?
 - Is the message format consistent with existing lifecycle logs?
+- Are metrics derived only from low-cardinality enums such as phase, status,
+  evidence/transition result, and boolean retry/ambiguity decisions? Never label
+  a metric with IDs, digests, URLs, paths, commands, or error text.

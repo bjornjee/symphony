@@ -1,9 +1,15 @@
 defmodule SymphonyElixir.LiveE2ETest do
   use SymphonyElixir.TestSupport
 
+  import SymphonyElixir.TaskContractFixtures, only: [valid_description: 0, valid_description: 1]
+
   require Logger
-  alias SymphonyElixir.{HandoffPublisher, SSH}
+  alias SymphonyElixir.Codex.ThreadIdentity
+  alias SymphonyElixir.CompletionEvidence
+  alias SymphonyElixir.ExecutionManifest
+  alias SymphonyElixir.HandoffPublisher
   alias SymphonyElixir.Linear.TaskContract
+  alias SymphonyElixir.SSH
 
   @moduletag :live_e2e
   @moduletag timeout: 300_000
@@ -95,6 +101,19 @@ defmodule SymphonyElixir.LiveE2ETest do
   }
   """
 
+  @project_query """
+  query SymphonyLiveE2EProject($id: String!) {
+    project(id: $id) {
+      id
+      completedAt
+      status {
+        id
+        type
+      }
+    }
+  }
+  """
+
   @issue_details_query """
   query SymphonyLiveE2EIssueDetails($id: String!) {
     issue(id: $id) {
@@ -106,6 +125,7 @@ defmodule SymphonyElixir.LiveE2ETest do
       }
       comments(first: 20) {
         nodes {
+          id
           body
         }
       }
@@ -122,6 +142,7 @@ defmodule SymphonyElixir.LiveE2ETest do
   """
 
   @tag skip: @live_e2e_skip_reason
+  @tag :pin18_pilot
   test "creates a real Linear project and issue with a local worker" do
     run_live_issue_flow!(:local)
   end
@@ -265,14 +286,14 @@ defmodule SymphonyElixir.LiveE2ETest do
     |> fetch_successful_entity!("projectCreate", "project")
   end
 
-  defp create_issue!(team_id, project_id, state_id, title) do
+  defp create_issue!(team_id, project_id, state_id, title, description \\ valid_description()) do
     issue =
       @create_issue_mutation
       |> graphql_data!(%{
         teamId: team_id,
         projectId: project_id,
         title: title,
-        description: valid_description(),
+        description: description,
         stateId: state_id
       })
       |> fetch_successful_entity!("issueCreate", "issue")
@@ -301,6 +322,23 @@ defmodule SymphonyElixir.LiveE2ETest do
       "projectUpdate",
       "project"
     )
+  end
+
+  defp complete_project!(project_id, completed_status_id)
+       when is_binary(project_id) and is_binary(completed_status_id) do
+    data =
+      graphql_data!(@complete_project_mutation, %{
+        id: project_id,
+        statusId: completed_status_id,
+        completedAt: DateTime.utc_now() |> DateTime.truncate(:second) |> DateTime.to_iso8601()
+      })
+
+    assert get_in(data, ["projectUpdate", "success"]) == true
+
+    project = graphql_data!(@project_query, %{id: project_id})["project"]
+    assert get_in(project, ["status", "id"]) == completed_status_id
+    assert is_binary(project["completedAt"])
+    :ok
   end
 
   defp fetch_issue_details!(issue_id) when is_binary(issue_id) do
@@ -410,6 +448,59 @@ defmodule SymphonyElixir.LiveE2ETest do
     """
   end
 
+  defp live_pilot_prompt(project_slug, pull_request_url) do
+    """
+    You are running the real PIN-18 operational pilot in a disposable workspace.
+
+    On the first attempt, when `.symphony/pin18-first-attempt` is absent, run exactly:
+
+    ```sh
+    cat > #{@result_file} <<'EOF'
+    identifier={{ issue.identifier }}
+    project_slug=#{project_slug}
+    EOF
+    touch .symphony/pin18-first-attempt
+    ```
+
+    Do not create `.symphony/completion-evidence.json` on that first attempt. Stop after the marker exists.
+
+    On the resumed attempt, when `.symphony/pin18-first-attempt` exists, first run this verification as
+    one command:
+
+    ```sh
+    diff -u - #{@result_file} <<'EOF'
+    identifier={{ issue.identifier }}
+    project_slug=#{project_slug}
+    EOF
+    ```
+
+    Then run this as a separate command to atomically create evidence from that exact successful audit event:
+
+    ```sh
+    proof_event_id=$(jq -r 'select(.event == "codex_update" and .phase == "command" and .status == "completed" and .exit_code == 0 and ((.command // "") | startswith("diff -u - #{@result_file}"))) | .event_id' .symphony/run-audit.jsonl | tail -n 1)
+    test -n "$proof_event_id"
+    jq --arg event_id "$proof_event_id" --arg pr_url #{shell_escape(pull_request_url)} '
+      . as $manifest |
+      {
+        schema_version: 1,
+        issue_id: $manifest.issue_id,
+        issue_identifier: $manifest.issue_identifier,
+        plan_digest: $manifest.plan_digest,
+        pull_request_url: $pr_url,
+        criteria: [
+          $manifest.acceptance_criteria[] |
+          {criterion_id: .id, proof: {kind: "run_audit_command", event_id: $event_id}}
+        ]
+      }
+    ' .symphony/execution-manifest.json > .symphony/completion-evidence.json.tmp
+    mv .symphony/completion-evidence.json.tmp .symphony/completion-evidence.json
+    ```
+
+    Do not call Linear tools, create comments, or move the issue. Symphony owns the verified handoff.
+    Stop after the evidence file is in place.
+    """
+  end
+
   defp expected_result(issue_identifier, project_slug) do
     "identifier=#{issue_identifier}\nproject_slug=#{project_slug}\n"
   end
@@ -454,6 +545,8 @@ defmodule SymphonyElixir.LiveE2ETest do
   end
 
   defp run_live_issue_flow!(backend) when backend in [:local, :ssh] do
+    started_at = DateTime.utc_now()
+    pilot? = backend == :local and live_pull_request_configured?()
     run_id = "symphony-live-e2e-#{backend}-#{System.unique_integer([:positive])}"
     test_root = Path.join(System.tmp_dir!(), run_id)
     workflow_root = Path.join(test_root, "workflow")
@@ -462,84 +555,343 @@ defmodule SymphonyElixir.LiveE2ETest do
     team_key = System.get_env("SYMPHONY_LIVE_LINEAR_TEAM_KEY") || @default_team_key
     original_workflow_path = Workflow.workflow_file_path()
     orchestrator_pid = Process.whereis(SymphonyElixir.Orchestrator)
+    cleanup_key = {__MODULE__, :pilot_completed, run_id}
+    cleanup_project_key = {__MODULE__, :pilot_project, run_id}
+    Process.put(cleanup_key, false)
 
     File.mkdir_p!(workflow_root)
 
+    context = %{
+      backend: backend,
+      cleanup_key: cleanup_key,
+      cleanup_project_key: cleanup_project_key,
+      orchestrator_pid: orchestrator_pid,
+      original_workflow_path: original_workflow_path,
+      pilot?: pilot?,
+      started_at: started_at,
+      team_key: team_key,
+      test_root: test_root,
+      worker_setup: worker_setup,
+      workflow_file: workflow_file
+    }
+
     try do
-      if is_pid(orchestrator_pid) do
-        assert :ok = Supervisor.terminate_child(SymphonyElixir.Supervisor, SymphonyElixir.Orchestrator)
-      end
-
-      Workflow.set_workflow_file_path(workflow_file)
-
-      write_workflow_file!(workflow_file,
-        tracker_api_token: "$LINEAR_API_KEY",
-        tracker_project_slug: "bootstrap",
-        workspace_root: worker_setup.workspace_root,
-        worker_ssh_hosts: worker_setup.ssh_worker_hosts,
-        codex_command: worker_setup.codex_command,
-        codex_approval_policy: "never",
-        observability_enabled: false
-      )
-
-      team = fetch_team!(team_key)
-      active_state = active_state!(team)
-      handoff_state = completed_state!(team)
-      completed_project_status = completed_project_status!()
-      terminal_states = terminal_state_names(team)
-
-      project =
-        create_project!(
-          team["id"],
-          "Symphony Live E2E #{backend} #{System.unique_integer([:positive])}"
-        )
-
-      issue =
-        create_issue!(
-          team["id"],
-          project["id"],
-          active_state["id"],
-          "Symphony live e2e #{backend} issue for #{project["name"]}"
-        )
-
-      write_workflow_file!(workflow_file,
-        tracker_api_token: "$LINEAR_API_KEY",
-        tracker_project_slug: project["slugId"],
-        tracker_active_states: active_state_names(team),
-        tracker_terminal_states: terminal_states,
-        tracker_handoff_state: handoff_state["name"],
-        workspace_root: worker_setup.workspace_root,
-        worker_ssh_hosts: worker_setup.ssh_worker_hosts,
-        codex_command: worker_setup.codex_command,
-        codex_approval_policy: "never",
-        codex_turn_timeout_ms: 600_000,
-        codex_stall_timeout_ms: 600_000,
-        observability_enabled: false,
-        prompt: live_prompt(project["slugId"])
-      )
-
-      assert :ok =
-               AgentRunner.run(issue, self(),
-                 max_turns: 3,
-                 completion_evidence_validator: &live_handoff_evidence/5
-               )
-
-      runtime_info = receive_runtime_info!(issue.id)
-
-      assert read_worker_result!(runtime_info, @result_file) ==
-               expected_result(issue.identifier, project["slugId"])
-
-      issue_snapshot = fetch_issue_details!(issue.id)
-      assert issue_completed?(issue_snapshot)
-      assert {:ok, contract} = TaskContract.from_issue(issue)
-      assert issue_has_comment?(issue_snapshot, HandoffPublisher.render(issue, contract, live_handoff_evidence(contract)))
-
-      assert :ok = complete_project(project["id"], completed_project_status["id"])
+      execute_live_issue_flow!(context)
     after
-      restart_orchestrator_if_needed()
-      cleanup_live_worker_setup(worker_setup)
-      Workflow.set_workflow_file_path(original_workflow_path)
-      File.rm_rf(test_root)
+      cleanup_live_issue_flow(context)
+    end
+  end
+
+  defp execute_live_issue_flow!(context) do
+    if is_pid(context.orchestrator_pid) do
+      assert :ok = Supervisor.terminate_child(SymphonyElixir.Supervisor, SymphonyElixir.Orchestrator)
+    end
+
+    Workflow.set_workflow_file_path(context.workflow_file)
+    write_bootstrap_workflow!(context)
+
+    team = fetch_team!(context.team_key)
+    active_state = active_state!(team)
+    handoff_state = completed_state!(team)
+    completed_project_status = completed_project_status!()
+
+    project =
+      create_project!(
+        team["id"],
+        "Symphony Live E2E #{context.backend} #{System.unique_integer([:positive])}"
+      )
+
+    Process.put(context.cleanup_project_key, {project["id"], completed_project_status["id"]})
+
+    issue =
+      create_issue!(
+        team["id"],
+        project["id"],
+        active_state["id"],
+        "Symphony live e2e #{context.backend} issue for #{project["name"]}",
+        if(context.pilot?, do: live_pilot_description(), else: valid_description())
+      )
+
+    write_live_workflow!(context, team, handoff_state, project)
+    verify_live_agent_flow!(context, issue, project, completed_project_status)
+  end
+
+  defp write_bootstrap_workflow!(context) do
+    write_workflow_file!(context.workflow_file,
+      tracker_api_token: "$LINEAR_API_KEY",
+      tracker_project_slug: "bootstrap",
+      workspace_root: context.worker_setup.workspace_root,
+      worker_ssh_hosts: context.worker_setup.ssh_worker_hosts,
+      codex_command: context.worker_setup.codex_command,
+      codex_approval_policy: "never",
+      observability_enabled: false
+    )
+  end
+
+  defp write_live_workflow!(context, team, handoff_state, project) do
+    write_workflow_file!(context.workflow_file,
+      tracker_api_token: "$LINEAR_API_KEY",
+      tracker_project_slug: project["slugId"],
+      tracker_active_states: active_state_names(team),
+      tracker_terminal_states: terminal_state_names(team),
+      tracker_handoff_state: handoff_state["name"],
+      workspace_root: context.worker_setup.workspace_root,
+      worker_ssh_hosts: context.worker_setup.ssh_worker_hosts,
+      hook_after_create: pilot_after_create_hook(context.pilot?),
+      codex_command: context.worker_setup.codex_command,
+      codex_approval_policy: "never",
+      codex_turn_timeout_ms: 600_000,
+      codex_stall_timeout_ms: 600_000,
+      observability_enabled: false,
+      prompt: live_issue_prompt(context.pilot?, project["slugId"])
+    )
+  end
+
+  defp verify_live_agent_flow!(context, issue, project, completed_project_status) do
+    {runtime_info, pilot_context} = run_live_agent!(context.backend, issue)
+
+    assert read_worker_result!(runtime_info, @result_file) ==
+             expected_result(issue.identifier, project["slugId"])
+
+    issue_snapshot = fetch_issue_details!(issue.id)
+    assert issue_completed?(issue_snapshot)
+    assert {:ok, contract} = TaskContract.from_issue(issue)
+    verify_live_handoff!(issue_snapshot, issue, contract, pilot_context)
+
+    if pilot_context do
+      write_pilot_evidence!(
+        context.started_at,
+        project,
+        issue,
+        issue_snapshot,
+        contract,
+        pilot_context.evidence,
+        pilot_context
+      )
+    end
+
+    assert :ok = complete_project!(project["id"], completed_project_status["id"])
+    Process.put(context.cleanup_key, true)
+  end
+
+  defp verify_live_handoff!(issue_snapshot, _issue, _contract, %{pull_request_url: pull_request_url}) do
+    assert count_pilot_handoff_comments(issue_snapshot, pull_request_url) == 1
+  end
+
+  defp verify_live_handoff!(issue_snapshot, issue, contract, nil) do
+    evidence = live_handoff_evidence(contract)
+    assert issue_has_comment?(issue_snapshot, HandoffPublisher.render(issue, contract, evidence))
+  end
+
+  defp pilot_after_create_hook(true),
+    do: "git init -q && git remote add origin git@github.com:bjornjee/symphony.git"
+
+  defp pilot_after_create_hook(false), do: nil
+
+  defp live_issue_prompt(true, project_slug) do
+    live_pilot_prompt(project_slug, System.fetch_env!("SYMPHONY_LIVE_PULL_REQUEST_URL"))
+  end
+
+  defp live_issue_prompt(false, project_slug), do: live_prompt(project_slug)
+
+  defp cleanup_live_issue_flow(context) do
+    if not Process.get(context.cleanup_key) do
+      case Process.get(context.cleanup_project_key) do
+        {project_id, completed_status_id} -> complete_project(project_id, completed_status_id)
+        _other -> :ok
+      end
+    end
+
+    restart_orchestrator_if_needed()
+    cleanup_live_worker_setup(context.worker_setup)
+    Workflow.set_workflow_file_path(context.original_workflow_path)
+
+    if not context.pilot? or Process.get(context.cleanup_key) do
+      File.rm_rf(context.test_root)
+    else
+      Logger.warning("PIN-18 pilot failed; preserving bounded local artifacts at #{context.test_root}")
+    end
+
+    Process.delete(context.cleanup_key)
+    Process.delete(context.cleanup_project_key)
+  end
+
+  defp live_pull_request_configured? do
+    case System.get_env("SYMPHONY_LIVE_PULL_REQUEST_URL") do
+      value when is_binary(value) -> String.trim(value) != ""
+      _other -> false
+    end
+  end
+
+  defp live_pilot_description do
+    valid_description(%{
+      "Goal" => "Prove the bounded PIN-18 operational handoff with a disposable Linear issue.",
+      "Scope" => "In:\n- LIVE_E2E_RESULT.txt\n\nOut:\n- repository source changes",
+      "Acceptance Criteria" =>
+        "- [ ] LIVE_E2E_RESULT.txt exists in the prepared workspace.\n" <>
+          "- [ ] LIVE_E2E_RESULT.txt contains the exact issue identifier and disposable project slug.",
+      "Verification" => "Run:\n`cat LIVE_E2E_RESULT.txt`",
+      "Risk" => "low"
+    })
+  end
+
+  defp run_live_agent!(:local, issue) do
+    case System.get_env("SYMPHONY_LIVE_PULL_REQUEST_URL") do
+      pull_request_url when is_binary(pull_request_url) and pull_request_url != "" ->
+        run_live_pilot_agent!(issue, pull_request_url)
+
+      _other ->
+        assert :ok =
+                 AgentRunner.run(issue, self(),
+                   max_turns: 3,
+                   completion_evidence_validator: &live_handoff_evidence/5
+                 )
+
+        {receive_runtime_info!(issue.id), nil}
+    end
+  end
+
+  defp run_live_agent!(:ssh, issue) do
+    assert :ok =
+             AgentRunner.run(issue, self(),
+               max_turns: 3,
+               completion_evidence_validator: &live_handoff_evidence/5
+             )
+
+    {receive_runtime_info!(issue.id), nil}
+  end
+
+  defp run_live_pilot_agent!(issue, pull_request_url) do
+    assert :ok = AgentRunner.run(issue, self(), max_turns: 1)
+    first_runtime = receive_runtime_info!(issue.id)
+    assert {:ok, first_thread_id} = ThreadIdentity.read(first_runtime.workspace_path)
+    first_manifest = File.read!(ExecutionManifest.path(first_runtime.workspace_path))
+    manifest_sha256 = :crypto.hash(:sha256, first_manifest) |> Base.encode16(case: :lower)
+
+    first_events = read_audit_events!(first_runtime.audit_events_path)
+    assert Enum.any?(first_events, &(&1["event"] == "handoff_evidence_pending"))
+    assert Enum.any?(first_events, &(&1["event"] == "codex_goal_updated" and &1["goal_status"] == "active"))
+    refute File.exists?(CompletionEvidence.path(first_runtime.workspace_path))
+
+    assert :ok = AgentRunner.run(issue, self(), max_turns: 3)
+    second_runtime = receive_runtime_info!(issue.id)
+    assert second_runtime.workspace_path == first_runtime.workspace_path
+    assert {:ok, ^first_thread_id} = ThreadIdentity.read(second_runtime.workspace_path)
+    assert File.read!(ExecutionManifest.path(second_runtime.workspace_path)) == first_manifest
+
+    second_events = read_audit_events!(second_runtime.audit_events_path)
+    assert Enum.any?(second_events, &(&1["event"] == "handoff_evidence_validated"))
+    assert Enum.any?(second_events, &(&1["event"] == "codex_goal_updated" and &1["goal_status"] == "complete"))
+
+    evidence =
+      second_runtime.workspace_path
+      |> CompletionEvidence.path()
+      |> File.read!()
+      |> Jason.decode!()
+
+    assert_exact_pilot_proof!(evidence, second_events)
+
+    {second_runtime,
+     %{
+       evidence: evidence,
+       first_thread_id: first_thread_id,
+       first_events: first_events,
+       second_events: second_events,
+       manifest_sha256: manifest_sha256,
+       pull_request_url: pull_request_url
+     }}
+  end
+
+  defp assert_exact_pilot_proof!(evidence, events) do
+    proof_event_ids =
+      evidence["criteria"]
+      |> Enum.map(&get_in(&1, ["proof", "event_id"]))
+      |> Enum.uniq()
+
+    assert [proof_event_id] = proof_event_ids
+
+    assert Enum.any?(events, fn event ->
+             event["event_id"] == proof_event_id and event["exit_code"] == 0 and
+               String.starts_with?(event["command"] || "", "diff -u - #{@result_file}")
+           end)
+  end
+
+  defp read_audit_events!(path) do
+    path
+    |> File.read!()
+    |> String.split("\n", trim: true)
+    |> Enum.map(&Jason.decode!/1)
+  end
+
+  defp write_pilot_evidence!(started_at, project, issue, issue_snapshot, contract, evidence, context) do
+    case System.get_env("SYMPHONY_LIVE_EVIDENCE_PATH") do
+      path when is_binary(path) and path != "" ->
+        comment_id = pilot_handoff_comment_id!(issue_snapshot, context.pull_request_url)
+
+        payload = %{
+          "schema_version" => 1,
+          "started_at" => DateTime.to_iso8601(started_at),
+          "completed_at" => DateTime.utc_now() |> DateTime.to_iso8601(),
+          "command" => "mise exec -- make pilot",
+          "linear_issue" => %{"id" => issue.id, "identifier" => issue.identifier, "url" => issue.url},
+          "linear_project" => %{"id" => project["id"], "url" => project["url"]},
+          "pull_request_url" => context.pull_request_url,
+          "thread_id" => context.first_thread_id,
+          "plan_digest" => contract.digest,
+          "manifest_sha256" => context.manifest_sha256,
+          "manifest_reused" => true,
+          "attempts" => [
+            %{
+              "attempt" => 1,
+              "thread_id" => context.first_thread_id,
+              "goal_status" => "active",
+              "evidence_result" => "pending"
+            },
+            %{
+              "attempt" => 2,
+              "thread_id" => context.first_thread_id,
+              "goal_status" => "complete",
+              "evidence_result" => "validated"
+            }
+          ],
+          "criteria" =>
+            Enum.map(evidence["criteria"], fn criterion ->
+              %{"criterion_id" => criterion["criterion_id"], "outcome" => "passed"}
+            end),
+          "evidence_result" => "accepted",
+          "handoff_comment_id" => comment_id,
+          "final_state" => get_in(issue_snapshot, ["state", "name"])
+        }
+
+        File.mkdir_p!(Path.dirname(path))
+        File.write!(path, Jason.encode!(payload, pretty: true) <> "\n")
+
+      _other ->
+        :ok
+    end
+  end
+
+  defp count_pilot_handoff_comments(issue_snapshot, pull_request_url) do
+    issue_snapshot
+    |> get_in(["comments", "nodes"])
+    |> Enum.count(fn comment ->
+      body = comment["body"] || ""
+      String.contains?(body, "## Agent Handoff") and String.contains?(body, pull_request_url)
+    end)
+  end
+
+  defp pilot_handoff_comment_id!(issue_snapshot, pull_request_url) do
+    issue_snapshot
+    |> get_in(["comments", "nodes"])
+    |> Enum.find_value(fn comment ->
+      body = comment["body"] || ""
+
+      if String.contains?(body, "## Agent Handoff") and String.contains?(body, pull_request_url),
+        do: comment["id"]
+    end)
+    |> case do
+      id when is_binary(id) and id != "" -> id
+      _other -> flunk("expected one verified PIN-18 handoff comment id")
     end
   end
 
