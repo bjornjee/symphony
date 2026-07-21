@@ -92,6 +92,15 @@ defmodule SymphonyElixir.TaskContractTest do
     assert "Section must include In with at least one bullet: ## Scope" in errors
   end
 
+  test "scope accepts Linear-normalized markdown lists" do
+    description =
+      valid_description(%{
+        "Scope" => "In:\n\n* LIVE_E2E_RESULT.txt\n\nOut:\n\n* repository source changes"
+      })
+
+    assert {:ok, _contract} = TaskContract.from_issue(issue(%{description: description}))
+  end
+
   test "acceptance criteria require checkboxes" do
     description = valid_description(%{"Acceptance Criteria" => "- The result is observable."})
 

@@ -11,8 +11,53 @@ defmodule SymphonyElixir.RunAudit do
   @jsonl_file "run-audit.jsonl"
   @markdown_file "run-audit.md"
   @max_preview_chars 160
+  @handoff_events [
+    :handoff_publish_started,
+    :handoff_comment_result,
+    :handoff_transition_reused,
+    :handoff_transition_updated,
+    :handoff_transition_ambiguous,
+    :handoff_transition_result,
+    :handoff_publish_result,
+    :handoff_publish_rejected,
+    :handoff_evidence_pending,
+    :handoff_evidence_rejected,
+    :handoff_publish_failed,
+    :handoff_evidence_validated,
+    :handoff_published
+  ]
+  @handoff_attr_keys [
+    :phase,
+    :status,
+    :thread_id,
+    :plan_digest,
+    :artifact_digest,
+    :evidence_result,
+    :comment_id,
+    :marker_key,
+    :transition_target,
+    :transition_result,
+    :issue_state,
+    :result,
+    :retry,
+    :ambiguous
+  ]
 
   @type event_name :: atom() | String.t()
+  @type handoff_event ::
+          :handoff_publish_started
+          | :handoff_comment_result
+          | :handoff_transition_reused
+          | :handoff_transition_updated
+          | :handoff_transition_ambiguous
+          | :handoff_transition_result
+          | :handoff_publish_result
+          | :handoff_publish_rejected
+          | :handoff_evidence_pending
+          | :handoff_evidence_rejected
+          | :handoff_publish_failed
+          | :handoff_evidence_validated
+          | :handoff_published
 
   @spec paths(Path.t()) :: %{audit_path: Path.t(), audit_events_path: Path.t()}
   def paths(workspace) when is_binary(workspace) do
@@ -69,6 +114,19 @@ defmodule SymphonyElixir.RunAudit do
       File.write!(jsonl_path(workspace), Jason.encode!(json_event) <> "\n", [:append])
       File.write!(markdown_path(workspace), markdown_event(timestamp, event, normalized_attrs), [:append])
     end)
+  end
+
+  @spec append_handoff_event(Path.t(), Issue.t(), handoff_event(), map()) :: :ok
+  def append_handoff_event(workspace, %Issue{} = issue, event, attrs \\ %{})
+      when is_binary(workspace) and is_map(attrs) do
+    if event in @handoff_events do
+      attrs
+      |> Map.take(@handoff_attr_keys)
+      |> Map.filter(fn {_key, value} -> scalar?(value) end)
+      |> then(&append(workspace, issue, event, &1))
+    else
+      :ok
+    end
   end
 
   @spec append_codex_update(Path.t(), Issue.t(), map()) ::
@@ -264,12 +322,17 @@ defmodule SymphonyElixir.RunAudit do
 
   defp normalize_value(%DateTime{} = value), do: DateTime.to_iso8601(value)
   defp normalize_value(value) when is_binary(value), do: preview(value)
+  defp normalize_value(value) when is_boolean(value), do: value
   defp normalize_value(value) when is_atom(value), do: to_string(value)
   defp normalize_value(value) when is_integer(value), do: value
   defp normalize_value(value) when is_float(value), do: value
-  defp normalize_value(value) when is_boolean(value), do: value
   defp normalize_value(nil), do: nil
   defp normalize_value(value), do: preview(value)
+
+  defp scalar?(value) do
+    is_binary(value) or is_atom(value) or is_integer(value) or is_float(value) or
+      is_boolean(value) or is_nil(value)
+  end
 
   defp drop_nil_values(map) do
     Map.reject(map, fn {_key, value} -> is_nil(value) end)

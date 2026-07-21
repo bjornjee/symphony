@@ -2,8 +2,12 @@ defmodule SymphonyElixir.AgentRunnerThreadResumeTest do
   use SymphonyElixir.TestSupport
 
   alias SymphonyElixir.Codex.ThreadIdentity
+  alias SymphonyElixir.CompletionEvidence
+  alias SymphonyElixir.ExecutionManifest
+  alias SymphonyElixir.HandoffPublisher
+  alias SymphonyElixir.Linear.TaskContract
 
-  test "worker retries resume the same durable Codex thread" do
+  test "Symphony restarts resume one pinned plan and durable Codex thread through verified handoff" do
     test_root =
       Path.join(
         System.tmp_dir!(),
@@ -44,6 +48,7 @@ defmodule SymphonyElixir.AgentRunnerThreadResumeTest do
             ;;
           *'"method":"turn/start"'*)
             printf '%s\n' '{"id":3,"result":{"turn":{"id":"turn-retry"}}}'
+            printf '%s\n' '{"method":"item/completed","params":{"item":{"type":"commandExecution","command":"mise exec -- make all","exitCode":0}}}'
             printf '%s\n' '{"method":"turn/completed"}'
             ;;
         esac
@@ -69,23 +74,45 @@ defmodule SymphonyElixir.AgentRunnerThreadResumeTest do
       }
 
       issue_state_fetcher = fn [_issue_id] -> {:ok, [issue]} end
+      assert {:ok, contract} = TaskContract.from_issue(issue)
+      pull_request_url = "https://github.com/bjornjee/symphony/pull/15"
 
-      evidence_validator = fn _workspace, _issue, contract, _proofs, _opts ->
-        {:ok,
-         %{
-           artifact_digest: String.duplicate("a", 64),
-           pull_request_url: "https://github.com/bjornjee/symphony/pull/42",
-           criteria:
-             Enum.map(contract.acceptance_criteria, fn criterion ->
-               %{criterion_id: criterion.id, proof_event_id: "proof-#{criterion.id}"}
-             end)
-         }}
+      evidence_validator = fn workspace, evidence_issue, evidence_contract, proofs, _opts ->
+        [{proof_event_id, %{exit_code: 0}}] = Map.to_list(proofs)
+
+        payload = %{
+          "schema_version" => 1,
+          "issue_id" => evidence_issue.id,
+          "issue_identifier" => evidence_issue.identifier,
+          "plan_digest" => evidence_contract.digest,
+          "pull_request_url" => pull_request_url,
+          "criteria" =>
+            Enum.map(evidence_contract.acceptance_criteria, fn criterion ->
+              %{
+                "criterion_id" => criterion.id,
+                "proof" => %{"kind" => "run_audit_command", "event_id" => proof_event_id}
+              }
+            end)
+        }
+
+        File.mkdir_p!(Path.dirname(CompletionEvidence.path(workspace)))
+        File.write!(CompletionEvidence.path(workspace), Jason.encode!(payload))
+
+        CompletionEvidence.validate(workspace, evidence_issue, evidence_contract, proofs,
+          origin_url: "git@github.com:bjornjee/symphony.git",
+          pull_request_verifier: fn url, _workspace, _worker_host -> {:ok, url} end
+        )
       end
 
-      publisher = fn _issue, _contract, _evidence, opts ->
+      test_pid = self()
+
+      publisher = fn published_issue, published_contract, evidence, opts ->
+        comment_id = HandoffPublisher.comment_id(published_issue, published_contract, evidence)
+        send(test_pid, {:published_handoff, comment_id, evidence.artifact_digest})
+
         {:ok,
          %{
-           comment_id: "123e4567-e89b-42d3-a456-426614174000",
+           comment_id: comment_id,
            issue_state: Keyword.fetch!(opts, :handoff_state)
          }}
       end
@@ -97,12 +124,20 @@ defmodule SymphonyElixir.AgentRunnerThreadResumeTest do
       ]
 
       assert :ok = AgentRunner.run(issue, nil, run_opts)
-      assert :ok = AgentRunner.run(issue, nil, run_opts)
 
       assert {:ok, workspace} =
                SymphonyElixir.PathSafety.canonicalize(Path.join(workspace_root, "PIN-15"))
 
+      first_manifest = File.read!(ExecutionManifest.path(workspace))
+      assert Jason.decode!(first_manifest)["plan_digest"] == contract.digest
       assert {:ok, "thread-durable"} = ThreadIdentity.read(workspace)
+      assert_receive {:published_handoff, first_comment_id, first_artifact_digest}
+
+      assert :ok = AgentRunner.run(issue, nil, run_opts)
+
+      assert File.read!(ExecutionManifest.path(workspace)) == first_manifest
+      assert {:ok, "thread-durable"} = ThreadIdentity.read(workspace)
+      assert_receive {:published_handoff, ^first_comment_id, ^first_artifact_digest}
 
       requests =
         trace_file

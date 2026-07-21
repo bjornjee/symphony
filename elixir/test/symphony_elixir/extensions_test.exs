@@ -200,6 +200,10 @@ defmodule SymphonyElixir.ExtensionsTest do
 
     assert {:ok, nil} = SymphonyElixir.Tracker.fetch_comment("issue-1", "missing")
     assert :ok = SymphonyElixir.Tracker.update_issue_state("issue-1", "Done")
+
+    assert {:ok, [%Issue{state: "Done"}]} =
+             SymphonyElixir.Tracker.fetch_issue_states_by_ids(["issue-1"])
+
     assert :ok = SymphonyElixir.Tracker.cleanup_issue_labels(issue, ["codex-ready"])
     assert_receive {:memory_tracker_comment, "issue-1", "comment"}
     assert_receive {:memory_tracker_comment, "issue-1", "comment-1", "handoff"}
@@ -271,6 +275,7 @@ defmodule SymphonyElixir.ExtensionsTest do
 
     assert_receive {:graphql_called, comment_read_query, %{commentId: "comment-1", issueId: "issue-1", first: 1}}
 
+    assert comment_read_query =~ "$commentId: ID!"
     assert comment_read_query =~ "comments(first: $first"
     assert comment_read_query =~ "id: {eq: $commentId}"
 
