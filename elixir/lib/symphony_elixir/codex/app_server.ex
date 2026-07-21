@@ -10,6 +10,8 @@ defmodule SymphonyElixir.Codex.AppServer do
   @thread_start_id 2
   @turn_start_id 3
   @thread_goal_set_id 4
+  @thread_resume_id 5
+  @goal_statuses ~w(active blocked complete)
   @port_line_bytes 1_048_576
   @max_stream_log_bytes 1_000
   @non_interactive_tool_input_answer "This is a non-interactive session. Operator input is unavailable."
@@ -46,7 +48,13 @@ defmodule SymphonyElixir.Codex.AppServer do
       metadata = port_metadata(port, worker_host)
 
       with {:ok, session_policies} <- session_policies(expanded_workspace, worker_host),
-           {:ok, thread_id} <- do_start_session(port, expanded_workspace, session_policies) do
+           {:ok, thread_id} <-
+             do_start_session(
+               port,
+               expanded_workspace,
+               session_policies,
+               Keyword.get(opts, :thread_id)
+             ) do
         {:ok,
          %{
            port: port,
@@ -149,26 +157,45 @@ defmodule SymphonyElixir.Codex.AppServer do
       {:error, :empty_goal_objective}
     else
       token_budget = Keyword.get(opts, :token_budget)
+      status = Keyword.get(opts, :status, "active")
 
-      params =
-        %{
-          "threadId" => thread_id,
-          "objective" => objective,
-          "status" => "active"
-        }
-        |> maybe_put_token_budget(token_budget)
+      if status in @goal_statuses do
+        params =
+          %{
+            "threadId" => thread_id,
+            "objective" => objective,
+            "status" => status
+          }
+          |> maybe_put_token_budget(token_budget)
 
-      send_message(port, %{
-        "method" => "thread/goal/set",
-        "id" => @thread_goal_set_id,
-        "params" => params
-      })
-
-      case await_response(port, @thread_goal_set_id) do
-        {:ok, %{"goal" => _goal}} -> :ok
-        {:ok, _response} -> :ok
-        other -> other
+        send_goal_update(port, params)
+      else
+        {:error, {:unsupported_goal_status, status}}
       end
+    end
+  end
+
+  @spec set_goal_status(session(), String.t()) :: :ok | {:error, term()}
+  def set_goal_status(%{port: port, thread_id: thread_id}, status)
+      when is_binary(thread_id) and status in @goal_statuses do
+    send_goal_update(port, %{"threadId" => thread_id, "status" => status})
+  end
+
+  def set_goal_status(%{thread_id: thread_id}, status) when is_binary(thread_id) do
+    {:error, {:unsupported_goal_status, status}}
+  end
+
+  defp send_goal_update(port, params) do
+    send_message(port, %{
+      "method" => "thread/goal/set",
+      "id" => @thread_goal_set_id,
+      "params" => params
+    })
+
+    case await_response(port, @thread_goal_set_id) do
+      {:ok, %{"goal" => _goal}} -> :ok
+      {:ok, _response} -> :ok
+      other -> other
     end
   end
 
@@ -309,10 +336,43 @@ defmodule SymphonyElixir.Codex.AppServer do
     Config.codex_runtime_settings(workspace, remote: true)
   end
 
-  defp do_start_session(port, workspace, session_policies) do
+  defp do_start_session(port, workspace, session_policies, thread_id) do
     case send_initialize(port) do
+      :ok when is_binary(thread_id) -> resume_thread(port, workspace, session_policies, thread_id)
       :ok -> start_thread(port, workspace, session_policies)
       {:error, reason} -> {:error, reason}
+    end
+  end
+
+  defp resume_thread(
+         port,
+         workspace,
+         %{approval_policy: approval_policy, thread_sandbox: thread_sandbox},
+         thread_id
+       ) do
+    send_message(port, %{
+      "method" => "thread/resume",
+      "id" => @thread_resume_id,
+      "params" => %{
+        "threadId" => thread_id,
+        "approvalPolicy" => approval_policy,
+        "sandbox" => thread_sandbox,
+        "cwd" => workspace
+      }
+    })
+
+    case await_response(port, @thread_resume_id) do
+      {:ok, %{"thread" => %{"id" => ^thread_id}}} ->
+        {:ok, thread_id}
+
+      {:ok, %{"thread" => %{"id" => resumed_thread_id}}} ->
+        {:error, {:resumed_thread_mismatch, thread_id, resumed_thread_id}}
+
+      {:ok, %{"thread" => thread_payload}} ->
+        {:error, {:invalid_thread_payload, thread_payload}}
+
+      other ->
+        other
     end
   end
 

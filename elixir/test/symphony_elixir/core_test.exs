@@ -1,6 +1,20 @@
 defmodule SymphonyElixir.CoreTest do
   use SymphonyElixir.TestSupport
 
+  test "agent runner maps every run outcome to a supported Codex goal state" do
+    assert AgentRunner.goal_status_for_result_for_test({:ok, %{issue_active: true, issue_routable: true}}) == "active"
+
+    assert AgentRunner.goal_status_for_result_for_test({:ok, %{issue_active: false, issue_routable: true}}) == "complete"
+
+    assert AgentRunner.goal_status_for_result_for_test({:ok, %{issue_active: true, issue_routable: false}}) == "complete"
+
+    assert AgentRunner.goal_status_for_result_for_test({:error, {:turn_input_required, %{}}}) == "blocked"
+
+    assert AgentRunner.goal_status_for_result_for_test({:error, {:approval_required, %{}}}) == "blocked"
+
+    assert AgentRunner.goal_status_for_result_for_test({:error, :turn_timeout}) == "active"
+  end
+
   test "config defaults and validation checks" do
     write_workflow_file!(Workflow.workflow_file_path(),
       tracker_api_token: nil,
@@ -1556,7 +1570,9 @@ defmodule SymphonyElixir.CoreTest do
           5)
             printf '%s\\n' '{\"id\":3,\"result\":{\"turn\":{\"id\":\"turn-1\"}}}'
             printf '%s\\n' '{\"method\":\"turn/completed\"}'
-            exit 0
+            ;;
+          6)
+            printf '%s\\n' '{\"id\":4,\"result\":{\"goal\":{\"status\":\"complete\"}}}'
             ;;
           *)
             ;;
@@ -1648,6 +1664,9 @@ defmodule SymphonyElixir.CoreTest do
             5)
               printf '%s\\n' '{\"id\":3,\"result\":{\"turn\":{\"id\":\"turn-live\"}}}'
               printf '%s\\n' '{\"method\":\"turn/completed\"}'
+              ;;
+            6)
+              printf '%s\\n' '{\"id\":4,\"result\":{\"goal\":{\"status\":\"complete\"}}}'
               ;;
             *)
               ;;
@@ -1751,6 +1770,9 @@ defmodule SymphonyElixir.CoreTest do
               printf '%s\\n' '{\"method\":\"codex/event/exec_command_output_delta\",\"params\":{\"msg\":{\"payload\":{\"outputDelta\":\"4 tests, 0 failures\\ncoverage ok\"}}}}'
               printf '%s\\n' '{\"method\":\"codex/event/exec_command_end\",\"params\":{\"msg\":{\"exit_code\":0}}}'
               printf '%s\\n' '{\"method\":\"turn/completed\",\"params\":{\"turn\":{\"status\":\"completed\"}}}'
+              ;;
+            6)
+              printf '%s\\n' '{\"id\":4,\"result\":{\"goal\":{\"status\":\"complete\"}}}'
               ;;
             *)
               ;;
@@ -1948,6 +1970,9 @@ defmodule SymphonyElixir.CoreTest do
             printf '%s\\n' '{"id":3,"result":{"turn":{"id":"turn-cont-2"}}}'
             printf '%s\\n' '{"method":"turn/completed"}'
             ;;
+          7)
+            printf '%s\\n' '{"id":4,"result":{"goal":{"status":"complete"}}}'
+            ;;
         esac
       done
       """)
@@ -2008,7 +2033,16 @@ defmodule SymphonyElixir.CoreTest do
 
       assert length(Enum.filter(lines, &String.starts_with?(&1, "RUN:"))) == 1
       assert length(Enum.filter(lines, &String.contains?(&1, "\"method\":\"thread/start\""))) == 1
-      assert length(Enum.filter(lines, &String.contains?(&1, "\"method\":\"thread/goal/set\""))) == 1
+      assert length(Enum.filter(lines, &String.contains?(&1, "\"method\":\"thread/goal/set\""))) == 2
+
+      assert lines
+             |> Enum.filter(&String.starts_with?(&1, "JSON:"))
+             |> Enum.map(&String.trim_leading(&1, "JSON:"))
+             |> Enum.map(&Jason.decode!/1)
+             |> Enum.any?(fn payload ->
+               payload["method"] == "thread/goal/set" and
+                 payload["params"]["status"] == "complete"
+             end)
 
       turn_texts =
         lines
@@ -2099,6 +2133,9 @@ defmodule SymphonyElixir.CoreTest do
             printf '%s\\n' '{"id":3,"result":{"turn":{"id":"turn-max-2"}}}'
             printf '%s\\n' '{"method":"turn/completed"}'
             ;;
+          7)
+            printf '%s\\n' '{"id":4,"result":{"goal":{"status":"active"}}}'
+            ;;
         esac
       done
       """)
@@ -2142,7 +2179,8 @@ defmodule SymphonyElixir.CoreTest do
 
       trace = File.read!(trace_file)
       assert length(String.split(trace, "RUN", trim: true)) == 1
-      assert length(Regex.scan(~r/"method":"thread\/goal\/set"/, trace)) == 1
+      assert length(Regex.scan(~r/"method":"thread\/goal\/set"/, trace)) == 2
+      assert trace =~ ~s/"status":"active","threadId":"thread-max"/
       assert length(Regex.scan(~r/"method":"turn\/start"/, trace)) == 2
     after
       System.delete_env("SYMP_TEST_CODEx_TRACE")
