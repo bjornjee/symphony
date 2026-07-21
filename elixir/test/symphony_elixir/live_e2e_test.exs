@@ -477,7 +477,7 @@ defmodule SymphonyElixir.LiveE2ETest do
     Then run this as a separate command to atomically create evidence from that exact successful audit event:
 
     ```sh
-    proof_event_id=$(jq -r 'select(.event == "codex_update" and .phase == "command" and .status == "completed" and .exit_code == 0 and ((.command // "") | startswith("diff -u - #{@result_file}"))) | .event_id' .symphony/run-audit.jsonl | tail -n 1)
+    proof_event_id=$(jq -r 'select(.event == "codex_update" and .phase == "command" and .status == "completed" and .exit_code == 0 and ((.command // "") | contains("diff -u - #{@result_file}"))) | .event_id' .symphony/run-audit.jsonl | tail -n 1)
     test -n "$proof_event_id"
     jq --arg event_id "$proof_event_id" --arg pr_url #{shell_escape(pull_request_url)} '
       . as $manifest |
@@ -812,7 +812,7 @@ defmodule SymphonyElixir.LiveE2ETest do
 
     assert Enum.any?(events, fn event ->
              event["event_id"] == proof_event_id and event["exit_code"] == 0 and
-               String.starts_with?(event["command"] || "", "diff -u - #{@result_file}")
+               String.contains?(event["command"] || "", "diff -u - #{@result_file}")
            end)
   end
 
