@@ -144,8 +144,8 @@ Symphony selects exactly one built-in profile before workspace execution:
   `docs`, `ci`, `build`, or `pr`)
 - otherwise fail closed as ambiguous
 
-The selected profile is versioned and digest-bound to the candidate, review,
-approved execution plan, goal, and completion evidence.
+The selected profile is digest-bound to the candidate, review, approved
+execution plan, goal, and completion evidence.
 
 Record the selected workflow and reason in the local workpad, not Linear.
 

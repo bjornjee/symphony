@@ -10,7 +10,7 @@ codex:
   turn_sandbox_policy:
     type: "dangerFullAccess"
 hooks:
-  after_create: "git clone 'git@github.com:bjornjee/agent-dashboard.git' ."
+  after_create: "git clone 'git@github.com:bjornjee/symphony.git' ."
 polling:
   interval_ms: 30000
 tracker:
@@ -19,11 +19,11 @@ tracker:
   claim_state: "In Progress"
   handoff_state: "Human Review"
   kind: "linear"
-  project_slug: "d42b2f1089ce"
+  project_slug: "4c620c712be7"
   required_labels: ["codex-ready"]
   terminal_states: ["Closed", "Cancelled", "Canceled", "Duplicate", "Done"]
 workspace:
-  root: "~/Code/bjornjee/worktrees/agent-dashboard"
+  root: "~/Code/bjornjee/worktrees/symphony"
 ---
 
 You are working on Linear issue `{{ issue.identifier }}`.
@@ -144,8 +144,8 @@ Symphony selects exactly one built-in profile before workspace execution:
   `docs`, `ci`, `build`, or `pr`)
 - otherwise fail closed as ambiguous
 
-The selected profile is versioned and digest-bound to the candidate, review,
-approved execution plan, goal, and completion evidence.
+The selected profile is digest-bound to the candidate, review, approved
+execution plan, goal, and completion evidence.
 
 Record the selected workflow and reason in the local workpad, not Linear.
 

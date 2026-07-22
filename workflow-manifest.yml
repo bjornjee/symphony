@@ -151,8 +151,8 @@ prompt: |
     `docs`, `ci`, `build`, or `pr`)
   - otherwise fail closed as ambiguous
 
-  The selected profile is versioned and digest-bound to the candidate, review,
-  approved execution plan, goal, and completion evidence.
+  The selected profile is digest-bound to the candidate, review, approved
+  execution plan, goal, and completion evidence.
 
   Record the selected workflow and reason in the local workpad, not Linear.
 
@@ -220,12 +220,6 @@ prompt: |
   - Use `Merging` only after human approval.
 
 workflows:
-  - name: agent-dashboard
-    output_path: workflows/agent-dashboard/workflow.md
-    tracker:
-      project_slug: d42b2f1089ce
-    repository:
-      url: git@github.com:bjornjee/agent-dashboard.git
   - name: symphony
     output_path: workflows/symphony/workflow.md
     tracker:
