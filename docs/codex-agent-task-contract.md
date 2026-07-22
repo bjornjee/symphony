@@ -28,7 +28,7 @@ Run:
 <low | medium | high>
 
 ## Notes For Agent
-<optional constraints, `Use agent-dashboard:<workflow>`, or known pitfalls>
+<optional constraints, exact `Workflow: feature|fix|refactor|chore|pr`, or known pitfalls>
 ```
 
 ## Semantics
@@ -44,9 +44,9 @@ Run:
   sufficient proof`.
 - `Risk` is required and should be `low`, `medium`, or `high`.
 - `Notes For Agent` is optional.
-- Use `Notes For Agent` for deterministic workflow routing. When an issue says
-  `Use agent-dashboard:<workflow>`, Symphony prepends
-  `$agent-dashboard:<workflow>` before handing the prompt to Codex.
+- Use `Notes For Agent` for deterministic workflow routing with one exact
+  `Workflow: feature|fix|refactor|chore|pr` line. Without it, Symphony falls
+  back to a conventional title prefix and otherwise fails closed.
 
 Symphony validates this shape before changing the claim state, creating a
 workspace, running a hook, or starting Codex. Empty, duplicate, out-of-order,
@@ -79,25 +79,37 @@ Linear reflects the handoff immediately.
 
 ## Agent Execution
 
-Symphony owns scheduling. The selected `agent-dashboard:*` workflow owns how
-the agent works inside the repository.
+Symphony owns scheduling, preactivation classification and review, and the
+selected built-in workflow profile.
+
+Before preactivation planning, Symphony classifies the pinned contract. A
+low-risk `feature` or `chore` may execute directly only when
+its conventional title matches the workflow, `Scope.In` names one path, there
+is one acceptance criterion, `Verification` contains one exact backtick-delimited
+command, and no risky or decomposition signal is present.
+All other tasks receive native planning and medium-effort automated review.
+`Planning: full` in `Notes For Agent` always selects the reviewed path.
 
 Agents must:
 
-- select the smallest matching `agent-dashboard` workflow before editing
-- follow that workflow's branch, worktree, environment setup, planning, proof,
-  commit, PR, and cleanup gates exactly
-- use isolated git worktrees for `feature`, `fix`, and `refactor` work
-- copy and validate `.env*` files when the selected workflow's worktree setup
-  requires it
-- run environment setup through the selected workflow's sentinel rules
+- execute the approved execution authorization sealed before goal activation
+- for planned tasks, execute typed phases in order, satisfy only prior-phase dependencies, and keep
+  exactly one native-plan phase in progress
+- for simple tasks, remain within the one approved path and proof command without manufacturing
+  native-plan phases
+- for planned tasks, mark a phase completed only after its proof and evidence requirements pass;
+  handoff requires an exact all-completed native plan
+- reuse Symphony's issue workspace and never create a nested worktree
+- create or resume one task branch from the pinned base after goal activation
+- follow the selected profile's proof, review, commit, and PR gates
 - avoid replacing workflow gates with ad hoc prompt reasoning
-- atomically write `.symphony/completion-evidence.json` v1 before requesting
+- atomically write `.symphony/completion-evidence.json` v2 before requesting
   human handoff
 - map every pinned criterion identity exactly once to an engine-observed,
   successful command proof event from the current run
 - include an HTTPS GitHub pull request URL for the workspace's `origin`
   repository
+- bind workflow-specific proof and the final reviewed local/PR head SHA
 - do not create the completed-work Linear handoff comment or move the issue;
   Symphony owns those writes after evidence validation
 
@@ -111,6 +123,5 @@ engine ledger remains authoritative for validation. Symphony also resolves the
 candidate URL with `gh pr view`; a syntactically valid but missing or inaccessible
 PR is not accepted.
 
-If the required workflow setup cannot be completed, stop and post one
-`## Agent Blocked` comment with the missing prerequisite and requested human
-action.
+If the required workflow setup cannot be completed, preserve the concrete failure evidence and
+stop. Symphony owns tracker publication and routing for blocked work.

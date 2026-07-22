@@ -89,7 +89,7 @@ defmodule SymphonyElixir.HandoffPublisher do
     criterion_lines =
       Enum.map_join(contract.acceptance_criteria, "\n", fn criterion ->
         true = MapSet.member?(validated_criterion_ids, criterion.id)
-        "- ✅ #{inline_text(criterion.text)} — passed with engine-observed command evidence"
+        "- ✅ #{inline_text(criterion.text)} — passed with an engine-owned proof receipt"
       end)
 
     marker_key = marker_key(issue, contract, evidence)
@@ -103,7 +103,7 @@ defmodule SymphonyElixir.HandoffPublisher do
 
     #{criterion_lines}
 
-    Verification: #{length(contract.acceptance_criteria)} acceptance criteria passed with engine-observed command evidence.
+    Verification: #{length(contract.acceptance_criteria)} acceptance criteria passed with engine-owned proof receipts.
 
     Human action: Review and approve the pull request.
 

@@ -74,9 +74,9 @@ not silently create a replacement.
      Team Settings → Workflow in Linear.
    - `tracker.handoff_state` defaults to `Human Review`. After validated completion evidence,
      Symphony publishes and reads back one deterministic handoff before applying this state.
-   - For the `agent-dashboard` operating setup, use `../workflow.md` and follow
-     `../docs/agent-dashboard-linear-setup.md` for the Linear setup, issue template, minimal
-     labels, decomposition rules, and invariant-driven guardrails.
+   - Use `../docs/codex-agent-task-contract.md` for native workflow selection,
+     issue structure, proof gates, and handoff requirements. No runtime workflow
+     plugin is required.
 6. Follow the instructions below to install the required runtime dependencies and start the service.
 
 ## Prerequisites

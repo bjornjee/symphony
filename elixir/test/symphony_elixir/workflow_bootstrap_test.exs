@@ -26,12 +26,12 @@ defmodule SymphonyElixir.WorkflowBootstrapTest do
       prompt: |
         You are working on Linear issue `{{ issue.identifier }}`.
       workflows:
-        - name: agent-dashboard
-          output_path: workflows/agent-dashboard/workflow.md
+        - name: alpha
+          output_path: workflows/alpha/workflow.md
           tracker:
-            project_slug: agent-project
+            project_slug: alpha-project
           repository:
-            url: git@github.com:bjornjee/agent-dashboard.git
+            url: git@github.com:example/alpha.git
         - name: symphony
           output_path: workflows/symphony/workflow.md
           tracker:
@@ -41,19 +41,19 @@ defmodule SymphonyElixir.WorkflowBootstrapTest do
       """)
 
       assert {:ok, workflows} = WorkflowBootstrap.bootstrap(manifest_path)
-      assert Enum.map(workflows, & &1.name) == ["agent-dashboard", "symphony"]
+      assert Enum.map(workflows, & &1.name) == ["alpha", "symphony"]
 
-      agent_workflow_path = Path.join(root, "workflows/agent-dashboard/workflow.md")
+      alpha_workflow_path = Path.join(root, "workflows/alpha/workflow.md")
       symphony_workflow_path = Path.join(root, "workflows/symphony/workflow.md")
 
-      assert File.read!(agent_workflow_path) =~ "project_slug: \"agent-project\""
-      assert File.read!(agent_workflow_path) =~ "root: \"~/Code/bjornjee/worktrees/agent-dashboard\""
-      assert File.read!(agent_workflow_path) =~ "git clone 'git@github.com:bjornjee/agent-dashboard.git' ."
+      assert File.read!(alpha_workflow_path) =~ "project_slug: \"alpha-project\""
+      assert File.read!(alpha_workflow_path) =~ "root: \"~/Code/bjornjee/worktrees/alpha\""
+      assert File.read!(alpha_workflow_path) =~ "git clone 'git@github.com:example/alpha.git' ."
       assert File.read!(symphony_workflow_path) =~ "project_slug: \"symphony-project\""
       assert File.read!(symphony_workflow_path) =~ "root: \"~/Code/bjornjee/worktrees/symphony\""
       assert File.read!(symphony_workflow_path) =~ "git clone 'git@github.com:bjornjee/symphony.git' ."
 
-      assert {:ok, %{config: config, prompt: prompt}} = Workflow.load(agent_workflow_path)
+      assert {:ok, %{config: config, prompt: prompt}} = Workflow.load(alpha_workflow_path)
       assert get_in(config, ["tracker", "required_labels"]) == ["codex-ready"]
       assert get_in(config, ["agent", "max_turns"]) == 12
       assert String.trim(prompt) == "You are working on Linear issue `{{ issue.identifier }}`."

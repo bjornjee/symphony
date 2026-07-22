@@ -70,7 +70,7 @@ defmodule SymphonyElixir.HandoffPublisherTest do
 
     Enum.each(context.contract.acceptance_criteria, fn criterion ->
       assert body =~ criterion.text
-      assert body =~ "passed with engine-observed command evidence"
+      assert body =~ "passed with an engine-owned proof receipt"
     end)
 
     refute body =~ "proof-"

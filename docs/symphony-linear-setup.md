@@ -10,8 +10,7 @@ Linear project:
 - Dispatch label: `codex-ready`
 - Marker label: `symphony`
 
-Use the same lifecycle states described in
-`docs/agent-dashboard-linear-setup.md` and the canonical issue shape in
+Use the canonical issue shape and native workflow routing described in
 `docs/codex-agent-task-contract.md`. The workflow remains project-agnostic;
 project specificity lives in the Linear project, issue content, repository URL,
 and workspace root configured in `workflow-manifest.yml`.
@@ -47,9 +46,9 @@ For the bounded pilot preflight, observable artifacts, diagnosis, retry, and
 rollback procedure, follow the
 [PIN-18 operational pilot runbook](pin-18-operational-pilot-runbook.md).
 
-For deterministic plugin routing, put the workflow directive in the issue's
-`Notes For Agent`, for example `Use agent-dashboard:chore`. Symphony turns that
-into the actual `$agent-dashboard:chore` invocation before Codex sees the task.
+For deterministic routing, put an exact workflow directive in the issue's
+`Notes For Agent`, for example `Workflow: chore`. Symphony selects and hashes
+its built-in profile before any workspace execution; no runtime plugin is required.
 
 ## Lifecycle Label Cleanup
 

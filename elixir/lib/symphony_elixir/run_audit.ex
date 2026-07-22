@@ -130,7 +130,7 @@ defmodule SymphonyElixir.RunAudit do
   end
 
   @spec append_codex_update(Path.t(), Issue.t(), map()) ::
-          {:ok, %{event_id: String.t(), exit_code: integer()} | nil}
+          {:ok, %{event_id: String.t(), exit_code: integer(), command: String.t() | nil} | nil}
   def append_codex_update(workspace, %Issue{} = issue, update)
       when is_binary(workspace) and is_map(update) do
     case codex_audit_attrs(update) do
@@ -277,7 +277,7 @@ defmodule SymphonyElixir.RunAudit do
        )
        when method in ["codex/event/exec_command_end", "item/completed"] and is_integer(exit_code) do
     event_id = "proof-" <> (:crypto.strong_rand_bytes(16) |> Base.url_encode64(padding: false))
-    {Map.put(attrs, :event_id, event_id), %{event_id: event_id, exit_code: exit_code}}
+    {Map.put(attrs, :event_id, event_id), %{event_id: event_id, exit_code: exit_code, command: Map.get(attrs, :command)}}
   end
 
   defp maybe_attach_command_proof(attrs), do: {attrs, nil}

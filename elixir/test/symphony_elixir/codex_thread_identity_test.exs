@@ -55,6 +55,16 @@ defmodule SymphonyElixir.CodexThreadIdentityTest do
     assert {:error, {:thread_identity_too_large, 4_097}} = ThreadIdentity.read(workspace)
   end
 
+  test "rejects a symlinked thread identity", %{workspace: workspace} do
+    target = Path.join(workspace, "agent-thread.json")
+    File.write!(target, Jason.encode!(%{"schema_version" => 1, "thread_id" => "thread-1"}))
+    File.mkdir_p!(Path.dirname(ThreadIdentity.path(workspace)))
+    File.ln_s!(target, ThreadIdentity.path(workspace))
+
+    assert {:error, {:thread_identity_read_failed, {:invalid_artifact_type, :symlink}}} =
+             ThreadIdentity.read(workspace)
+  end
+
   test "rejects invalid thread ids and artifact shapes", %{workspace: workspace} do
     assert {:error, :empty_thread_id} = ThreadIdentity.pin(workspace, "  ")
 

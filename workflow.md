@@ -10,7 +10,7 @@ codex:
   turn_sandbox_policy:
     type: "dangerFullAccess"
 hooks:
-  after_create: "git clone 'git@github.com:bjornjee/agent-dashboard.git' ."
+  after_create: "git clone 'git@github.com:bjornjee/symphony.git' ."
 polling:
   interval_ms: 30000
 tracker:
@@ -19,11 +19,11 @@ tracker:
   claim_state: "In Progress"
   handoff_state: "Human Review"
   kind: "linear"
-  project_slug: "d42b2f1089ce"
+  project_slug: "4c620c712be7"
   required_labels: ["codex-ready"]
   terminal_states: ["Closed", "Cancelled", "Canceled", "Duplicate", "Done"]
 workspace:
-  root: "~/Code/bjornjee/worktrees/agent-dashboard"
+  root: "~/Code/bjornjee/worktrees/symphony"
 ---
 
 You are working on Linear issue `{{ issue.identifier }}`.
@@ -42,9 +42,9 @@ Description:
 No description provided.
 {% endif %}
 
-This is an unattended Symphony session. Symphony schedules the run, sets a
-Codex app-server thread goal for the Linear issue, and owns callbacks.
-The agent-dashboard plugin provides quality conventions inside Codex.
+This is an unattended Symphony session. Symphony owns preactivation task
+classification, conditional planning and review, goal activation, workflow
+profiles, and tracker callbacks.
 
 ## Codex Agent Task v1
 
@@ -68,22 +68,17 @@ one focused proof command, decompose before implementation.
 
 ## Agent execution conventions
 
-Symphony owns scheduling, app-server goal setup, and Linear callbacks. The
-selected `agent-dashboard:*` workflow owns how you work inside the repository
-when it is compatible with unattended execution.
+Symphony owns scheduling, app-server goal setup, workflow selection, and
+Linear callbacks. Follow the trusted Symphony workflow profile appended to
+the execution prompt.
 
 You must:
 
-- select the smallest matching `agent-dashboard` workflow before editing
-- follow that workflow's branch, worktree, environment setup, proof, commit,
-  PR, and cleanup gates exactly when the workflow is unattended-compatible
-- for `agent-dashboard:feature`, preserve the worktree, env, planning,
-  verification, commit, PR, and handoff conventions without invoking the
-  interactive `$agent-dashboard:feature` skill gate
-- use isolated git worktrees for `feature`, `fix`, and `refactor` work
-- copy and validate `.env*` files when the selected workflow's worktree setup
-  requires it
-- run environment setup through the selected workflow's sentinel rules
+- execute only the approved execution authorization sealed before goal activation
+- reuse Symphony's prepared issue workspace; never create a nested worktree
+- create or resume one task branch from the pinned base before source edits
+- follow the selected profile's proof, review, commit, PR, and handoff gates
+- update native plan statuses for planned tasks; do not manufacture a plan for simple direct execution
 - avoid replacing workflow gates with ad hoc prompt reasoning
 
 If the required workflow setup cannot be completed, stop and post one
@@ -99,18 +94,19 @@ planning, progress, or raw proof comments to Linear.
 The local workpad should include:
 
 - context packet: ticket driver, target repo, links, affected paths, expected outcome
-- selected agent-dashboard workflow and reason
+- selected Symphony workflow profile and digest
 - execution context and scale shape
 - in-scope and out-of-scope boundaries
-- verification profile and proof command
+- verification profile and typed proof IDs
 - invariant contract only when risk requires it
 
-Linear comments are human-facing only. For completed implementation work,
-atomically write `.symphony/completion-evidence.json` and leave the issue
-active. Do not create `## Agent Handoff` or move the issue: Symphony renders
-one deterministic handoff from validated evidence, reads it back, and only
-then performs `tracker.handoff_state`. Questions, blockers, and decomposition
-remain governed by their existing semantic comment contracts.
+Linear comments are human-facing only. For completed implementation work, use
+the engine-owned proof, review, and `publish_pull_request` tools. Do not write
+completion evidence, push, create a PR directly, create `## Agent Handoff`, or
+move the issue: Symphony derives immutable evidence from its external ledger,
+renders one deterministic handoff, reads it back, and only then performs
+`tracker.handoff_state`. Questions, blockers, and decomposition remain governed
+by their existing semantic comment contracts.
 
 ## Run audit and latency control
 
@@ -143,23 +139,15 @@ or the full audit into Linear.
 
 ## Workflow selection
 
-Choose the smallest matching agent-dashboard workflow from issue content:
+Symphony selects exactly one built-in profile before workspace execution:
 
-- bug, regression, broken behavior: `agent-dashboard:fix`
-- new user-visible behavior: `agent-dashboard:feature`
-- docs, config, dependency, generated metadata, or mechanical change: `agent-dashboard:chore`
-- behavior-preserving structure change: `agent-dashboard:refactor`
-- PR finalization or release handoff: `agent-dashboard:pr`
+- exact `Workflow: feature|fix|refactor|chore|pr` in `Notes For Agent`
+- otherwise a conventional title prefix (`feat`, `fix`, `refactor`, `chore`,
+  `docs`, `ci`, `build`, or `pr`)
+- otherwise fail closed as ambiguous
 
-If the issue explicitly names an unattended-compatible
-`agent-dashboard:<workflow>`, Symphony may prepend the corresponding
-`$agent-dashboard:<workflow>` invocation before this prompt reaches Codex.
-Treat that as the selected plugin workflow.
-
-If the issue explicitly names `agent-dashboard:feature`, Symphony sets a real
-Codex app-server thread goal and injects a Symphony-compatible feature
-contract instead of invoking `$agent-dashboard:feature`, because that skill
-requires interactive Codex Plan Mode.
+The selected profile is digest-bound to the candidate, review, approved
+execution plan, goal, and completion evidence.
 
 Record the selected workflow and reason in the local workpad, not Linear.
 
@@ -210,13 +198,17 @@ comment with the proposed child issue bodies and stop.
   and project scope.
 - Do not expand scope for adjacent cleanup; create or propose a follow-up issue.
 - For completed work, do not create `## Agent Handoff` or move the issue;
-  atomically write completion evidence and let Symphony publish, read back,
-  and transition to `tracker.handoff_state`.
-- When implementation changes repository files, prefer a branch, commit, and PR
-  before handoff. The human-facing comment must include either the PR URL or
-  the reason no PR was created.
-- If a PR is created, completion evidence must contain its validated URL;
-  Symphony includes it and the exact reviewer action in `## Agent Handoff`.
+  commit the approved tree and call `publish_pull_request`. Symphony publishes,
+  derives completion evidence, reads the PR and handoff back, and transitions to
+  `tracker.handoff_state`.
+- Repository changes require the engine-created task branch, a conventional
+  commit, fresh final proof, and engine-owned PR publication before handoff.
+- Proof tools run approved commands through Symphony's bounded app-server
+  sandbox with workspace-only writes and no network; agent shell output is not
+  proof.
+- Symphony binds the validated PR URL, head, head branch, and base branch to
+  trusted completion evidence, re-reads the open PR immediately before handoff,
+  and includes the URL and exact reviewer action in `## Agent Handoff`.
 - Human-facing Linear comments must follow this convention:
   - `## Agent Handoff`: completed work, PR/diff link, verification, and action needed.
   - `## Agent Question`: exact question, options/tradeoffs, and why the agent stopped.

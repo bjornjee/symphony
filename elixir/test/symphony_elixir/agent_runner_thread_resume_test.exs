@@ -2,7 +2,6 @@ defmodule SymphonyElixir.AgentRunnerThreadResumeTest do
   use SymphonyElixir.TestSupport
 
   alias SymphonyElixir.Codex.ThreadIdentity
-  alias SymphonyElixir.CompletionEvidence
   alias SymphonyElixir.ExecutionManifest
   alias SymphonyElixir.HandoffPublisher
   alias SymphonyElixir.Linear.TaskContract
@@ -38,16 +37,17 @@ defmodule SymphonyElixir.AgentRunnerThreadResumeTest do
             printf '%s\n' '{"id":1,"result":{}}'
             ;;
           *'"method":"thread/start"'*)
-            printf '%s\n' '{"id":2,"result":{"thread":{"id":"thread-durable"}}}'
+            printf '%s\n' '{"id":2,"result":{"thread":{"id":"thread-durable"},"instructionSources":[]}}'
             ;;
           *'"method":"thread/resume"'*)
-            printf '%s\n' '{"id":5,"result":{"thread":{"id":"thread-durable"}}}'
+            printf '%s\n' '{"id":5,"result":{"thread":{"id":"thread-durable"},"instructionSources":[]}}'
             ;;
           *'"method":"thread/goal/set"'*)
             printf '%s\n' '{"id":4,"result":{"goal":{"status":"active"}}}'
             ;;
           *'"method":"turn/start"'*)
             printf '%s\n' '{"id":3,"result":{"turn":{"id":"turn-retry"}}}'
+            printf '%s\n' '{"method":"turn/plan/updated","params":{"plan":[{"step":"Implement and prove the task","status":"completed"}]}}'
             printf '%s\n' '{"method":"item/completed","params":{"item":{"type":"commandExecution","command":"mise exec -- make all","exitCode":0}}}'
             printf '%s\n' '{"method":"turn/completed"}'
             ;;
@@ -59,7 +59,7 @@ defmodule SymphonyElixir.AgentRunnerThreadResumeTest do
 
       write_workflow_file!(Workflow.workflow_file_path(),
         workspace_root: workspace_root,
-        hook_after_create: "cp #{Path.join(template_repo, "README.md")} README.md",
+        hook_after_create: "git clone #{template_repo} .",
         codex_command: "#{codex_binary} app-server"
       )
 
@@ -77,34 +77,26 @@ defmodule SymphonyElixir.AgentRunnerThreadResumeTest do
       assert {:ok, contract} = TaskContract.from_issue(issue)
       pull_request_url = "https://github.com/bjornjee/symphony/pull/15"
 
-      evidence_validator = fn workspace, evidence_issue, evidence_contract, proofs, _opts ->
-        [{proof_event_id, %{exit_code: 0}}] = Map.to_list(proofs)
+      evidence_validator = fn _workspace, _issue, evidence_contract, _proofs, opts ->
+        execution_plan = Keyword.fetch!(opts, :execution_plan)
 
-        payload = %{
-          "schema_version" => 1,
-          "issue_id" => evidence_issue.id,
-          "issue_identifier" => evidence_issue.identifier,
-          "plan_digest" => evidence_contract.digest,
-          "pull_request_url" => pull_request_url,
-          "criteria" =>
-            Enum.map(evidence_contract.acceptance_criteria, fn criterion ->
-              %{
-                "criterion_id" => criterion.id,
-                "proof" => %{"kind" => "run_audit_command", "event_id" => proof_event_id}
-              }
-            end)
-        }
-
-        File.mkdir_p!(Path.dirname(CompletionEvidence.path(workspace)))
-        File.write!(CompletionEvidence.path(workspace), Jason.encode!(payload))
-
-        CompletionEvidence.validate(workspace, evidence_issue, evidence_contract, proofs,
-          origin_url: "git@github.com:bjornjee/symphony.git",
-          pull_request_verifier: fn url, _workspace, _worker_host -> {:ok, url} end
-        )
+        {:ok,
+         %{
+           artifact_digest: execution_plan["plan_digest"],
+           criteria:
+             Enum.map(evidence_contract.acceptance_criteria, fn criterion ->
+               %{criterion_id: criterion.id, proof_event_id: "trusted-proof-receipt"}
+             end),
+           pull_request_url: pull_request_url,
+           repository_head_sha: String.duplicate("a", 40),
+           execution_plan_digest: execution_plan["plan_digest"],
+           workflow: execution_plan["workflow"],
+           profile_digest: execution_plan["profile_digest"]
+         }}
       end
 
       test_pid = self()
+      {:ok, planning_calls} = Agent.start_link(fn -> 0 end)
 
       publisher = fn published_issue, published_contract, evidence, opts ->
         comment_id = HandoffPublisher.comment_id(published_issue, published_contract, evidence)
@@ -120,7 +112,20 @@ defmodule SymphonyElixir.AgentRunnerThreadResumeTest do
       run_opts = [
         issue_state_fetcher: issue_state_fetcher,
         completion_evidence_validator: evidence_validator,
-        handoff_publisher: publisher
+        handoff_publisher: publisher,
+        planning_lifecycle_runner: fn session, workspace, planned_issue, planned_contract, profile, opts ->
+          Agent.update(planning_calls, &(&1 + 1))
+
+          approve_execution_plan_with_phase(
+            session,
+            workspace,
+            planned_issue,
+            planned_contract,
+            profile,
+            opts
+          )
+        end,
+        task_branch_ensurer: &accept_task_branch/5
       ]
 
       assert :ok = AgentRunner.run(issue, nil, run_opts)
@@ -138,6 +143,7 @@ defmodule SymphonyElixir.AgentRunnerThreadResumeTest do
       assert File.read!(ExecutionManifest.path(workspace)) == first_manifest
       assert {:ok, "thread-durable"} = ThreadIdentity.read(workspace)
       assert_receive {:published_handoff, ^first_comment_id, ^first_artifact_digest}
+      assert Agent.get(planning_calls, & &1) == 1
 
       requests =
         trace_file
@@ -160,5 +166,40 @@ defmodule SymphonyElixir.AgentRunnerThreadResumeTest do
     after
       File.rm_rf(test_root)
     end
+  end
+
+  defp approve_execution_plan_with_phase(session, workspace, issue, contract, profile, opts) do
+    {:ok, execution_plan} =
+      SymphonyElixir.TestSupport.approve_execution_plan(
+        session,
+        workspace,
+        issue,
+        contract,
+        profile,
+        opts
+      )
+
+    ordered_steps = [
+      %{
+        "id" => "implement",
+        "step" => "Implement and prove the task",
+        "status" => "in_progress",
+        "affected_paths" => ["README.md"],
+        "depends_on" => [],
+        "verification_profile" => "Targeted",
+        "proof_ids" => ["final"],
+        "criterion_ids" => [],
+        "invariants" => ["the approved task remains bounded"],
+        "stop_conditions" => ["stop if the task contract changes"],
+        "evidence_requirements" => ["final proof event"]
+      }
+    ]
+
+    semantic =
+      execution_plan
+      |> Map.delete("plan_digest")
+      |> put_in(["candidate", "ordered_steps"], ordered_steps)
+
+    {:ok, Map.put(semantic, "plan_digest", SymphonyElixir.PlanningArtifact.digest(semantic))}
   end
 end

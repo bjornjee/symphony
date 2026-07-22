@@ -448,56 +448,19 @@ defmodule SymphonyElixir.LiveE2ETest do
     """
   end
 
-  defp live_pilot_prompt(project_slug, pull_request_url) do
+  defp live_pilot_prompt(project_slug, _publication_enabled) do
     """
-    You are running the real PIN-18 operational pilot in a disposable workspace.
+    You are running the engine-owned workflow-control pilot in a disposable workspace.
 
-    On the first attempt, when `.symphony/pin18-first-attempt` is absent, run exactly:
+    Create #{@result_file} with exactly:
 
-    ```sh
-    cat > #{@result_file} <<'EOF'
     identifier={{ issue.identifier }}
     project_slug=#{project_slug}
-    EOF
-    touch .symphony/pin18-first-attempt
-    ```
 
-    Do not create `.symphony/completion-evidence.json` on that first attempt. Stop after the marker exists.
-
-    On the resumed attempt, when `.symphony/pin18-first-attempt` exists, first run this verification as
-    one command:
-
-    ```sh
-    diff -u - #{@result_file} <<'EOF'
-    identifier={{ issue.identifier }}
-    project_slug=#{project_slug}
-    EOF
-    ```
-
-    Then run this as a separate command to atomically create evidence from that exact successful audit event:
-
-    ```sh
-    proof_event_id=$(jq -r 'select(.event == "codex_update" and .phase == "command" and .status == "completed" and .exit_code == 0 and ((.command // "") | contains("diff -u - #{@result_file}"))) | .event_id' .symphony/run-audit.jsonl | tail -n 1)
-    test -n "$proof_event_id"
-    jq --arg event_id "$proof_event_id" --arg pr_url #{shell_escape(pull_request_url)} '
-      . as $manifest |
-      {
-        schema_version: 1,
-        issue_id: $manifest.issue_id,
-        issue_identifier: $manifest.issue_identifier,
-        plan_digest: $manifest.plan_digest,
-        pull_request_url: $pr_url,
-        criteria: [
-          $manifest.acceptance_criteria[] |
-          {criterion_id: .id, proof: {kind: "run_audit_command", event_id: $event_id}}
-        ]
-      }
-    ' .symphony/execution-manifest.json > .symphony/completion-evidence.json.tmp
-    mv .symphony/completion-evidence.json.tmp .symphony/completion-evidence.json
-    ```
-
-    Do not call Linear tools, create comments, or move the issue. Symphony owns the verified handoff.
-    Stop after the evidence file is in place.
+    Follow the approved typed proof and phase contract exactly. Commit conventionally, run proofs only
+    through `run_plan_proof`, complete every phase, request the isolated implementation review, and
+    publish only through `publish_pull_request`. Do not push, create evidence, call Linear tools,
+    create comments, or move the issue yourself.
     """
   end
 
@@ -609,7 +572,7 @@ defmodule SymphonyElixir.LiveE2ETest do
         project["id"],
         active_state["id"],
         "Symphony live e2e #{context.backend} issue for #{project["name"]}",
-        if(context.pilot?, do: live_pilot_description(), else: valid_description())
+        live_agent_description(project["slugId"])
       )
 
     write_live_workflow!(context, team, handoff_state, project)
@@ -650,6 +613,13 @@ defmodule SymphonyElixir.LiveE2ETest do
   defp verify_live_agent_flow!(context, issue, project, completed_project_status) do
     {runtime_info, pilot_context} = run_live_agent!(context.backend, issue)
 
+    ordering_events =
+      if pilot_context,
+        do: pilot_context.first_events,
+        else: read_audit_events!(runtime_info.audit_events_path)
+
+    assert_preactivation_order!(ordering_events)
+
     assert read_worker_result!(runtime_info, @result_file) ==
              expected_result(issue.identifier, project["slugId"])
 
@@ -683,10 +653,13 @@ defmodule SymphonyElixir.LiveE2ETest do
     assert issue_has_comment?(issue_snapshot, HandoffPublisher.render(issue, contract, evidence))
   end
 
-  defp pilot_after_create_hook(true),
-    do: "git init -q && git remote add origin git@github.com:bjornjee/symphony.git"
-
-  defp pilot_after_create_hook(false), do: nil
+  defp pilot_after_create_hook(_pilot?) do
+    "git init -q && git config user.email symphony-live@example.com && " <>
+      "git config user.name 'Symphony Live' && git commit --allow-empty -qm initial && " <>
+      "git remote add origin git@github.com:bjornjee/symphony.git && " <>
+      "git update-ref refs/remotes/origin/main HEAD && " <>
+      "git symbolic-ref refs/remotes/origin/HEAD refs/remotes/origin/main"
+  end
 
   defp live_issue_prompt(true, project_slug) do
     live_pilot_prompt(project_slug, System.fetch_env!("SYMPHONY_LIVE_PULL_REQUEST_URL"))
@@ -723,16 +696,40 @@ defmodule SymphonyElixir.LiveE2ETest do
     end
   end
 
-  defp live_pilot_description do
+  defp live_agent_description(project_slug) do
     valid_description(%{
-      "Goal" => "Prove the bounded PIN-18 operational handoff with a disposable Linear issue.",
+      "Goal" => "Create LIVE_E2E_RESULT.txt with the exact two-line result specified in Context.",
+      "Context" => "Write exactly `identifier=<current Linear identifier>` followed by `project_slug=#{project_slug}` on the next line.",
       "Scope" => "In:\n- LIVE_E2E_RESULT.txt\n\nOut:\n- repository source changes",
       "Acceptance Criteria" =>
         "- [ ] LIVE_E2E_RESULT.txt exists in the prepared workspace.\n" <>
           "- [ ] LIVE_E2E_RESULT.txt contains the exact issue identifier and disposable project slug.",
-      "Verification" => "Run:\n`cat LIVE_E2E_RESULT.txt`",
-      "Risk" => "low"
+      "Verification" =>
+        "Run:\n`test \"$(wc -l < LIVE_E2E_RESULT.txt)\" -eq 2 && " <>
+          "grep -Eq '^identifier=[A-Z]+-[0-9]+$' LIVE_E2E_RESULT.txt && " <>
+          "grep -Fx 'project_slug=#{project_slug}' LIVE_E2E_RESULT.txt`",
+      "Risk" => "medium",
+      "Notes For Agent" => "Workflow: feature\nFeature RED is required because the verification fails before the file exists."
     })
+  end
+
+  defp assert_preactivation_order!(events) do
+    ordered = [
+      "execution_plan_candidate_persisted",
+      "execution_plan_review_persisted",
+      "execution_plan_approved",
+      "codex_goal_set",
+      "codex_turn_started"
+    ]
+
+    indexes =
+      Enum.map(ordered, fn event ->
+        Enum.find_index(events, &(&1["event"] == event)) ||
+          flunk("missing live preactivation event #{event}")
+      end)
+
+    assert indexes == Enum.sort(indexes)
+    assert length(indexes) == length(Enum.uniq(indexes))
   end
 
   defp run_live_agent!(:local, issue) do
@@ -761,59 +758,70 @@ defmodule SymphonyElixir.LiveE2ETest do
     {receive_runtime_info!(issue.id), nil}
   end
 
-  defp run_live_pilot_agent!(issue, pull_request_url) do
-    assert :ok = AgentRunner.run(issue, self(), max_turns: 1)
-    first_runtime = receive_runtime_info!(issue.id)
-    assert {:ok, first_thread_id} = ThreadIdentity.read(first_runtime.workspace_path)
-    first_manifest = File.read!(ExecutionManifest.path(first_runtime.workspace_path))
-    manifest_sha256 = :crypto.hash(:sha256, first_manifest) |> Base.encode16(case: :lower)
-
-    first_events = read_audit_events!(first_runtime.audit_events_path)
-    assert Enum.any?(first_events, &(&1["event"] == "handoff_evidence_pending"))
-    assert Enum.any?(first_events, &(&1["event"] == "codex_goal_updated" and &1["goal_status"] == "active"))
-    refute File.exists?(CompletionEvidence.path(first_runtime.workspace_path))
-
-    assert :ok = AgentRunner.run(issue, self(), max_turns: 3)
-    second_runtime = receive_runtime_info!(issue.id)
-    assert second_runtime.workspace_path == first_runtime.workspace_path
-    assert {:ok, ^first_thread_id} = ThreadIdentity.read(second_runtime.workspace_path)
-    assert File.read!(ExecutionManifest.path(second_runtime.workspace_path)) == first_manifest
-
-    second_events = read_audit_events!(second_runtime.audit_events_path)
-    assert Enum.any?(second_events, &(&1["event"] == "handoff_evidence_validated"))
-    assert Enum.any?(second_events, &(&1["event"] == "codex_goal_updated" and &1["goal_status"] == "complete"))
+  defp run_live_pilot_agent!(issue, _publication_enabled) do
+    assert :ok = AgentRunner.run(issue, self(), max_turns: 6)
+    runtime = receive_runtime_info!(issue.id)
+    assert {:ok, thread_id} = ThreadIdentity.read(runtime.workspace_path)
+    manifest = File.read!(ExecutionManifest.path(runtime.workspace_path))
+    manifest_sha256 = :crypto.hash(:sha256, manifest) |> Base.encode16(case: :lower)
+    events = read_audit_events!(runtime.audit_events_path)
+    assert_engine_control_order!(events)
+    assert Enum.any?(events, &(&1["event"] == "handoff_evidence_validated"))
+    assert Enum.any?(events, &(&1["event"] == "codex_goal_updated" and &1["goal_status"] == "complete"))
 
     evidence =
-      second_runtime.workspace_path
+      runtime.workspace_path
       |> CompletionEvidence.path()
       |> File.read!()
       |> Jason.decode!()
 
-    assert_exact_pilot_proof!(evidence, second_events)
+    assert_exact_pilot_proof!(evidence, events)
 
-    {second_runtime,
+    {runtime,
      %{
        evidence: evidence,
-       first_thread_id: first_thread_id,
-       first_events: first_events,
-       second_events: second_events,
+       first_thread_id: thread_id,
+       first_events: events,
+       second_events: events,
        manifest_sha256: manifest_sha256,
-       pull_request_url: pull_request_url
+       pull_request_url: evidence["pull_request_url"]
      }}
   end
 
   defp assert_exact_pilot_proof!(evidence, events) do
-    proof_event_ids =
-      evidence["criteria"]
-      |> Enum.map(&get_in(&1, ["proof", "event_id"]))
-      |> Enum.uniq()
+    assert evidence["schema_version"] == 3
+    proof_receipts = evidence["criteria"] |> Enum.map(& &1["proof_receipt_digest"]) |> Enum.uniq()
+    assert proof_receipts != []
 
-    assert [proof_event_id] = proof_event_ids
-
-    assert Enum.any?(events, fn event ->
-             event["event_id"] == proof_event_id and event["exit_code"] == 0 and
-               String.contains?(event["command"] || "", "diff -u - #{@result_file}")
+    assert Enum.all?(proof_receipts, fn digest ->
+             Enum.any?(events, fn event ->
+               event["event"] == "execution_proof_recorded" and
+                 event["receipt_digest"] == digest and event["proof_role"] in ["final", "validator"] and
+                 event["proof_passed"] == true
+             end)
            end)
+  end
+
+  defp assert_engine_control_order!(events) do
+    required = [
+      {"execution_plan_approved", nil},
+      {"codex_goal_set", nil},
+      {"execution_proof_recorded", "red"},
+      {"execution_phase_completed", nil},
+      {"execution_proof_recorded", "final"},
+      {"implementation_review_recorded", nil},
+      {"pull_request_published", nil}
+    ]
+
+    indexes =
+      Enum.map(required, fn {name, role} ->
+        Enum.find_index(events, fn event ->
+          event["event"] == name and (is_nil(role) or event["proof_role"] == role)
+        end) || flunk("missing live engine-control event #{name} #{role}")
+      end)
+
+    assert indexes == Enum.sort(indexes)
+    assert length(indexes) == length(Enum.uniq(indexes))
   end
 
   defp read_audit_events!(path) do
@@ -843,12 +851,6 @@ defmodule SymphonyElixir.LiveE2ETest do
           "attempts" => [
             %{
               "attempt" => 1,
-              "thread_id" => context.first_thread_id,
-              "goal_status" => "active",
-              "evidence_result" => "pending"
-            },
-            %{
-              "attempt" => 2,
               "thread_id" => context.first_thread_id,
               "goal_status" => "complete",
               "evidence_result" => "validated"

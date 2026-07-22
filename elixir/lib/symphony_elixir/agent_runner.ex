@@ -8,12 +8,23 @@ defmodule SymphonyElixir.AgentRunner do
   alias SymphonyElixir.Codex.ThreadIdentity
   alias SymphonyElixir.CompletionEvidence
   alias SymphonyElixir.Config
+  alias SymphonyElixir.DeliveryControl
+  alias SymphonyElixir.ExecutionControl
+  alias SymphonyElixir.ExecutionLedger
   alias SymphonyElixir.ExecutionManifest
+  alias SymphonyElixir.ExecutionPlanProgress
   alias SymphonyElixir.HandoffPublisher
+  alias SymphonyElixir.HumanReviewBlocker
+  alias SymphonyElixir.InstructionAuthority
   alias SymphonyElixir.Linear.{Issue, TaskContract}
+  alias SymphonyElixir.PlanningArtifact
+  alias SymphonyElixir.PlanningLifecycle
   alias SymphonyElixir.PromptBuilder
+  alias SymphonyElixir.RepositoryFingerprint
   alias SymphonyElixir.RunAudit
+  alias SymphonyElixir.TaskBranch
   alias SymphonyElixir.Tracker
+  alias SymphonyElixir.WorkflowProfile
   alias SymphonyElixir.Workspace
 
   @type worker_host :: String.t() | nil
@@ -69,31 +80,37 @@ defmodule SymphonyElixir.AgentRunner do
 
   @spec run(Issue.t(), pid() | nil, keyword()) :: :ok | no_return()
   def run(issue, codex_update_recipient \\ nil, opts \\ []) do
-    case task_contract_for_issue(issue, opts) do
-      {:ok, task_contract} ->
-        opts = Keyword.put(opts, :task_contract, task_contract)
-        # The orchestrator owns host retries so one worker lifetime never hops machines.
-        worker_host = selected_worker_host(Keyword.get(opts, :worker_host), Config.settings!().worker.ssh_hosts)
+    with {:ok, task_contract} <- task_contract_for_issue(issue, opts),
+         {:ok, workflow_profile} <- WorkflowProfile.select(task_contract) do
+      opts =
+        opts
+        |> Keyword.put(:task_contract, task_contract)
+        |> Keyword.put(:workflow_profile, workflow_profile)
 
-        Logger.info("Starting agent run for #{issue_context(issue)} worker_host=#{worker_host_for_log(worker_host)} plan_digest=#{task_contract.digest}")
+      # The orchestrator owns host retries so one worker lifetime never hops machines.
+      worker_host = selected_worker_host(Keyword.get(opts, :worker_host), Config.settings!().worker.ssh_hosts)
 
-        case run_on_worker_host(issue, codex_update_recipient, opts, worker_host) do
-          :ok ->
-            :ok
+      Logger.info(
+        "Starting agent run for #{issue_context(issue)} worker_host=#{worker_host_for_log(worker_host)} contract_digest=#{task_contract.digest} workflow=#{workflow_profile.name} workflow_digest=#{workflow_profile.digest}"
+      )
 
-          {:error, reason} ->
-            Logger.error("Agent run failed for #{issue_context(issue)}: #{inspect(reason)}")
-            raise RuntimeError, "Agent run failed for #{issue_context(issue)}: #{inspect(reason)}"
-        end
+      case run_on_worker_host(issue, codex_update_recipient, opts, worker_host) do
+        :ok ->
+          :ok
 
+        {:error, reason} ->
+          Logger.error("Agent run failed for #{issue_context(issue)}: #{inspect(reason)}")
+          raise RuntimeError, "Agent run failed for #{issue_context(issue)}: #{inspect(reason)}"
+      end
+    else
       {:error, errors} when is_list(errors) ->
         message = Enum.join(errors, "; ")
         Logger.warning("Task contract invalid for #{issue_context(issue)}: #{message}")
         raise RuntimeError, "Task contract invalid for #{issue_context(issue)}: #{message}"
 
       {:error, reason} ->
-        Logger.warning("Task contract rejected for #{issue_context(issue)}: #{inspect(reason)}")
-        raise RuntimeError, "Task contract rejected for #{issue_context(issue)}: #{inspect(reason)}"
+        Logger.warning("Task contract or workflow rejected for #{issue_context(issue)}: #{inspect(reason)}")
+        raise RuntimeError, "Task contract or workflow rejected for #{issue_context(issue)}: #{inspect(reason)}"
     end
   end
 
@@ -165,19 +182,31 @@ defmodule SymphonyElixir.AgentRunner do
   defp normalize_run_result({:ok, _completion_info}), do: :ok
   defp normalize_run_result({:error, _reason} = error), do: error
 
-  defp codex_message_handler(recipient, issue, workspace, proof_ledger) do
+  defp codex_message_handler(recipient, issue, workspace, proof_ledger, plan_progress, worker_host) do
     fn message ->
       case RunAudit.append_codex_update(workspace, issue, message) do
-        {:ok, %{event_id: event_id, exit_code: exit_code}} ->
-          record_observed_proof(proof_ledger, event_id, exit_code)
+        {:ok, %{event_id: event_id} = proof} ->
+          record_observed_proof(proof_ledger, event_id, proof, workspace, worker_host)
 
         {:ok, nil} ->
           :ok
       end
 
+      record_native_plan_progress(plan_progress, message)
+
       send_codex_update(recipient, issue, message)
     end
   end
+
+  defp record_native_plan_progress(
+         plan_progress,
+         %{payload: %{"method" => "turn/plan/updated", "params" => params}}
+       ) do
+    plan = params["plan"] || params["steps"] || params["items"]
+    if is_list(plan), do: Agent.update(plan_progress, fn _previous -> plan end), else: :ok
+  end
+
+  defp record_native_plan_progress(_plan_progress, _message), do: :ok
 
   defp send_codex_update(recipient, %Issue{id: issue_id}, message)
        when is_binary(issue_id) and is_pid(recipient) do
@@ -219,11 +248,13 @@ defmodule SymphonyElixir.AgentRunner do
     task_contract = Keyword.fetch!(opts, :task_contract)
 
     {:ok, proof_ledger} = Agent.start_link(fn -> %{} end)
+    {:ok, plan_progress} = Agent.start_link(fn -> nil end)
 
     runtime = %{
       issue_state_fetcher: issue_state_fetcher,
       opts: opts,
       proof_ledger: proof_ledger,
+      plan_progress: plan_progress,
       worker_host: worker_host
     }
 
@@ -241,38 +272,115 @@ defmodule SymphonyElixir.AgentRunner do
           try do
             runtime = Map.put(runtime, :thread_id, session.thread_id)
 
-            with {:ok, _thread_id} <-
-                   ThreadIdentity.pin(workspace, session.thread_id, worker_host),
-                 :ok <- AppServer.set_goal(session, goal_objective(issue)) do
-              RunAudit.append(workspace, issue, :codex_goal_set, %{
-                phase: "codex_goal",
-                status: "completed",
-                goal_status: "active",
-                thread_id: session.thread_id
-              })
-
-              result =
-                do_run_codex_turns(
-                  session,
-                  workspace,
-                  issue,
-                  task_contract,
-                  codex_update_recipient,
-                  runtime,
-                  {1, max_turns}
+            with {:ok, instruction_authority} <-
+                   InstructionAuthority.capture(session.instruction_sources, worker_host) do
+              planning_opts =
+                runtime.opts
+                |> Keyword.put(:worker_host, worker_host)
+                |> Keyword.put(:instruction_authority, instruction_authority)
+                |> Keyword.put(
+                  :on_message,
+                  codex_message_handler(
+                    codex_update_recipient,
+                    issue,
+                    workspace,
+                    runtime.proof_ledger,
+                    runtime.plan_progress,
+                    worker_host
+                  )
                 )
+                |> Keyword.put(:lifecycle_event, fn event, attrs ->
+                  RunAudit.append(workspace, issue, event, attrs)
 
-              update_goal_for_result(session, workspace, issue, result)
-            else
-              {:error, reason} = error ->
-                RunAudit.append(workspace, issue, :codex_goal_failed, %{
-                  phase: "codex_goal",
-                  status: "failed",
-                  reason: reason,
-                  thread_id: session.thread_id
+                  send_codex_update(codex_update_recipient, issue, %{
+                    event: :workflow_phase,
+                    timestamp: DateTime.utc_now(),
+                    phase: attrs[:phase],
+                    status: attrs[:status],
+                    revision: attrs[:revision],
+                    verdict: attrs[:verdict]
+                  })
+                end)
+
+              planning_runner =
+                Keyword.get(runtime.opts, :planning_lifecycle_runner, &PlanningLifecycle.run/6)
+
+              task_branch_ensurer =
+                Keyword.get(runtime.opts, :task_branch_ensurer, &TaskBranch.ensure/5)
+
+              with {:ok, _thread_id} <- ThreadIdentity.pin(workspace, session.thread_id, worker_host),
+                   {:ok, execution_plan} <-
+                     execution_plan_for_run(
+                       planning_runner,
+                       session,
+                       workspace,
+                       issue,
+                       task_contract,
+                       Keyword.fetch!(runtime.opts, :workflow_profile),
+                       instruction_authority,
+                       planning_opts
+                     ),
+                   ledger_key <- execution_ledger_key(execution_plan, issue),
+                   :ok <-
+                     persist_execution_authority(
+                       ledger_key,
+                       execution_plan,
+                       instruction_authority,
+                       session,
+                       issue
+                     ),
+                   :ok <- record_execution_plan_approved(workspace, issue, session, execution_plan),
+                   :ok <- set_goal_and_record(workspace, issue, session, task_contract, execution_plan),
+                   {:ok, task_branch} <-
+                     task_branch_ensurer.(
+                       workspace,
+                       issue,
+                       execution_plan["workflow"],
+                       execution_plan_base_sha(execution_plan),
+                       worker_host
+                     ) do
+                RunAudit.append(workspace, issue, :task_branch_ready, %{
+                  phase: "implementation",
+                  status: "completed",
+                  branch: task_branch,
+                  base_sha: execution_plan_base_sha(execution_plan)
                 })
 
-                error
+                Agent.update(runtime.proof_ledger, fn _planning_proofs -> %{} end)
+                Agent.update(runtime.plan_progress, fn _planning_plan -> nil end)
+
+                runtime = %{
+                  runtime
+                  | opts:
+                      runtime.opts
+                      |> Keyword.put(:execution_plan, execution_plan)
+                      |> Keyword.put(:execution_ledger_key, ledger_key)
+                      |> Keyword.put(:instruction_authority, instruction_authority)
+                }
+
+                result =
+                  do_run_codex_turns(
+                    session,
+                    workspace,
+                    issue,
+                    task_contract,
+                    codex_update_recipient,
+                    runtime,
+                    {1, max_turns}
+                  )
+
+                update_goal_for_result(session, workspace, issue, result)
+              else
+                {:error, reason} = error ->
+                  RunAudit.append(workspace, issue, :codex_goal_failed, %{
+                    phase: "codex_goal",
+                    status: "failed",
+                    reason: reason,
+                    thread_id: session.thread_id
+                  })
+
+                  error
+              end
             end
           after
             RunAudit.append(workspace, issue, :codex_app_server_stopping, %{phase: "codex_app_server", status: "stopping"})
@@ -285,16 +393,61 @@ defmodule SymphonyElixir.AgentRunner do
       end
     after
       Agent.stop(proof_ledger)
+      Agent.stop(plan_progress)
+    end
+  end
+
+  defp record_execution_plan_approved(workspace, issue, session, execution_plan) do
+    RunAudit.append(workspace, issue, :execution_plan_approved, %{
+      phase: if(execution_plan["execution_mode"] == "simple", do: "classification", else: "planning"),
+      status: "completed",
+      execution_mode: execution_plan["execution_mode"] || "planned",
+      plan_digest: execution_plan["plan_digest"],
+      workflow: execution_plan["workflow"],
+      profile_digest: execution_plan["profile_digest"],
+      thread_id: session.thread_id
+    })
+
+    :ok
+  end
+
+  defp execution_plan_base_sha(%{"repository" => %{"base_sha" => base_sha}}), do: base_sha
+
+  defp execution_plan_base_sha(execution_plan),
+    do: get_in(execution_plan, ["candidate", "repository", "base_sha"])
+
+  defp set_goal_and_record(workspace, issue, session, task_contract, execution_plan) do
+    with :ok <- AppServer.set_goal(session, goal_objective(issue, task_contract, execution_plan)) do
+      RunAudit.append(workspace, issue, :codex_goal_set, %{
+        phase: "codex_goal",
+        status: "completed",
+        goal_status: "active",
+        plan_digest: execution_plan["plan_digest"],
+        thread_id: session.thread_id
+      })
+
+      :ok
     end
   end
 
   defp start_codex_session(workspace, worker_host) do
     case ThreadIdentity.read(workspace, worker_host) do
       :missing ->
-        AppServer.start_session(workspace, worker_host: worker_host)
+        AppServer.start_session(workspace,
+          worker_host: worker_host,
+          dynamic_tools:
+            PlanningArtifact.candidate_tool_specs() ++
+              ExecutionControl.tool_specs() ++ DeliveryControl.tool_specs()
+        )
 
       {:ok, thread_id} ->
-        AppServer.start_session(workspace, worker_host: worker_host, thread_id: thread_id)
+        AppServer.start_session(workspace,
+          worker_host: worker_host,
+          thread_id: thread_id,
+          dynamic_tools:
+            PlanningArtifact.candidate_tool_specs() ++
+              ExecutionControl.tool_specs() ++ DeliveryControl.tool_specs()
+        )
 
       {:error, _reason} = error ->
         error
@@ -332,7 +485,7 @@ defmodule SymphonyElixir.AgentRunner do
   defp goal_status_for_result({:ok, %{issue_routable: false}}), do: "complete"
 
   defp goal_status_for_result({:error, {reason, _details}})
-       when reason in [:turn_input_required, :approval_required],
+       when reason in [:turn_input_required, :approval_required, :instruction_drift_human_review],
        do: "blocked"
 
   defp goal_status_for_result(_result), do: "active"
@@ -346,33 +499,362 @@ defmodule SymphonyElixir.AgentRunner do
          runtime,
          {turn_number, max_turns}
        ) do
-    prompt = build_turn_prompt(issue, runtime.opts, turn_number, max_turns)
-    RunAudit.append(workspace, issue, :codex_turn_started, %{phase: "codex_turn", status: "started", turn_number: turn_number})
+    case revalidate_execution_authority(app_session, workspace, issue, task_contract, runtime) do
+      :ok ->
+        prompt = build_turn_prompt(issue, runtime.opts, turn_number, max_turns)
+        RunAudit.append(workspace, issue, :codex_turn_started, %{phase: "codex_turn", status: "started", turn_number: turn_number})
 
-    case AppServer.run_turn(
-           app_session,
-           prompt,
-           issue,
-           on_message: codex_message_handler(codex_update_recipient, issue, workspace, runtime.proof_ledger)
-         ) do
-      {:ok, turn_session} ->
-        Logger.info("Completed agent run for #{issue_context(issue)} session_id=#{turn_session[:session_id]} workspace=#{workspace} turn=#{turn_number}/#{max_turns}")
-        RunAudit.append(workspace, issue, :codex_turn_completed, %{phase: "codex_turn", status: "completed", session_id: turn_session[:session_id], turn_number: turn_number})
+        case AppServer.run_turn(
+               app_session,
+               prompt,
+               issue,
+               sandbox_policy: %{
+                 "type" => "workspaceWrite",
+                 "writableRoots" => [workspace],
+                 "networkAccess" => false
+               },
+               tool_executor:
+                 execution_tool_executor(
+                   app_session,
+                   runtime,
+                   workspace,
+                   issue,
+                   task_contract
+                 ),
+               on_message:
+                 codex_message_handler(
+                   codex_update_recipient,
+                   issue,
+                   workspace,
+                   runtime.proof_ledger,
+                   runtime.plan_progress,
+                   runtime.worker_host
+                 )
+             ) do
+          {:ok, turn_session} ->
+            Logger.info("Completed agent run for #{issue_context(issue)} session_id=#{turn_session[:session_id]} workspace=#{workspace} turn=#{turn_number}/#{max_turns}")
+            RunAudit.append(workspace, issue, :codex_turn_completed, %{phase: "codex_turn", status: "completed", session_id: turn_session[:session_id], turn_number: turn_number})
 
-        handle_completed_turn(
-          app_session,
-          workspace,
-          issue,
-          task_contract,
-          codex_update_recipient,
-          runtime,
-          {turn_number, max_turns}
-        )
+            handle_completed_turn(
+              app_session,
+              workspace,
+              issue,
+              task_contract,
+              codex_update_recipient,
+              runtime,
+              {turn_number, max_turns}
+            )
 
-      {:error, reason} = error ->
-        RunAudit.append(workspace, issue, :codex_turn_failed, %{phase: "codex_turn", status: "failed", reason: reason, turn_number: turn_number})
+          {:error, reason} = error ->
+            RunAudit.append(workspace, issue, :codex_turn_failed, %{phase: "codex_turn", status: "failed", reason: reason, turn_number: turn_number})
+            error
+        end
+
+      {:error, :instruction_drift} ->
+        handle_instruction_drift(workspace, issue, task_contract, runtime)
+
+      {:error, _reason} = error ->
         error
     end
+  end
+
+  defp handle_instruction_drift(workspace, issue, contract, runtime) do
+    plan = Keyword.fetch!(runtime.opts, :execution_plan)
+
+    with {:ok, repository} <- RepositoryFingerprint.capture(workspace, runtime.worker_host) do
+      if repository.clean and repository.base_sha == execution_plan_base_sha(plan),
+        do: {:error, :instruction_drift_replan_required},
+        else: publish_instruction_drift_blocker(issue, contract, plan["plan_digest"])
+    end
+  end
+
+  defp execution_plan_for_run(
+         planning_runner,
+         session,
+         workspace,
+         issue,
+         contract,
+         profile,
+         instruction_authority,
+         planning_opts
+       ) do
+    worker_host = Keyword.get(planning_opts, :worker_host)
+
+    with {:ok, repository} <- RepositoryFingerprint.capture(workspace, worker_host),
+         {:ok, registered} <-
+           registered_execution_plan(
+             repository,
+             issue,
+             contract,
+             profile,
+             session,
+             instruction_authority
+           ) do
+      case registered do
+        :missing ->
+          planning_runner.(session, workspace, issue, contract, profile, planning_opts)
+
+        plan when is_map(plan) ->
+          {:ok, plan}
+      end
+    else
+      {:error, {:instruction_drift_with_changes, old_plan_digest}} ->
+        publish_instruction_drift_blocker(issue, contract, old_plan_digest)
+
+      {:error, _reason} = error ->
+        error
+    end
+  end
+
+  # This is one bounded decision table over immutable authority receipts.
+  # credo:disable-for-next-line Credo.Check.Refactor.CyclomaticComplexity
+  defp registered_execution_plan(repository, issue, contract, profile, session, authority) do
+    key = authority_registry_key(repository.origin, issue.id)
+
+    with {:ok, receipts} <- ExecutionLedger.list(key, "execution-plan") do
+      valid = Enum.filter(receipts, &valid_registered_plan?/1)
+
+      exact =
+        Enum.filter(valid, fn receipt ->
+          plan = receipt["plan"]
+
+          plan["contract_digest"] == contract.digest and
+            plan["profile_digest"] == profile.digest and
+            plan["primary_thread_id"] == session.thread_id and
+            plan["instruction_digest"] == authority.digest and
+            execution_plan_origin(plan) == repository.origin
+        end)
+
+      cond do
+        length(valid) != length(receipts) ->
+          {:error, :registered_execution_plan_invalid}
+
+        length(exact) == 1 ->
+          {:ok, hd(exact)["plan"]}
+
+        length(exact) > 1 ->
+          {:error, :multiple_registered_execution_plans}
+
+        valid == [] ->
+          {:ok, :missing}
+
+        Enum.any?(valid, &(&1["plan"]["contract_digest"] != contract.digest)) ->
+          {:error, :registered_execution_plan_contract_drift}
+
+        repository.clean and Enum.any?(valid, &(execution_plan_base_sha(&1["plan"]) == repository.base_sha)) ->
+          {:ok, :missing}
+
+        true ->
+          old_plan = List.first(valid)["plan"]
+          {:error, {:instruction_drift_with_changes, old_plan["plan_digest"]}}
+      end
+    end
+  end
+
+  defp valid_registered_plan?(%{"plan" => %{"plan_digest" => digest} = plan, "instruction_paths" => paths})
+       when is_binary(digest) and is_list(paths) do
+    digest == PlanningArtifact.digest(Map.delete(plan, "plan_digest"))
+  end
+
+  defp valid_registered_plan?(_receipt), do: false
+
+  defp persist_execution_authority(key, plan, instruction_authority, session, issue) do
+    receipt = %{
+      "plan_digest" => plan["plan_digest"],
+      "instruction_digest" => instruction_authority.digest,
+      "instruction_paths" => instruction_authority.paths,
+      "profile_digest" => plan["profile_digest"],
+      "contract_digest" => plan["contract_digest"],
+      "primary_thread_id" => session.thread_id
+    }
+
+    with :ok <-
+           persist_receipt(
+             key,
+             "authority",
+             "pinned",
+             receipt,
+             :execution_authority_receipt_drift
+           ) do
+      persist_receipt(
+        authority_registry_key(execution_plan_origin(plan), issue.id),
+        "execution-plan",
+        plan["authority_digest"] || plan["plan_digest"],
+        %{"plan" => plan, "instruction_paths" => instruction_authority.paths},
+        :registered_execution_plan_drift
+      )
+    end
+  end
+
+  defp persist_receipt(key, kind, id, receipt, drift_error) do
+    case ExecutionLedger.create(key, kind, id, receipt) do
+      {:ok, _persisted} ->
+        :ok
+
+      :exists ->
+        validate_existing_receipt(key, kind, id, receipt, drift_error)
+
+      {:error, reason} ->
+        {:error, {:execution_authority_receipt_failed, reason}}
+    end
+  end
+
+  defp validate_existing_receipt(key, kind, id, receipt, drift_error) do
+    case ExecutionLedger.read(key, kind, id) do
+      {:ok, existing} ->
+        if Map.drop(existing, ["receipt_digest"]) == receipt,
+          do: :ok,
+          else: {:error, drift_error}
+
+      other ->
+        {:error, {:execution_authority_receipt_invalid, other}}
+    end
+  end
+
+  defp publish_instruction_drift_blocker(issue, contract, plan_digest) do
+    body =
+      "## Agent Blocked\n\nInstruction authority changed after implementation changes existed. " <>
+        "Symphony will not reinterpret those changes under different doctrine. Human Review is required.\n\n" <>
+        "<!-- symphony-instruction-drift:v1 plan=#{plan_digest} -->"
+
+    case HumanReviewBlocker.publish(
+           issue,
+           [contract.digest, plan_digest, "instruction-drift"],
+           body
+         ) do
+      {:ok, comment_id} -> {:error, {:instruction_drift_human_review, comment_id}}
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  defp authority_registry_key(origin, issue_id),
+    do: ExecutionLedger.key(origin, issue_id, "execution-authority")
+
+  defp revalidate_execution_authority(session, workspace, issue, contract, runtime) do
+    plan = Keyword.fetch!(runtime.opts, :execution_plan)
+    authority = Keyword.fetch!(runtime.opts, :instruction_authority)
+
+    with :ok <- InstructionAuthority.revalidate(authority),
+         true <- plan["instruction_digest"] == authority.digest || {:error, :implementation_instruction_drift},
+         true <- plan["primary_thread_id"] == session.thread_id || {:error, :implementation_thread_drift},
+         {:ok, [%Issue{} = refreshed | _]} <- runtime.issue_state_fetcher.([issue.id]),
+         {:ok, refreshed_contract} <- TaskContract.from_issue(refreshed),
+         true <- refreshed_contract.digest == contract.digest || {:error, :implementation_contract_drift},
+         true <- plan["contract_digest"] == refreshed_contract.digest || {:error, :implementation_plan_contract_drift},
+         {:ok, profile} <- WorkflowProfile.select(refreshed_contract),
+         true <- profile.digest == plan["profile_digest"] || {:error, :implementation_profile_drift},
+         true <- plan["plan_digest"] == PlanningArtifact.digest(Map.delete(plan, "plan_digest")) || {:error, :implementation_plan_digest_drift},
+         {:ok, repository} <- RepositoryFingerprint.capture(workspace, runtime.worker_host),
+         true <- repository.origin == execution_plan_origin(plan) || {:error, :implementation_repository_drift} do
+      TaskBranch.validate(
+        workspace,
+        issue,
+        plan["workflow"],
+        execution_plan_base_sha(plan),
+        runtime.worker_host
+      )
+    end
+  end
+
+  defp execution_plan_origin(%{"candidate" => %{"repository" => %{"origin" => origin}}}), do: origin
+  defp execution_plan_origin(%{"repository" => %{"origin" => origin}}), do: origin
+
+  defp execution_tool_executor(app_session, runtime, workspace, issue, contract) do
+    plan = Keyword.fetch!(runtime.opts, :execution_plan)
+    key = Keyword.fetch!(runtime.opts, :execution_ledger_key)
+
+    fn tool, arguments ->
+      result =
+        if tool in ["request_implementation_review", "publish_pull_request"] do
+          DeliveryControl.execute_tool(
+            workspace,
+            issue,
+            contract,
+            plan,
+            key,
+            tool,
+            arguments,
+            Keyword.put(runtime.opts, :worker_host, runtime.worker_host)
+          )
+        else
+          ExecutionControl.execute_tool(
+            plan,
+            key,
+            workspace,
+            tool,
+            arguments,
+            worker_host: runtime.worker_host,
+            command_executor: fn directory, command, command_opts ->
+              AppServer.run_command(app_session, directory, command, command_opts)
+            end
+          )
+          |> dynamic_tool_result()
+        end
+
+      record_execution_tool_event(workspace, issue, tool, arguments, result)
+      result
+    end
+  end
+
+  defp record_execution_tool_event(workspace, issue, tool, arguments, result) do
+    payload = decode_dynamic_tool_output(result)
+
+    attrs = %{
+      phase: execution_tool_phase(tool),
+      status: if(result["success"], do: "completed", else: "failed"),
+      tool: tool,
+      phase_id: arguments["phase_id"],
+      proof_id: arguments["proof_id"],
+      receipt_digest: payload["receipt_digest"],
+      verdict: payload["verdict"],
+      proof_role: payload["role"],
+      proof_passed: payload["passed"],
+      repository_head_sha: payload["head_sha"] || payload["repository_head_sha"],
+      pull_request_url: payload["pull_request_url"]
+    }
+
+    RunAudit.append(workspace, issue, execution_tool_event(tool), attrs)
+  end
+
+  defp decode_dynamic_tool_output(%{"output" => output}) when is_binary(output) do
+    case Jason.decode(output) do
+      {:ok, payload} when is_map(payload) -> payload
+      _ -> %{}
+    end
+  end
+
+  defp decode_dynamic_tool_output(_result), do: %{}
+
+  defp execution_tool_event("run_plan_proof"), do: :execution_proof_recorded
+  defp execution_tool_event("submit_fix_diagnosis"), do: :fix_diagnosis_recorded
+  defp execution_tool_event("complete_execution_phase"), do: :execution_phase_completed
+  defp execution_tool_event("request_implementation_review"), do: :implementation_review_recorded
+  defp execution_tool_event("publish_pull_request"), do: :pull_request_published
+  defp execution_tool_event(_tool), do: :execution_tool_rejected
+
+  defp execution_tool_phase("run_plan_proof"), do: "proof"
+  defp execution_tool_phase("submit_fix_diagnosis"), do: "diagnosis"
+  defp execution_tool_phase("complete_execution_phase"), do: "implementation"
+  defp execution_tool_phase("request_implementation_review"), do: "review"
+  defp execution_tool_phase("publish_pull_request"), do: "publication"
+  defp execution_tool_phase(_tool), do: "implementation"
+
+  defp dynamic_tool_result({:ok, payload}) do
+    output = Jason.encode!(payload, pretty: true)
+    %{"success" => true, "output" => output, "contentItems" => [%{"type" => "inputText", "text" => output}]}
+  end
+
+  defp dynamic_tool_result({:error, reason}) do
+    output = inspect(reason)
+    %{"success" => false, "output" => output, "contentItems" => [%{"type" => "inputText", "text" => output}]}
+  end
+
+  defp execution_ledger_key(execution_plan, issue) do
+    origin =
+      get_in(execution_plan, ["candidate", "repository", "origin"]) ||
+        get_in(execution_plan, ["repository", "origin"])
+
+    ExecutionLedger.key(origin, issue.id, execution_plan["plan_digest"])
   end
 
   defp handle_completed_turn(
@@ -477,7 +959,8 @@ defmodule SymphonyElixir.AgentRunner do
     {:error, reason}
   end
 
-  defp build_turn_prompt(issue, opts, 1, _max_turns), do: PromptBuilder.build_prompt(issue, opts)
+  defp build_turn_prompt(issue, opts, 1, _max_turns),
+    do: PromptBuilder.build_execution_prompt(issue, opts)
 
   defp build_turn_prompt(_issue, _opts, turn_number, max_turns) do
     """
@@ -486,27 +969,29 @@ defmodule SymphonyElixir.AgentRunner do
     - The previous Codex turn completed normally, but the Linear issue is still in an active state.
     - This is continuation turn ##{turn_number} of #{max_turns} for the current agent run.
     - Resume from the current workspace and workpad state instead of restarting from scratch.
+    - Inspect the native plan and resume the earliest incomplete approved phase. Do not add, remove, rename, reorder, or skip phases.
     - The original task instructions and prior turn context are already present in this thread, so do not restate them before acting.
-    - First check whether the implementation is already complete but `.symphony/completion-evidence.json` is missing or stale; if so, refresh that artifact before doing more implementation.
+    - Inspect engine receipts and resume the earliest incomplete approved phase; do not rerun valid proof or phase receipts.
     - If a PR, commit, or proof result already exists, verify only the missing handoff facts instead of rerunning broad setup, research, or full test gates.
-    - Before leaving the active workflow, atomically refresh `.symphony/completion-evidence.json` with exact proof coverage and the repository PR URL required by the original prompt.
+    - After the final commit, rerun final proof, request implementation review when required, and call `publish_pull_request`; Symphony generates completion evidence.
     - Do not create the completed-work Linear handoff comment or move the issue to the configured handoff state; Symphony owns those external writes after validation.
     - Record the reason for the extra turn in `.symphony/run-audit.md`, including whether it was missing handoff, missing state transition, rework, or a real blocker.
     - Focus on the remaining ticket work and do not end the turn while the issue stays active unless you are truly blocked.
     """
   end
 
-  defp goal_objective(issue) do
+  defp goal_objective(issue, task_contract, execution_plan) do
     issue
-    |> raw_goal_objective()
+    |> raw_goal_objective(task_contract, execution_plan)
     |> String.slice(0, 4_000)
   end
 
-  defp raw_goal_objective(%Issue{identifier: identifier, title: title}) do
+  defp raw_goal_objective(%Issue{identifier: identifier}, task_contract, execution_plan) do
     """
-    Complete Linear #{identifier}: #{title}.
-
-    Use Symphony's prepared workspace, worktree, env setup, issue prompt, and local workpad as the task packet. Preserve agent-dashboard conventions for scoped planning, verification profile selection, implementation proof, commit, PR creation, and one semantic Linear handoff. Do not stop while the issue remains actionable; either deliver a PR-backed handoff or record one real external blocker/question for human review.
+    Deliver Linear #{identifier} under contract #{task_contract.digest} and workflow
+    #{execution_plan["profile_digest"]} under instructions #{execution_plan["instruction_digest"]}
+    using approved execution plan #{execution_plan["plan_digest"]}. Preserve scope
+    and produce Symphony-validated proof and PR handoff.
     """
     |> String.trim()
   end
@@ -576,18 +1061,60 @@ defmodule SymphonyElixir.AgentRunner do
 
   defp finish_handoff(workspace, issue, refreshed_issue, task_contract, runtime, turn_number) do
     opts =
-      [worker_host: runtime.worker_host, thread_id: Map.get(runtime, :thread_id)] ++
+      [
+        worker_host: runtime.worker_host,
+        thread_id: Map.get(runtime, :thread_id),
+        execution_plan: Keyword.get(runtime.opts, :execution_plan),
+        execution_ledger_key: Keyword.get(runtime.opts, :execution_ledger_key)
+      ] ++
         Keyword.take(runtime.opts, [:completion_evidence_validator, :handoff_publisher, :handoff_state])
 
-    handoff_after_turn(
-      workspace,
-      issue,
-      refreshed_issue,
-      task_contract,
-      Agent.get(runtime.proof_ledger, & &1),
-      opts,
-      turn_number
-    )
+    execution_plan = Keyword.get(runtime.opts, :execution_plan)
+    native_plan = Agent.get(runtime.plan_progress, & &1)
+
+    case validate_execution_progress(execution_plan, native_plan) do
+      :ok ->
+        handoff_after_turn(
+          workspace,
+          issue,
+          refreshed_issue,
+          task_contract,
+          Agent.get(runtime.proof_ledger, & &1),
+          opts,
+          turn_number
+        )
+
+      {:error, reason} ->
+        handle_execution_progress_pending(
+          workspace,
+          issue,
+          refreshed_issue,
+          reason,
+          turn_number
+        )
+    end
+  end
+
+  defp validate_execution_progress(
+         %{"candidate" => %{"ordered_steps" => [_phase | _]}} = execution_plan,
+         native_plan
+       ) do
+    ExecutionPlanProgress.validate(execution_plan, native_plan)
+  end
+
+  defp validate_execution_progress(_execution_plan, _native_plan), do: :ok
+
+  defp handle_execution_progress_pending(workspace, issue, refreshed_issue, reason, turn_number) do
+    RunAudit.append(workspace, issue, :execution_plan_progress_pending, %{
+      phase: "implementation",
+      status: "pending",
+      reason: reason,
+      turn_number: turn_number
+    })
+
+    if active_issue_state?(refreshed_issue.state) and issue_routable?(refreshed_issue),
+      do: {:continue, refreshed_issue},
+      else: {:error, {:execution_plan_progress_invalid, reason}}
   end
 
   defp handoff_after_turn(workspace, issue, refreshed_issue, task_contract, proofs, opts, turn_number) do
@@ -794,10 +1321,21 @@ defmodule SymphonyElixir.AgentRunner do
      })}
   end
 
-  defp record_observed_proof(proof_ledger, event_id, exit_code) do
+  defp record_observed_proof(proof_ledger, event_id, proof, workspace, worker_host) do
+    head_sha =
+      case RepositoryFingerprint.head(workspace, worker_host) do
+        {:ok, sha} -> sha
+        {:error, _reason} -> nil
+      end
+
     Agent.update(proof_ledger, fn proofs ->
       if map_size(proofs) < 256 do
-        Map.put(proofs, event_id, %{exit_code: exit_code})
+        Map.put(proofs, event_id, %{
+          exit_code: proof.exit_code,
+          command: proof.command,
+          sequence: map_size(proofs) + 1,
+          head_sha: head_sha
+        })
       else
         Map.put(proofs, "__proof_limit_exceeded__", %{exit_code: -1})
       end

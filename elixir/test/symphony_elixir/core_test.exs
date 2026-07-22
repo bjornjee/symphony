@@ -160,7 +160,7 @@ defmodule SymphonyElixir.CoreTest do
     assert Config.workflow_prompt() == prompt
   end
 
-  test "agent-dashboard workflow is valid and documents the dispatch contract" do
+  test "root workflow is valid and documents native workflow routing" do
     previous_linear_api_key = System.get_env("LINEAR_API_KEY")
     original_workflow_path = Workflow.workflow_file_path()
 
@@ -189,7 +189,9 @@ defmodule SymphonyElixir.CoreTest do
     prompt = Config.workflow_prompt()
 
     assert prompt =~ "Codex Agent Task"
-    assert prompt =~ "agent-dashboard:feature"
+    assert prompt =~ "Workflow: feature|fix|refactor|chore|pr"
+    refute prompt =~ "$agent-dashboard"
+    refute prompt =~ "agent-dashboard plugin"
     assert prompt =~ "codex-decompose"
     assert prompt =~ "Human Review"
     assert prompt =~ "codex-ready"
@@ -1299,7 +1301,7 @@ defmodule SymphonyElixir.CoreTest do
     assert prompt =~ "attempt=3"
   end
 
-  test "prompt builder invokes requested agent-dashboard workflow from issue notes" do
+  test "prompt builder does not interpret unavailable plugin directives" do
     write_workflow_file!(Workflow.workflow_file_path(), prompt: "Ticket {{ issue.identifier }}")
 
     issue = %Issue{
@@ -1311,44 +1313,37 @@ defmodule SymphonyElixir.CoreTest do
       labels: ["docs"]
     }
 
-    assert PromptBuilder.build_prompt(issue) == "$agent-dashboard:chore\n\nTicket S-2"
+    assert PromptBuilder.build_prompt(issue) == "Ticket S-2"
   end
 
-  test "prompt builder converts feature workflow request to unattended feature contract" do
+  test "prompt builder appends the trusted Symphony workflow profile" do
     write_workflow_file!(Workflow.workflow_file_path(), prompt: "Ticket {{ issue.identifier }}")
 
-    issue = %Issue{
-      identifier: "S-4",
-      title: "Add cleanup callbacks",
-      description: "Notes For Agent:\nUse `agent-dashboard:feature`.",
-      state: "Todo",
-      url: "https://example.org/issues/S-4",
-      labels: ["feature"]
-    }
+    issue = TaskContractFixtures.issue(%{identifier: "S-4", title: "feat: add cleanup callbacks"})
+    assert {:ok, contract} = TaskContract.from_issue(issue)
+    assert {:ok, profile} = SymphonyElixir.WorkflowProfile.select(contract)
 
-    prompt = PromptBuilder.build_prompt(issue)
+    prompt = PromptBuilder.build_prompt(issue, workflow_profile: profile)
 
-    refute String.starts_with?(prompt, "$agent-dashboard:feature")
-    assert prompt =~ "Symphony selected `agent-dashboard:feature`"
-    assert prompt =~ "cannot enter Codex Plan Mode"
-    assert prompt =~ "create an isolated git worktree"
-    assert prompt =~ ".symphony/run-audit.md"
-    assert prompt =~ "smallest sufficient proof"
-    assert prompt =~ "open a PR"
+    refute prompt =~ "$agent-dashboard"
+    assert prompt =~ "Trusted Symphony workflow profile"
+    assert prompt =~ "name: `feature`"
+    assert prompt =~ profile.digest
+    assert prompt =~ "never create a nested worktree"
     assert prompt =~ "Ticket S-4"
   end
 
-  test "prompt builder supplies the pinned machine-evidence contract" do
+  test "prompt builder supplies the engine-owned delivery contract" do
     write_workflow_file!(Workflow.workflow_file_path(), prompt: "Ticket {{ issue.identifier }}")
     issue = TaskContractFixtures.issue(%{identifier: "PIN-16"})
     assert {:ok, contract} = TaskContract.from_issue(issue)
 
     prompt = PromptBuilder.build_prompt(issue, task_contract: contract)
 
-    assert prompt =~ ".symphony/completion-evidence.json"
-    assert prompt =~ contract.digest
-    assert prompt =~ "run_audit_command"
-    assert prompt =~ "pull_request_url"
+    assert prompt =~ "run_plan_proof"
+    assert prompt =~ "request_implementation_review"
+    assert prompt =~ "publish_pull_request"
+    refute prompt =~ "run_audit_command"
 
     for criterion <- contract.acceptance_criteria do
       assert prompt =~ criterion.id
@@ -1369,7 +1364,7 @@ defmodule SymphonyElixir.CoreTest do
     issue = TaskContractFixtures.issue(%{state: "Human Review"})
     assert {:ok, contract} = TaskContract.from_issue(issue)
 
-    assert {:error, {:handoff_evidence_invalid, :completion_evidence_missing}} =
+    assert {:error, {:handoff_evidence_invalid, :trusted_execution_ledger_key_missing}} =
              AgentRunner.validate_handoff_for_test(
                workspace,
                issue,
@@ -1544,19 +1539,116 @@ defmodule SymphonyElixir.CoreTest do
     assert_receive {:memory_tracker_state_update, ^issue_id, "Human Review"}
   end
 
-  test "prompt builder does not duplicate an existing agent-dashboard invocation" do
-    write_workflow_file!(Workflow.workflow_file_path(), prompt: "$agent-dashboard:chore\n\nTicket {{ issue.identifier }}")
+  test "prompt builder appends one native profile block" do
+    write_workflow_file!(Workflow.workflow_file_path(), prompt: "Ticket {{ issue.identifier }}")
+    issue = TaskContractFixtures.issue(%{identifier: "S-3", title: "docs: update guide"})
+    assert {:ok, contract} = TaskContract.from_issue(issue)
+    assert {:ok, profile} = SymphonyElixir.WorkflowProfile.select(contract)
 
-    issue = %Issue{
-      identifier: "S-3",
-      title: "Update docs",
-      description: "Use agent-dashboard:chore",
-      state: "Todo",
-      url: "https://example.org/issues/S-3",
-      labels: ["docs"]
+    prompt = PromptBuilder.build_prompt(issue, workflow_profile: profile)
+
+    assert length(String.split(prompt, "Trusted Symphony workflow profile")) == 2
+  end
+
+  test "execution prompt requires exact completion of approved native phases" do
+    issue = TaskContractFixtures.issue(%{identifier: "S-5", title: "fix: enforce phase progress"})
+    assert {:ok, contract} = TaskContract.from_issue(issue)
+    assert {:ok, profile} = SymphonyElixir.WorkflowProfile.select(contract)
+
+    execution_plan = %{
+      "plan_digest" => String.duplicate("a", 64),
+      "workflow" => profile.name,
+      "profile_digest" => profile.digest,
+      "candidate" => %{
+        "ordered_steps" => [
+          %{
+            "id" => "prove",
+            "step" => "Prove the correction",
+            "status" => "pending",
+            "affected_paths" => ["lib/example.ex"],
+            "depends_on" => [],
+            "verification_profile" => "Targeted",
+            "proof_ids" => ["final-proof"],
+            "criterion_ids" => Enum.map(contract.acceptance_criteria, & &1.id),
+            "invariants" => ["valid behavior remains stable"],
+            "stop_conditions" => ["stop if the contract changes"],
+            "evidence_requirements" => ["GREEN event"]
+          }
+        ],
+        "proofs" => [
+          %{
+            "id" => "final-proof",
+            "phase_id" => "prove",
+            "role" => "final",
+            "command" => "mix test test/example_test.exs",
+            "working_directory" => ".",
+            "expected_exit" => "success",
+            "timeout_ms" => 60_000,
+            "criterion_ids" => Enum.map(contract.acceptance_criteria, & &1.id)
+          }
+        ]
+      }
     }
 
-    assert PromptBuilder.build_prompt(issue) == "$agent-dashboard:chore\n\nTicket S-3"
+    prompt =
+      PromptBuilder.build_execution_prompt(issue,
+        execution_plan: execution_plan,
+        workflow_profile: profile,
+        task_contract: contract
+      )
+
+    assert prompt =~ "keep exactly one phase in progress"
+    assert prompt =~ "final native plan exactly matches the approved phases"
+    assert prompt =~ "Prove the correction"
+  end
+
+  test "simple execution prompt skips native planning and preserves direct bounds" do
+    description =
+      TaskContractFixtures.valid_description(%{
+        "Goal" => "Correct one documentation example.",
+        "Scope" => "In:\n- docs/guide.md\n\nOut:\n- source code",
+        "Acceptance Criteria" => "- [ ] Guide example is current.",
+        "Verification" => "Run:\n`mix test test/docs_test.exs`",
+        "Risk" => "low",
+        "Notes For Agent" => "Workflow: chore"
+      })
+
+    issue = TaskContractFixtures.issue(%{identifier: "S-6", title: "docs: correct guide example", description: description})
+    assert {:ok, contract} = TaskContract.from_issue(issue)
+    assert {:ok, profile} = SymphonyElixir.WorkflowProfile.select(contract)
+
+    execution_plan = %{
+      "execution_mode" => "simple",
+      "plan_digest" => String.duplicate("a", 64),
+      "workflow" => "chore",
+      "profile_digest" => profile.digest,
+      "affected_paths" => ["docs/guide.md"],
+      "proofs" => [
+        %{
+          "id" => "final",
+          "phase_id" => "direct",
+          "role" => "final",
+          "command" => "mix test test/docs_test.exs",
+          "working_directory" => ".",
+          "expected_exit" => "success",
+          "timeout_ms" => 60_000,
+          "criterion_ids" => Enum.map(contract.acceptance_criteria, & &1.id)
+        }
+      ]
+    }
+
+    prompt =
+      PromptBuilder.build_execution_prompt(issue,
+        execution_plan: execution_plan,
+        workflow_profile: profile,
+        task_contract: contract
+      )
+
+    assert prompt =~ "no native implementation plan"
+    assert prompt =~ "docs/guide.md"
+    assert prompt =~ "mix test test/docs_test.exs"
+    assert prompt =~ "do not manufacture a plan-progress update"
+    refute prompt =~ "final native plan exactly matches"
   end
 
   test "prompt builder renders issue datetime fields without crashing" do
@@ -1798,7 +1890,7 @@ defmodule SymphonyElixir.CoreTest do
           2)
             ;;
           3)
-            printf '%s\\n' '{\"id\":2,\"result\":{\"thread\":{\"id\":\"thread-1\"}}}'
+            printf '%s\\n' '{\"id\":2,\"result\":{\"thread\":{\"id\":\"thread-1\"},\"instructionSources\":[]}}'
             ;;
           4)
             printf '%s\\n' '{\"id\":4,\"result\":{\"goal\":{\"objective\":\"Complete Linear S-99: Smoke test\",\"status\":\"active\"}}}'
@@ -1820,7 +1912,7 @@ defmodule SymphonyElixir.CoreTest do
 
       write_workflow_file!(Workflow.workflow_file_path(),
         workspace_root: workspace_root,
-        hook_after_create: "cp #{Path.join(template_repo, "README.md")} README.md",
+        hook_after_create: "git clone #{template_repo} .",
         codex_command: "#{codex_binary} app-server"
       )
 
@@ -1840,7 +1932,9 @@ defmodule SymphonyElixir.CoreTest do
                AgentRunner.run(issue, nil,
                  issue_state_fetcher: fn [_issue_id] -> {:ok, [issue]} end,
                  completion_evidence_validator: &valid_handoff_evidence/5,
-                 handoff_publisher: &valid_handoff_publisher/4
+                 handoff_publisher: &valid_handoff_publisher/4,
+                 planning_lifecycle_runner: &approve_execution_plan/6,
+                 task_branch_ensurer: &accept_task_branch/5
                )
 
       entries_after = MapSet.new(File.ls!(workspace_root))
@@ -1896,7 +1990,7 @@ defmodule SymphonyElixir.CoreTest do
             2)
               ;;
             3)
-              printf '%s\\n' '{\"id\":2,\"result\":{\"thread\":{\"id\":\"thread-live\"}}}'
+              printf '%s\\n' '{\"id\":2,\"result\":{\"thread\":{\"id\":\"thread-live\"},\"instructionSources\":[]}}'
               ;;
             4)
               printf '%s\\n' '{\"id\":4,\"result\":{\"goal\":{\"objective\":\"Complete Linear MT-99: Smoke test\",\"status\":\"active\"}}}'
@@ -1919,7 +2013,7 @@ defmodule SymphonyElixir.CoreTest do
 
       write_workflow_file!(Workflow.workflow_file_path(),
         workspace_root: workspace_root,
-        hook_after_create: "cp #{Path.join(template_repo, "README.md")} README.md",
+        hook_after_create: "git clone #{template_repo} .",
         codex_command: "#{codex_binary} app-server"
       )
 
@@ -1941,7 +2035,9 @@ defmodule SymphonyElixir.CoreTest do
                  test_pid,
                  issue_state_fetcher: fn [_issue_id] -> {:ok, [issue]} end,
                  completion_evidence_validator: &valid_handoff_evidence/5,
-                 handoff_publisher: &valid_handoff_publisher/4
+                 handoff_publisher: &valid_handoff_publisher/4,
+                 planning_lifecycle_runner: &approve_execution_plan/6,
+                 task_branch_ensurer: &accept_task_branch/5
                )
 
       assert_receive {:codex_worker_update, "issue-live-updates",
@@ -2000,7 +2096,7 @@ defmodule SymphonyElixir.CoreTest do
             2)
               ;;
             3)
-              printf '%s\\n' '{\"id\":2,\"result\":{\"thread\":{\"id\":\"thread-audit\"}}}'
+              printf '%s\\n' '{\"id\":2,\"result\":{\"thread\":{\"id\":\"thread-audit\"},\"instructionSources\":[]}}'
               ;;
             4)
               printf '%s\\n' '{\"id\":4,\"result\":{\"goal\":{\"objective\":\"Complete Linear MT-AUDIT: Audit test\",\"status\":\"active\"}}}'
@@ -2027,7 +2123,7 @@ defmodule SymphonyElixir.CoreTest do
 
       write_workflow_file!(Workflow.workflow_file_path(),
         workspace_root: workspace_root,
-        hook_after_create: "cp #{Path.join(template_repo, "README.md")} README.md",
+        hook_after_create: "git clone #{template_repo} .",
         codex_command: "#{codex_binary} app-server"
       )
 
@@ -2047,7 +2143,9 @@ defmodule SymphonyElixir.CoreTest do
                  self(),
                  issue_state_fetcher: fn [_issue_id] -> {:ok, [issue]} end,
                  completion_evidence_validator: &valid_handoff_evidence/5,
-                 handoff_publisher: &valid_handoff_publisher/4
+                 handoff_publisher: &valid_handoff_publisher/4,
+                 planning_lifecycle_runner: &approve_execution_plan/6,
+                 task_branch_ensurer: &accept_task_branch/5
                )
 
       assert {:ok, workspace} = SymphonyElixir.PathSafety.canonicalize(Path.join(workspace_root, "MT-AUDIT"))
@@ -2208,7 +2306,7 @@ defmodule SymphonyElixir.CoreTest do
           2)
             ;;
           3)
-            printf '%s\\n' '{"id":2,"result":{"thread":{"id":"thread-cont"}}}'
+            printf '%s\\n' '{"id":2,"result":{"thread":{"id":"thread-cont"},"instructionSources":[]}}'
             ;;
           4)
             printf '%s\\n' '{"id":4,"result":{"goal":{"objective":"Complete Linear MT-247: Continue until done","status":"active"}}}'
@@ -2235,7 +2333,7 @@ defmodule SymphonyElixir.CoreTest do
 
       write_workflow_file!(Workflow.workflow_file_path(),
         workspace_root: workspace_root,
-        hook_after_create: "cp #{Path.join(template_repo, "README.md")} README.md",
+        hook_after_create: "git clone #{template_repo} .",
         codex_command: "#{codex_binary} app-server",
         max_turns: 3
       )
@@ -2284,7 +2382,9 @@ defmodule SymphonyElixir.CoreTest do
                AgentRunner.run(issue, nil,
                  issue_state_fetcher: state_fetcher,
                  completion_evidence_validator: evidence_validator,
-                 handoff_publisher: &valid_handoff_publisher/4
+                 handoff_publisher: &valid_handoff_publisher/4,
+                 planning_lifecycle_runner: &approve_execution_plan/6,
+                 task_branch_ensurer: &accept_task_branch/5
                )
 
       assert_receive {:issue_state_fetch, 1}
@@ -2317,11 +2417,12 @@ defmodule SymphonyElixir.CoreTest do
         end)
 
       assert length(turn_texts) == 2
-      assert Enum.at(turn_texts, 0) =~ "You are an agent for this repository."
+      assert Enum.at(turn_texts, 0) =~ "preactivation planning gate is complete"
+      assert Enum.at(turn_texts, 0) =~ "Approved plan digest"
       refute Enum.at(turn_texts, 1) =~ "You are an agent for this repository."
       assert Enum.at(turn_texts, 1) =~ "Continuation guidance:"
       assert Enum.at(turn_texts, 1) =~ "continuation turn #2 of 3"
-      assert Enum.at(turn_texts, 1) =~ "refresh that artifact before doing more implementation"
+      assert Enum.at(turn_texts, 1) =~ "resume the earliest incomplete approved phase"
       assert Enum.at(turn_texts, 1) =~ "Symphony owns those external writes after validation"
       assert Enum.at(turn_texts, 1) =~ "If a PR, commit, or proof result already exists"
       assert Enum.at(turn_texts, 1) =~ "Record the reason for the extra turn in `.symphony/run-audit.md`"
@@ -2382,7 +2483,7 @@ defmodule SymphonyElixir.CoreTest do
           2)
             ;;
           3)
-            printf '%s\\n' '{"id":2,"result":{"thread":{"id":"thread-max"}}}'
+            printf '%s\\n' '{"id":2,"result":{"thread":{"id":"thread-max"},"instructionSources":[]}}'
             ;;
           4)
             printf '%s\\n' '{"id":4,"result":{"goal":{"objective":"Complete Linear MT-248: Stop at max turns","status":"active"}}}'
@@ -2409,7 +2510,7 @@ defmodule SymphonyElixir.CoreTest do
 
       write_workflow_file!(Workflow.workflow_file_path(),
         workspace_root: workspace_root,
-        hook_after_create: "cp #{Path.join(template_repo, "README.md")} README.md",
+        hook_after_create: "git clone #{template_repo} .",
         codex_command: "#{codex_binary} app-server",
         max_turns: 2
       )
@@ -2437,7 +2538,12 @@ defmodule SymphonyElixir.CoreTest do
         labels: []
       }
 
-      assert :ok = AgentRunner.run(issue, nil, issue_state_fetcher: state_fetcher)
+      assert :ok =
+               AgentRunner.run(issue, nil,
+                 issue_state_fetcher: state_fetcher,
+                 planning_lifecycle_runner: &approve_execution_plan/6,
+                 task_branch_ensurer: &accept_task_branch/5
+               )
 
       trace = File.read!(trace_file)
       assert length(String.split(trace, "RUN", trim: true)) == 1
@@ -2490,7 +2596,7 @@ defmodule SymphonyElixir.CoreTest do
             printf '%s\\n' '{\"id\":1,\"result\":{}}'
             ;;
           2)
-            printf '%s\\n' '{\"id\":2,\"result\":{\"thread\":{\"id\":\"thread-77\"}}}'
+            printf '%s\\n' '{\"id\":2,\"result\":{\"thread\":{\"id\":\"thread-77\"},\"instructionSources\":[]}}'
             ;;
           3)
             printf '%s\\n' '{\"id\":3,\"result\":{\"turn\":{\"id\":\"turn-77\"}}}'
@@ -2634,7 +2740,7 @@ defmodule SymphonyElixir.CoreTest do
             printf '%s\\n' '{\"id\":1,\"result\":{}}'
             ;;
           2)
-            printf '%s\\n' '{\"id\":2,\"result\":{\"thread\":{\"id\":\"thread-88\"}}}'
+            printf '%s\\n' '{\"id\":2,\"result\":{\"thread\":{\"id\":\"thread-88\"},\"instructionSources\":[]}}'
             ;;
           3)
             printf '%s\\n' '{\"id\":3,\"result\":{\"turn\":{\"id\":\"turn-88\"}}}'
@@ -2720,7 +2826,7 @@ defmodule SymphonyElixir.CoreTest do
             printf '%s\\n' '{"id":1,"result":{}}'
             ;;
           2)
-            printf '%s\\n' '{"id":2,"result":{"thread":{"id":"thread-99"}}}'
+            printf '%s\\n' '{"id":2,"result":{"thread":{"id":"thread-99"},"instructionSources":[]}}'
             ;;
           3)
             printf '%s\\n' '{"id":3,"result":{"turn":{"id":"turn-99"}}}'

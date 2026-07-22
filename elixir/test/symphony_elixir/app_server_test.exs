@@ -1,6 +1,94 @@
 defmodule SymphonyElixir.AppServerTest do
   use SymphonyElixir.TestSupport
 
+  test "app server rejects a start response without instruction sources" do
+    assert {:error, :instruction_sources_missing} =
+             start_session_with_response(%{"thread" => %{"id" => "thread-missing-instructions"}})
+  end
+
+  test "app server rejects malformed instruction sources" do
+    assert {:error, :instruction_sources_malformed} =
+             start_session_with_response(%{
+               "thread" => %{"id" => "thread-malformed-instructions"},
+               "instructionSources" => %{"path" => "/AGENTS.md"}
+             })
+  end
+
+  test "app server accepts an explicitly empty instruction source list" do
+    assert {:ok, session} =
+             start_session_with_response(%{
+               "thread" => %{"id" => "thread-no-instructions"},
+               "instructionSources" => []
+             })
+
+    assert session.instruction_sources == []
+    assert :ok = AppServer.stop_session(session)
+  end
+
+  test "app server executes proof commands through a bounded workspace sandbox" do
+    test_root = test_root("command-exec")
+    workspace_root = Path.join(test_root, "workspaces")
+    workspace = Path.join(workspace_root, "PIN-15")
+    codex_binary = Path.join(test_root, "fake-codex")
+    trace_file = Path.join(test_root, "command-exec.trace")
+    File.mkdir_p!(workspace)
+
+    File.write!(codex_binary, """
+    #!/bin/sh
+    count=0
+    while IFS= read -r line; do
+      count=$((count + 1))
+      printf '%s\\n' "$line" >> "#{trace_file}"
+      case "$count" in
+        1) printf '%s\\n' '{"id":1,"result":{}}' ;;
+        3) printf '%s\\n' '{"id":2,"result":{"thread":{"id":"thread-command"},"instructionSources":[]}}' ;;
+        4) printf '%s\\n' '{"id":6,"result":{"exitCode":0,"stdout":"isolated","stderr":""}}' ;;
+      esac
+    done
+    """)
+
+    File.chmod!(codex_binary, 0o755)
+
+    write_workflow_file!(Workflow.workflow_file_path(),
+      workspace_root: workspace_root,
+      codex_command: "#{codex_binary} app-server"
+    )
+
+    on_exit(fn -> File.rm_rf(test_root) end)
+
+    assert {:ok, session} = AppServer.start_session(workspace)
+
+    assert {:ok, %{exit_status: 0, stdout: "isolated", stderr: ""}} =
+             AppServer.run_command(session, workspace, "printf isolated",
+               timeout_ms: 15_000,
+               output_bytes_cap: 1_048_576
+             )
+
+    assert :ok = AppServer.stop_session(session)
+
+    request =
+      trace_file
+      |> File.read!()
+      |> String.split("\n", trim: true)
+      |> Enum.map(&Jason.decode!/1)
+      |> Enum.find(&(&1["method"] == "command/exec"))
+
+    assert request["params"]["command"] == ["sh", "-lc", "printf isolated"]
+    assert request["params"]["cwd"] == session.workspace
+    assert request["params"]["timeoutMs"] == 15_000
+    assert request["params"]["outputBytesCap"] == 1_048_576
+    assert request["params"]["env"]["GITHUB_TOKEN"] == nil
+    assert request["params"]["env"]["LINEAR_API_KEY"] == nil
+
+    assert request["params"]["sandboxPolicy"] == %{
+             "type" => "workspaceWrite",
+             "writableRoots" => [session.workspace],
+             "networkAccess" => false,
+             "excludeSlashTmp" => false,
+             "excludeTmpdirEnvVar" => false
+           }
+  end
+
   test "app server resumes the exact persisted thread without starting a replacement" do
     test_root =
       Path.join(
@@ -23,7 +111,7 @@ defmodule SymphonyElixir.AppServerTest do
         printf 'JSON:%s\n' "$line" >> "#{trace_file}"
         case "$count" in
           1) printf '%s\n' '{"id":1,"result":{}}' ;;
-          3) printf '%s\n' '{"id":5,"result":{"thread":{"id":"thread-persisted"},"cwd":"#{workspace}","approvalPolicy":"never","approvalsReviewer":"user","model":"test","modelProvider":"test","sandbox":"workspace-write"}}' ;;
+          3) printf '%s\n' '{"id":5,"result":{"thread":{"id":"thread-persisted"},"instructionSources":[{"path":"/global/AGENTS.md"},{"path":"#{workspace}/AGENTS.md"}],"cwd":"#{workspace}","approvalPolicy":"never","approvalsReviewer":"user","model":"test","modelProvider":"test","sandbox":"workspace-write"}}' ;;
           4) printf '%s\n' '{"id":4,"result":{"goal":{"status":"blocked"}}}' ;;
         esac
       done
@@ -37,8 +125,21 @@ defmodule SymphonyElixir.AppServerTest do
         codex_approval_policy: "never"
       )
 
-      assert {:ok, session} = AppServer.start_session(workspace, thread_id: "thread-persisted")
+      dynamic_tools = [%{"name" => "current_tool", "description" => "current", "inputSchema" => %{}}]
+
+      assert {:ok, session} =
+               AppServer.start_session(workspace,
+                 thread_id: "thread-persisted",
+                 dynamic_tools: dynamic_tools
+               )
+
       assert session.thread_id == "thread-persisted"
+
+      assert session.instruction_sources == [
+               %{"path" => "/global/AGENTS.md"},
+               %{"path" => "#{workspace}/AGENTS.md"}
+             ]
+
       assert :ok = AppServer.set_goal_status(session, "blocked")
 
       assert {:error, {:unsupported_goal_status, "paused"}} =
@@ -61,6 +162,7 @@ defmodule SymphonyElixir.AppServerTest do
       assert resume["params"]["cwd"] == canonical_workspace
       assert resume["params"]["approvalPolicy"] == "never"
       assert resume["params"]["sandbox"] == "workspace-write"
+      assert resume["params"]["dynamicTools"] == dynamic_tools
 
       assert goal_update = Enum.find(requests, &(&1["method"] == "thread/goal/set"))
       assert goal_update["params"] == %{"threadId" => "thread-persisted", "status" => "blocked"}
@@ -228,7 +330,7 @@ defmodule SymphonyElixir.AppServerTest do
             printf '%s\\n' '{"id":1,"result":{}}'
             ;;
           2)
-            printf '%s\\n' '{"id":2,"result":{"thread":{"id":"thread-1001"}}}'
+            printf '%s\\n' '{"id":2,"result":{"thread":{"id":"thread-1001"},"instructionSources":[]}}'
             ;;
           3)
             printf '%s\\n' '{"id":3,"result":{"turn":{"id":"turn-1001"}}}'
@@ -296,6 +398,93 @@ defmodule SymphonyElixir.AppServerTest do
     end
   end
 
+  test "app server applies planning turn overrides and a narrow dynamic tool set" do
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-app-server-planning-policy-#{System.unique_integer([:positive])}"
+      )
+
+    try do
+      workspace_root = Path.join(test_root, "workspaces")
+      workspace = Path.join(workspace_root, "MT-1002")
+      codex_binary = Path.join(test_root, "fake-codex")
+      trace_file = Path.join(test_root, "codex-planning-policy.trace")
+      File.mkdir_p!(workspace)
+
+      File.write!(codex_binary, """
+      #!/bin/sh
+      count=0
+      while IFS= read -r line; do
+        count=$((count + 1))
+        printf 'JSON:%s\n' "$line" >> "#{trace_file}"
+        case "$count" in
+          1) printf '%s\n' '{"id":1,"result":{}}' ;;
+          2) printf '%s\n' '{"id":2,"result":{"thread":{"id":"thread-1002"},"instructionSources":[]}}' ;;
+          3) printf '%s\n' '{"id":3,"result":{"turn":{"id":"turn-1002"}}}' ;;
+          4) printf '%s\n' '{"method":"turn/completed"}'; exit 0 ;;
+        esac
+      done
+      """)
+
+      File.chmod!(codex_binary, 0o755)
+
+      write_workflow_file!(Workflow.workflow_file_path(),
+        workspace_root: workspace_root,
+        codex_command: "#{codex_binary} app-server",
+        codex_approval_policy: "never"
+      )
+
+      issue = %Issue{
+        id: "issue-planning-policy",
+        identifier: "MT-1002",
+        title: "Plan safely",
+        description: "Plan without writes",
+        state: "In Progress",
+        url: "https://example.org/issues/MT-1002",
+        labels: []
+      }
+
+      dynamic_tools = [
+        %{
+          "name" => "submit_execution_plan",
+          "description" => "Submit the execution plan.",
+          "inputSchema" => %{"type" => "object"}
+        }
+      ]
+
+      assert {:ok, session} =
+               AppServer.start_session(workspace, dynamic_tools: dynamic_tools)
+
+      assert {:ok, _result} =
+               AppServer.run_turn(session, "Plan", issue,
+                 sandbox_policy: %{"type" => "readOnly"},
+                 approval_policy: %{"type" => "reject"},
+                 auto_approve_requests: false,
+                 effort: "medium"
+               )
+
+      :ok = AppServer.stop_session(session)
+
+      requests =
+        trace_file
+        |> File.read!()
+        |> String.split("\n", trim: true)
+        |> Enum.map(&String.trim_leading(&1, "JSON:"))
+        |> Enum.map(&Jason.decode!/1)
+
+      assert start = Enum.find(requests, &(&1["method"] == "thread/start"))
+      assert start["params"]["dynamicTools"] == dynamic_tools
+
+      assert turn = Enum.find(requests, &(&1["method"] == "turn/start"))
+      assert turn["params"]["sandboxPolicy"] == %{"type" => "readOnly"}
+      assert turn["params"]["approvalPolicy"] == %{"type" => "reject"}
+      assert turn["params"]["effort"] == "medium"
+    after
+      File.rm_rf(test_root)
+    end
+  end
+
   test "app server marks request-for-input events as a hard failure" do
     test_root =
       Path.join(
@@ -334,7 +523,7 @@ defmodule SymphonyElixir.AppServerTest do
             printf '%s\\n' '{\"id\":1,\"result\":{}}'
             ;;
           2)
-            printf '%s\\n' '{\"id\":2,\"result\":{\"thread\":{\"id\":\"thread-88\"}}}'
+            printf '%s\\n' '{\"id\":2,\"result\":{\"thread\":{\"id\":\"thread-88\"},\"instructionSources\":[]}}'
             ;;
           3)
             printf '%s\\n' '{\"id\":3,\"result\":{\"turn\":{\"id\":\"turn-88\"}}}'
@@ -399,7 +588,7 @@ defmodule SymphonyElixir.AppServerTest do
             printf '%s\\n' '{"id":1,"result":{}}'
             ;;
           2)
-            printf '%s\\n' '{"id":2,"result":{"thread":{"id":"thread-188"}}}'
+            printf '%s\\n' '{"id":2,"result":{"thread":{"id":"thread-188"},"instructionSources":[]}}'
             ;;
           3)
             printf '%s\\n' '{"id":3,"result":{"turn":{"id":"turn-188"}}}'
@@ -464,7 +653,7 @@ defmodule SymphonyElixir.AppServerTest do
             printf '%s\\n' '{"id":1,"result":{}}'
             ;;
           2)
-            printf '%s\\n' '{"id":2,"result":{"thread":{"id":"thread-89"}}}'
+            printf '%s\\n' '{"id":2,"result":{"thread":{"id":"thread-89"},"instructionSources":[]}}'
             ;;
           3)
             printf '%s\\n' '{"id":3,"result":{"turn":{"id":"turn-89"}}}'
@@ -543,7 +732,7 @@ defmodule SymphonyElixir.AppServerTest do
           2)
             ;;
           3)
-            printf '%s\\n' '{\"id\":2,\"result\":{\"thread\":{\"id\":\"thread-89\"}}}'
+            printf '%s\\n' '{\"id\":2,\"result\":{\"thread\":{\"id\":\"thread-89\"},\"instructionSources\":[]}}'
             ;;
           4)
             printf '%s\\n' '{\"id\":3,\"result\":{\"turn\":{\"id\":\"turn-89\"}}}'
@@ -680,7 +869,7 @@ defmodule SymphonyElixir.AppServerTest do
           2)
             ;;
           3)
-            printf '%s\\n' '{\"id\":2,\"result\":{\"thread\":{\"id\":\"thread-717\"}}}'
+            printf '%s\\n' '{\"id\":2,\"result\":{\"thread\":{\"id\":\"thread-717\"},\"instructionSources\":[]}}'
             ;;
           4)
             printf '%s\\n' '{\"id\":3,\"result\":{\"turn\":{\"id\":\"turn-717\"}}}'
@@ -765,7 +954,7 @@ defmodule SymphonyElixir.AppServerTest do
           2)
             ;;
           3)
-            printf '%s\\n' '{"id":2,"result":{"thread":{"id":"thread-718"}}}'
+            printf '%s\\n' '{"id":2,"result":{"thread":{"id":"thread-718"},"instructionSources":[]}}'
             ;;
           4)
             printf '%s\\n' '{"id":3,"result":{"turn":{"id":"turn-718"}}}'
@@ -855,7 +1044,7 @@ defmodule SymphonyElixir.AppServerTest do
           2)
             ;;
           3)
-            printf '%s\\n' '{\"id\":2,\"result\":{\"thread\":{\"id\":\"thread-719\"}}}'
+            printf '%s\\n' '{\"id\":2,\"result\":{\"thread\":{\"id\":\"thread-719\"},\"instructionSources\":[]}}'
             ;;
           4)
             printf '%s\\n' '{\"id\":3,\"result\":{\"turn\":{\"id\":\"turn-719\"}}}'
@@ -955,7 +1144,7 @@ defmodule SymphonyElixir.AppServerTest do
           2)
             ;;
           3)
-            printf '%s\\n' '{\"id\":2,\"result\":{\"thread\":{\"id\":\"thread-90\"}}}'
+            printf '%s\\n' '{\"id\":2,\"result\":{\"thread\":{\"id\":\"thread-90\"},\"instructionSources\":[]}}'
             ;;
           4)
             printf '%s\\n' '{\"id\":3,\"result\":{\"turn\":{\"id\":\"turn-90\"}}}'
@@ -1056,7 +1245,7 @@ defmodule SymphonyElixir.AppServerTest do
           2)
             ;;
           3)
-            printf '%s\\n' '{\"id\":2,\"result\":{\"thread\":{\"id\":\"thread-90a\"}}}'
+            printf '%s\\n' '{\"id\":2,\"result\":{\"thread\":{\"id\":\"thread-90a\"},\"instructionSources\":[]}}'
             ;;
           4)
             printf '%s\\n' '{\"id\":3,\"result\":{\"turn\":{\"id\":\"turn-90a\"}}}'
@@ -1178,7 +1367,7 @@ defmodule SymphonyElixir.AppServerTest do
           2)
             ;;
           3)
-            printf '%s\\n' '{\"id\":2,\"result\":{\"thread\":{\"id\":\"thread-90b\"}}}'
+            printf '%s\\n' '{\"id\":2,\"result\":{\"thread\":{\"id\":\"thread-90b\"},\"instructionSources\":[]}}'
             ;;
           4)
             printf '%s\\n' '{\"id\":3,\"result\":{\"turn\":{\"id\":\"turn-90b\"}}}'
@@ -1269,7 +1458,7 @@ defmodule SymphonyElixir.AppServerTest do
             printf '{"id":1,"result":{},"padding":"%s"}\\n' "$padding"
             ;;
           2)
-            printf '%s\\n' '{"id":2,"result":{"thread":{"id":"thread-91"}}}'
+            printf '%s\\n' '{"id":2,"result":{"thread":{"id":"thread-91"},"instructionSources":[]}}'
             ;;
           3)
             printf '%s\\n' '{"id":3,"result":{"turn":{"id":"turn-91"}}}'
@@ -1332,7 +1521,7 @@ defmodule SymphonyElixir.AppServerTest do
             printf '%s\\n' '{"id":1,"result":{}}'
             ;;
           2)
-            printf '%s\\n' '{"id":2,"result":{"thread":{"id":"thread-92"}}}'
+            printf '%s\\n' '{"id":2,"result":{"thread":{"id":"thread-92"},"instructionSources":[]}}'
             ;;
           3)
             printf '%s\\n' '{"id":3,"result":{"turn":{"id":"turn-92"}}}'
@@ -1407,7 +1596,7 @@ defmodule SymphonyElixir.AppServerTest do
             printf '%s\\n' '{"id":1,"result":{}}'
             ;;
           2)
-            printf '%s\\n' '{"id":2,"result":{"thread":{"id":"thread-93"}}}'
+            printf '%s\\n' '{"id":2,"result":{"thread":{"id":"thread-93"},"instructionSources":[]}}'
             ;;
           3)
             printf '%s\\n' '{"id":3,"result":{"turn":{"id":"turn-93"}}}'
@@ -1493,7 +1682,7 @@ defmodule SymphonyElixir.AppServerTest do
             printf '%s\\n' '{"id":1,"result":{}}'
             ;;
           2)
-            printf '%s\\n' '{"id":2,"result":{"thread":{"id":"thread-remote"}}}'
+            printf '%s\\n' '{"id":2,"result":{"thread":{"id":"thread-remote"},"instructionSources":[]}}'
             ;;
           3)
             printf '%s\\n' '{"id":3,"result":{"turn":{"id":"turn-remote"}}}'
@@ -1584,5 +1773,40 @@ defmodule SymphonyElixir.AppServerTest do
     after
       File.rm_rf(test_root)
     end
+  end
+
+  defp start_session_with_response(response) do
+    test_root = test_root("instruction-sources")
+    workspace_root = Path.join(test_root, "workspaces")
+    workspace = Path.join(workspace_root, "PIN-15")
+    codex_binary = Path.join(test_root, "fake-codex")
+    File.mkdir_p!(workspace)
+    payload = Jason.encode!(%{"id" => 2, "result" => response})
+
+    File.write!(codex_binary, """
+    #!/bin/sh
+    count=0
+    while IFS= read -r line; do
+      count=$((count + 1))
+      case "$count" in
+        1) printf '%s\\n' '{"id":1,"result":{}}' ;;
+        3) printf '%s\\n' '#{payload}' ;;
+      esac
+    done
+    """)
+
+    File.chmod!(codex_binary, 0o755)
+
+    write_workflow_file!(Workflow.workflow_file_path(),
+      workspace_root: workspace_root,
+      codex_command: "#{codex_binary} app-server"
+    )
+
+    on_exit(fn -> File.rm_rf(test_root) end)
+    AppServer.start_session(workspace)
+  end
+
+  defp test_root(label) do
+    Path.join(System.tmp_dir!(), "symphony-elixir-app-server-#{label}-#{System.unique_integer([:positive])}")
   end
 end

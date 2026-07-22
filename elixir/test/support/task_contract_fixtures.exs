@@ -11,7 +11,7 @@ defmodule SymphonyElixir.TaskContractFixtures do
           "Acceptance Criteria" => "- [ ] The result is observable.\n- [ ] The failure path is covered.",
           "Verification" => "Run:\n`mix test`",
           "Risk" => "medium",
-          "Notes For Agent" => "Keep the change focused."
+          "Notes For Agent" => "Keep the change focused.\nWorkflow: feature"
         },
         overrides
       )
