@@ -1890,7 +1890,7 @@ defmodule SymphonyElixir.CoreTest do
           2)
             ;;
           3)
-            printf '%s\\n' '{\"id\":2,\"result\":{\"thread\":{\"id\":\"thread-1\"}}}'
+            printf '%s\\n' '{\"id\":2,\"result\":{\"thread\":{\"id\":\"thread-1\"},\"instructionSources\":[]}}'
             ;;
           4)
             printf '%s\\n' '{\"id\":4,\"result\":{\"goal\":{\"objective\":\"Complete Linear S-99: Smoke test\",\"status\":\"active\"}}}'
@@ -1990,7 +1990,7 @@ defmodule SymphonyElixir.CoreTest do
             2)
               ;;
             3)
-              printf '%s\\n' '{\"id\":2,\"result\":{\"thread\":{\"id\":\"thread-live\"}}}'
+              printf '%s\\n' '{\"id\":2,\"result\":{\"thread\":{\"id\":\"thread-live\"},\"instructionSources\":[]}}'
               ;;
             4)
               printf '%s\\n' '{\"id\":4,\"result\":{\"goal\":{\"objective\":\"Complete Linear MT-99: Smoke test\",\"status\":\"active\"}}}'
@@ -2096,7 +2096,7 @@ defmodule SymphonyElixir.CoreTest do
             2)
               ;;
             3)
-              printf '%s\\n' '{\"id\":2,\"result\":{\"thread\":{\"id\":\"thread-audit\"}}}'
+              printf '%s\\n' '{\"id\":2,\"result\":{\"thread\":{\"id\":\"thread-audit\"},\"instructionSources\":[]}}'
               ;;
             4)
               printf '%s\\n' '{\"id\":4,\"result\":{\"goal\":{\"objective\":\"Complete Linear MT-AUDIT: Audit test\",\"status\":\"active\"}}}'
@@ -2306,7 +2306,7 @@ defmodule SymphonyElixir.CoreTest do
           2)
             ;;
           3)
-            printf '%s\\n' '{"id":2,"result":{"thread":{"id":"thread-cont"}}}'
+            printf '%s\\n' '{"id":2,"result":{"thread":{"id":"thread-cont"},"instructionSources":[]}}'
             ;;
           4)
             printf '%s\\n' '{"id":4,"result":{"goal":{"objective":"Complete Linear MT-247: Continue until done","status":"active"}}}'
@@ -2483,7 +2483,7 @@ defmodule SymphonyElixir.CoreTest do
           2)
             ;;
           3)
-            printf '%s\\n' '{"id":2,"result":{"thread":{"id":"thread-max"}}}'
+            printf '%s\\n' '{"id":2,"result":{"thread":{"id":"thread-max"},"instructionSources":[]}}'
             ;;
           4)
             printf '%s\\n' '{"id":4,"result":{"goal":{"objective":"Complete Linear MT-248: Stop at max turns","status":"active"}}}'
@@ -2596,7 +2596,7 @@ defmodule SymphonyElixir.CoreTest do
             printf '%s\\n' '{\"id\":1,\"result\":{}}'
             ;;
           2)
-            printf '%s\\n' '{\"id\":2,\"result\":{\"thread\":{\"id\":\"thread-77\"}}}'
+            printf '%s\\n' '{\"id\":2,\"result\":{\"thread\":{\"id\":\"thread-77\"},\"instructionSources\":[]}}'
             ;;
           3)
             printf '%s\\n' '{\"id\":3,\"result\":{\"turn\":{\"id\":\"turn-77\"}}}'
@@ -2740,7 +2740,7 @@ defmodule SymphonyElixir.CoreTest do
             printf '%s\\n' '{\"id\":1,\"result\":{}}'
             ;;
           2)
-            printf '%s\\n' '{\"id\":2,\"result\":{\"thread\":{\"id\":\"thread-88\"}}}'
+            printf '%s\\n' '{\"id\":2,\"result\":{\"thread\":{\"id\":\"thread-88\"},\"instructionSources\":[]}}'
             ;;
           3)
             printf '%s\\n' '{\"id\":3,\"result\":{\"turn\":{\"id\":\"turn-88\"}}}'
@@ -2826,7 +2826,7 @@ defmodule SymphonyElixir.CoreTest do
             printf '%s\\n' '{"id":1,"result":{}}'
             ;;
           2)
-            printf '%s\\n' '{"id":2,"result":{"thread":{"id":"thread-99"}}}'
+            printf '%s\\n' '{"id":2,"result":{"thread":{"id":"thread-99"},"instructionSources":[]}}'
             ;;
           3)
             printf '%s\\n' '{"id":3,"result":{"turn":{"id":"turn-99"}}}'

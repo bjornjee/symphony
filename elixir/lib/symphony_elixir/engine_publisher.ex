@@ -1,7 +1,7 @@
 defmodule SymphonyElixir.EnginePublisher do
   @moduledoc "Engine-owned, fail-closed task-branch and pull-request publication."
 
-  alias SymphonyElixir.{RepositoryFingerprint, SSH}
+  alias SymphonyElixir.{GitHubRepository, RepositoryFingerprint, SSH}
 
   @conventional ~r/^(feat|fix|refactor|docs|test|chore|perf|ci): [^\r\n]+$/
   @self_attribution ~r/(generated with|co-authored-by:.*(?:codex|openai|chatgpt)|written by (?:codex|chatgpt))/i
@@ -19,6 +19,8 @@ defmodule SymphonyElixir.EnginePublisher do
          {:ok, _output} <- git(runner, workspace, worker_host, ["push", "origin", identity.branch]),
          {:ok, pull_request} <- upsert_pull_request(runner, workspace, worker_host, identity, title, body),
          :ok <- validate_pull_request_repository(pull_request.url, identity.repository),
+         true <- pull_request.state == "OPEN" || {:error, :published_pull_request_not_open},
+         true <- not pull_request.is_cross_repository || {:error, :published_cross_repository_pull_request},
          true <-
            pull_request.head_sha == state.base_sha ||
              {:error, {:published_head_mismatch, pull_request.head_sha, state.base_sha}},
@@ -30,8 +32,44 @@ defmodule SymphonyElixir.EnginePublisher do
          "head_sha" => pull_request.head_sha,
          "head_branch" => pull_request.head_branch,
          "base_branch" => pull_request.base_branch,
+         "state" => pull_request.state,
+         "is_cross_repository" => pull_request.is_cross_repository,
          "origin" => identity.origin
        }}
+    end
+  end
+
+  @spec read_pull_request(Path.t(), map(), String.t(), keyword()) :: {:ok, map()} | {:error, term()}
+  def read_pull_request(workspace, plan, url, opts \\ []) do
+    worker_host = Keyword.get(opts, :worker_host)
+    runner = Keyword.get(opts, :command_runner, &run/4)
+
+    with {:ok, identity} <- repository_identity(workspace, plan, runner, worker_host),
+         :ok <- validate_pull_request_repository(url, identity.repository),
+         {:ok, output} <-
+           command(runner, workspace, worker_host, "gh", [
+             "pr",
+             "view",
+             url,
+             "--repo",
+             identity.repository,
+             "--json",
+             pull_request_fields()
+           ]),
+         {:ok, payload} <- Jason.decode(output),
+         {:ok, pull_request} <- decode_pull_request(payload) do
+      {:ok,
+       %{
+         "url" => pull_request.url,
+         "head_sha" => pull_request.head_sha,
+         "head_branch" => pull_request.head_branch,
+         "base_branch" => pull_request.base_branch,
+         "state" => pull_request.state,
+         "is_cross_repository" => pull_request.is_cross_repository
+       }}
+    else
+      {:error, _reason} = error -> error
+      other -> {:error, {:invalid_github_response, other}}
     end
   end
 
@@ -90,7 +128,7 @@ defmodule SymphonyElixir.EnginePublisher do
          true <- String.starts_with?(branch, plan["workflow"] <> "/") || {:error, :invalid_task_branch},
          {:ok, _output} <- git(runner, workspace, worker_host, ["merge-base", "--is-ancestor", plan_base(plan), "HEAD"]),
          {:ok, base_ref} <- git(runner, workspace, worker_host, ["symbolic-ref", "refs/remotes/origin/HEAD"]),
-         {:ok, repository} <- github_repository(origin) do
+         {:ok, repository} <- GitHubRepository.from_origin(origin) do
       {:ok,
        %{
          origin: origin,
@@ -115,12 +153,21 @@ defmodule SymphonyElixir.EnginePublisher do
   end
 
   defp upsert_pull_request(runner, workspace, worker_host, identity, title, body) do
-    args = ["pr", "list", "--repo", identity.repository, "--head", identity.branch, "--state", "open", "--limit", "2", "--json", "url,headRefOid,headRefName,baseRefName"]
+    args = ["pr", "list", "--repo", identity.repository, "--head", identity.branch, "--state", "open", "--limit", "2", "--json", pull_request_fields()]
 
     with {:ok, output} <- command(runner, workspace, worker_host, "gh", args),
          {:ok, pulls} when is_list(pulls) <- Jason.decode(output),
          {:ok, url} <- ensure_one_pull_request(pulls, runner, workspace, worker_host, identity, title, body),
-         {:ok, readback} <- command(runner, workspace, worker_host, "gh", ["pr", "view", url, "--repo", identity.repository, "--json", "url,headRefOid,headRefName,baseRefName"]),
+         {:ok, readback} <-
+           command(runner, workspace, worker_host, "gh", [
+             "pr",
+             "view",
+             url,
+             "--repo",
+             identity.repository,
+             "--json",
+             pull_request_fields()
+           ]),
          {:ok, payload} <- Jason.decode(readback) do
       decode_pull_request(payload)
     else
@@ -161,47 +208,39 @@ defmodule SymphonyElixir.EnginePublisher do
   defp ensure_one_pull_request(pulls, _runner, _workspace, _worker_host, _identity, _title, _body),
     do: {:error, {:multiple_pull_requests_for_branch, length(pulls)}}
 
-  defp decode_pull_request(%{"url" => url, "headRefOid" => sha, "headRefName" => head, "baseRefName" => base})
-       when is_binary(url) and is_binary(sha) and is_binary(head) and is_binary(base) do
-    {:ok, %{url: url, head_sha: sha, head_branch: head, base_branch: base}}
+  defp decode_pull_request(%{
+         "url" => url,
+         "headRefOid" => sha,
+         "headRefName" => head,
+         "baseRefName" => base,
+         "state" => state,
+         "isCrossRepository" => cross_repository
+       })
+       when is_binary(url) and is_binary(sha) and is_binary(head) and is_binary(base) and
+              is_binary(state) and is_boolean(cross_repository) do
+    {:ok,
+     %{
+       url: url,
+       head_sha: sha,
+       head_branch: head,
+       base_branch: base,
+       state: state,
+       is_cross_repository: cross_repository
+     }}
   end
 
   defp decode_pull_request(payload), do: {:error, {:invalid_pull_request_readback, payload}}
 
   defp validate_pull_request_repository(url, expected) do
-    with %URI{scheme: "https", host: "github.com", path: path} <- URI.parse(url),
-         [owner, repo, "pull", number] <- String.split(path || "", "/", trim: true) do
-      validate_pull_request_parts(owner, repo, number, expected)
-    else
-      _ -> {:error, :invalid_published_pull_request_url}
+    case GitHubRepository.pull_request_url(url) do
+      {:ok, %{repository: ^expected}} -> :ok
+      {:ok, _other} -> {:error, :published_repository_mismatch}
+      {:error, _reason} -> {:error, :invalid_published_pull_request_url}
     end
   end
 
-  defp validate_pull_request_parts(owner, repo, number, expected) do
-    if "#{owner}/#{repo}" == expected and Regex.match?(~r/^[1-9][0-9]*$/, number),
-      do: :ok,
-      else: {:error, :published_repository_mismatch}
-  end
-
-  defp github_repository(origin) do
-    case Regex.run(~r/^(?:git@)?github\.com:([^\/]+)\/(.+?)(?:\.git)?$/, origin, capture: :all_but_first) do
-      [owner, repo] -> {:ok, "#{owner}/#{String.trim_trailing(repo, ".git")}"}
-      _ -> github_https_repository(origin)
-    end
-  end
-
-  defp github_https_repository(origin) do
-    case URI.parse(origin) do
-      %URI{host: "github.com", path: path} ->
-        case String.split(path || "", "/", trim: true) do
-          [owner, repo] -> {:ok, "#{owner}/#{String.trim_trailing(repo, ".git")}"}
-          _ -> {:error, :unsupported_repository_origin}
-        end
-
-      _ ->
-        {:error, :unsupported_repository_origin}
-    end
-  end
+  defp pull_request_fields,
+    do: "url,headRefOid,headRefName,baseRefName,state,isCrossRepository"
 
   defp git(runner, workspace, worker_host, args), do: command(runner, workspace, worker_host, "git", ["-C", workspace | args])
 

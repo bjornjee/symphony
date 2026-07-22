@@ -513,7 +513,14 @@ defmodule SymphonyElixir.AgentRunner do
                  "writableRoots" => [workspace],
                  "networkAccess" => false
                },
-               tool_executor: execution_tool_executor(runtime, workspace, issue, task_contract),
+               tool_executor:
+                 execution_tool_executor(
+                   app_session,
+                   runtime,
+                   workspace,
+                   issue,
+                   task_contract
+                 ),
                on_message:
                  codex_message_handler(
                    codex_update_recipient,
@@ -752,7 +759,7 @@ defmodule SymphonyElixir.AgentRunner do
   defp execution_plan_origin(%{"candidate" => %{"repository" => %{"origin" => origin}}}), do: origin
   defp execution_plan_origin(%{"repository" => %{"origin" => origin}}), do: origin
 
-  defp execution_tool_executor(runtime, workspace, issue, contract) do
+  defp execution_tool_executor(app_session, runtime, workspace, issue, contract) do
     plan = Keyword.fetch!(runtime.opts, :execution_plan)
     key = Keyword.fetch!(runtime.opts, :execution_ledger_key)
 
@@ -770,7 +777,17 @@ defmodule SymphonyElixir.AgentRunner do
             Keyword.put(runtime.opts, :worker_host, runtime.worker_host)
           )
         else
-          ExecutionControl.execute_tool(plan, key, workspace, tool, arguments, worker_host: runtime.worker_host)
+          ExecutionControl.execute_tool(
+            plan,
+            key,
+            workspace,
+            tool,
+            arguments,
+            worker_host: runtime.worker_host,
+            command_executor: fn directory, command, command_opts ->
+              AppServer.run_command(app_session, directory, command, command_opts)
+            end
+          )
           |> dynamic_tool_result()
         end
 

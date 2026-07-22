@@ -1,7 +1,44 @@
 defmodule SymphonyElixir.ExecutionControlTest do
   use ExUnit.Case
 
-  alias SymphonyElixir.{ExecutionControl, ExecutionLedger, RepositoryFingerprint}
+  alias __MODULE__.SandboxedExecutionControl, as: ExecutionControl
+  alias SymphonyElixir.{ExecutionLedger, RepositoryFingerprint}
+
+  defmodule SandboxedExecutionControl do
+    def run_plan_proof(plan, key, workspace, phase_id, proof_id, opts \\ []) do
+      SymphonyElixir.ExecutionControl.run_plan_proof(
+        plan,
+        key,
+        workspace,
+        phase_id,
+        proof_id,
+        Keyword.put(opts, :command_executor, &execute/3)
+      )
+    end
+
+    defdelegate execute_tool(plan, key, workspace, tool, arguments, opts),
+      to: SymphonyElixir.ExecutionControl
+
+    defdelegate submit_fix_diagnosis(plan, key, diagnosis),
+      to: SymphonyElixir.ExecutionControl
+
+    defdelegate complete_execution_phase(plan, key, workspace, phase_id),
+      to: SymphonyElixir.ExecutionControl
+
+    defdelegate delivery_state(plan, key, workspace),
+      to: SymphonyElixir.ExecutionControl
+
+    defp execute(_directory, "sleep 1", opts) do
+      if Keyword.fetch!(opts, :timeout_ms) < 1_000,
+        do: {:error, :timeout},
+        else: {:ok, %{exit_status: 0, stdout: "", stderr: ""}}
+    end
+
+    defp execute(directory, command, _opts) do
+      {output, status} = System.cmd("sh", ["-lc", command], cd: directory, stderr_to_stdout: true)
+      {:ok, %{exit_status: status, stdout: output, stderr: ""}}
+    end
+  end
 
   setup do
     root = Path.join(System.tmp_dir!(), "execution-control-#{System.os_time(:nanosecond)}")
@@ -76,7 +113,7 @@ defmodule SymphonyElixir.ExecutionControlTest do
     assert {:error, :proof_attempts_exhausted} = ExecutionControl.run_plan_proof(ctx.plan, ctx.key, ctx.workspace, "reproduce", "red")
   end
 
-  test "rejects unsupported tools, unknown proofs, and premature phases", ctx do
+  test "rejects an unsupported execution tool", ctx do
     assert {:error, {:unsupported_execution_tool, "unknown"}} =
              ExecutionControl.execute_tool(
                ctx.plan,
@@ -86,7 +123,9 @@ defmodule SymphonyElixir.ExecutionControlTest do
                %{},
                []
              )
+  end
 
+  test "rejects an unknown phase proof", ctx do
     assert {:error, :unknown_phase_proof} =
              ExecutionControl.run_plan_proof(
                ctx.plan,
@@ -95,7 +134,9 @@ defmodule SymphonyElixir.ExecutionControlTest do
                "reproduce",
                "missing"
              )
+  end
 
+  test "rejects a phase before its dependency completes", ctx do
     assert {:error, {:phase_dependency_incomplete, "reproduce"}} =
              ExecutionControl.complete_execution_phase(
                ctx.plan,
@@ -103,10 +144,14 @@ defmodule SymphonyElixir.ExecutionControlTest do
                ctx.workspace,
                "fix"
              )
+  end
 
+  test "rejects delivery before every phase completes", ctx do
     assert {:error, {:execution_phase_incomplete, "reproduce"}} =
              ExecutionControl.delivery_state(ctx.plan, ctx.key, ctx.workspace)
+  end
 
+  test "rejects a fix diagnosis for a non-fix workflow", ctx do
     assert {:error, :diagnosis_not_allowed} =
              ExecutionControl.submit_fix_diagnosis(
                Map.put(ctx.plan, "workflow", "chore"),

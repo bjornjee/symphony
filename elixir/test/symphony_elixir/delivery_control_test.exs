@@ -105,7 +105,18 @@ defmodule SymphonyElixir.DeliveryControlTest do
     assert {:ok, validated} =
              CompletionEvidence.validate(ctx.workspace, ctx.issue, ctx.contract, %{},
                execution_plan: ctx.plan,
-               execution_ledger_key: ctx.key
+               execution_ledger_key: ctx.key,
+               pull_request_reader: fn _workspace, _plan, _url, _opts ->
+                 {:ok,
+                  %{
+                    "url" => evidence["pull_request_url"],
+                    "head_sha" => evidence["pr_head_sha"],
+                    "head_branch" => evidence["pr_head_branch"],
+                    "base_branch" => evidence["pr_base_branch"],
+                    "state" => "OPEN",
+                    "is_cross_repository" => false
+                  }}
+               end
              )
 
     assert validated.pull_request_url == evidence["pull_request_url"]

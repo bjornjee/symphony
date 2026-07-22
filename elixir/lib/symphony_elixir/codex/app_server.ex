@@ -11,10 +11,16 @@ defmodule SymphonyElixir.Codex.AppServer do
   @turn_start_id 3
   @thread_goal_set_id 4
   @thread_resume_id 5
+  @command_exec_id 6
   @goal_statuses ~w(active blocked complete)
   @port_line_bytes 1_048_576
   @max_stream_log_bytes 1_000
   @non_interactive_tool_input_answer "This is a non-interactive session. Operator input is unavailable."
+  @proof_secret_env ~w(
+    AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY AWS_SESSION_TOKEN
+    GITHUB_TOKEN GH_TOKEN LINEAR_API_KEY
+    OPENAI_API_KEY CODEX_API_KEY ANTHROPIC_API_KEY
+  )
 
   @type session :: %{
           port: port(),
@@ -164,6 +170,47 @@ defmodule SymphonyElixir.Codex.AppServer do
     end
   end
 
+  @spec run_command(session(), Path.t(), String.t(), keyword()) ::
+          {:ok, %{exit_status: integer(), stdout: String.t(), stderr: String.t()}} | {:error, term()}
+  def run_command(%{port: port, workspace: workspace, worker_host: worker_host}, directory, command, opts)
+      when is_binary(directory) and is_binary(command) do
+    timeout_ms = Keyword.fetch!(opts, :timeout_ms)
+    output_bytes_cap = Keyword.fetch!(opts, :output_bytes_cap)
+
+    with {:ok, command_directory} <- validate_command_directory(workspace, directory, worker_host) do
+      send_message(port, %{
+        "method" => "command/exec",
+        "id" => @command_exec_id,
+        "params" => %{
+          "command" => ["sh", "-lc", command],
+          "cwd" => command_directory,
+          "timeoutMs" => timeout_ms,
+          "outputBytesCap" => output_bytes_cap,
+          "env" => Map.new(@proof_secret_env, &{&1, nil}),
+          "sandboxPolicy" => %{
+            "type" => "workspaceWrite",
+            "writableRoots" => [workspace],
+            "networkAccess" => false,
+            "excludeSlashTmp" => false,
+            "excludeTmpdirEnvVar" => false
+          }
+        }
+      })
+
+      case await_response(port, @command_exec_id, timeout_ms + 5_000) do
+        {:ok, %{"exitCode" => status, "stdout" => stdout, "stderr" => stderr}}
+        when is_integer(status) and is_binary(stdout) and is_binary(stderr) ->
+          {:ok, %{exit_status: status, stdout: stdout, stderr: stderr}}
+
+        {:ok, payload} ->
+          {:error, {:invalid_command_exec_response, payload}}
+
+        {:error, _reason} = error ->
+          error
+      end
+    end
+  end
+
   @spec set_goal(session(), String.t(), keyword()) :: :ok | {:error, term()}
   def set_goal(%{port: port, thread_id: thread_id}, objective, opts \\ [])
       when is_binary(thread_id) and is_binary(objective) do
@@ -266,6 +313,26 @@ defmodule SymphonyElixir.Codex.AppServer do
       true ->
         {:ok, workspace}
     end
+  end
+
+  defp validate_command_directory(workspace, directory, nil) do
+    with {:ok, canonical_workspace} <- PathSafety.canonicalize(workspace),
+         {:ok, canonical_directory} <- PathSafety.canonicalize(directory),
+         true <-
+           canonical_directory == canonical_workspace or
+             String.starts_with?(canonical_directory <> "/", canonical_workspace <> "/") do
+      {:ok, canonical_directory}
+    else
+      false -> {:error, :proof_directory_outside_workspace}
+      {:error, reason} -> {:error, {:proof_directory_invalid, reason}}
+    end
+  end
+
+  defp validate_command_directory(workspace, directory, worker_host) when is_binary(worker_host) do
+    if not String.contains?(directory, ["\n", "\r", <<0>>]) and
+         (directory == workspace or String.starts_with?(directory <> "/", String.trim_trailing(workspace, "/") <> "/")),
+       do: {:ok, directory},
+       else: {:error, :proof_directory_outside_workspace}
   end
 
   defp start_port(workspace, nil) do
@@ -386,7 +453,7 @@ defmodule SymphonyElixir.Codex.AppServer do
 
     case await_response(port, @thread_resume_id) do
       {:ok, %{"thread" => %{"id" => ^thread_id}} = response} ->
-        {:ok, thread_id, instruction_sources(response)}
+        with {:ok, sources} <- instruction_sources(response), do: {:ok, thread_id, sources}
 
       {:ok, %{"thread" => %{"id" => resumed_thread_id}}} ->
         {:error, {:resumed_thread_mismatch, thread_id, resumed_thread_id}}
@@ -417,19 +484,26 @@ defmodule SymphonyElixir.Codex.AppServer do
     })
 
     case await_response(port, @thread_start_id) do
-      {:ok, %{"thread" => thread_payload} = response} ->
-        case thread_payload do
-          %{"id" => thread_id} -> {:ok, thread_id, instruction_sources(response)}
-          _ -> {:error, {:invalid_thread_payload, thread_payload}}
-        end
+      {:ok, response} ->
+        started_thread(response)
 
       other ->
         other
     end
   end
 
-  defp instruction_sources(%{"instructionSources" => sources}) when is_list(sources), do: sources
-  defp instruction_sources(_response), do: []
+  defp started_thread(%{"thread" => %{"id" => thread_id}} = response) do
+    with {:ok, sources} <- instruction_sources(response), do: {:ok, thread_id, sources}
+  end
+
+  defp started_thread(%{"thread" => thread_payload}),
+    do: {:error, {:invalid_thread_payload, thread_payload}}
+
+  defp started_thread(response), do: {:error, {:invalid_thread_response, response}}
+
+  defp instruction_sources(%{"instructionSources" => sources}) when is_list(sources), do: {:ok, sources}
+  defp instruction_sources(%{"instructionSources" => _sources}), do: {:error, :instruction_sources_malformed}
+  defp instruction_sources(_response), do: {:error, :instruction_sources_missing}
 
   defp start_turn(
          port,
@@ -1069,6 +1143,10 @@ defmodule SymphonyElixir.Codex.AppServer do
 
   defp await_response(port, request_id) do
     with_timeout_response(port, request_id, Config.settings!().codex.read_timeout_ms, "")
+  end
+
+  defp await_response(port, request_id, timeout_ms) when is_integer(timeout_ms) and timeout_ms > 0 do
+    with_timeout_response(port, request_id, timeout_ms, "")
   end
 
   defp with_timeout_response(port, request_id, timeout_ms, pending_line) do

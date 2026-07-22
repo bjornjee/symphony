@@ -292,14 +292,18 @@ Fields:
   - `proof_receipt_digest`
   - `proof_id`
 - `pull_request_url`
-- `pr_head_sha` and `repository_head_sha`
+- `pr_head_sha`, `pr_head_branch`, `pr_base_branch`, and `repository_head_sha`
 - proof, phase, implementation-review, Surgical-review when applicable, and publication receipt digests
 
 Symphony owns validation. A proof receipt MUST identify an exact approved command executed by the
-engine and retained in its bounded immutable external ledger. Workspace prose, checkbox state,
+engine through Codex app-server `command/exec` with workspace-scoped writes, disabled network,
+bounded output and timeout, and retained in its bounded immutable external ledger. Workspace prose, checkbox state,
 edited audit files, agent shell events, and agent-asserted exit status are not proof. The PR URL MUST be
 an HTTPS GitHub `/pull/<positive integer>` URL whose owner and repository match the workspace
-`origin`. Validation reads only the current issue's bounded trusted receipt set and repository state.
+`origin`. Immediately before handoff, Symphony MUST read the PR from GitHub and require an open,
+same-repository PR whose head SHA, head branch, and base branch equal the trusted publication receipt
+and current reviewed repository state. Validation reads only the current issue's bounded trusted
+receipt set, repository state, and that exact PR readback.
 
 Explicit rejection classes include missing or oversized artifacts, malformed or unsupported
 schema, issue or digest mismatch, missing/unmatched/duplicate criteria, malformed/missing/failed
@@ -1253,7 +1257,9 @@ Behavior:
 4. Start or resume the exact canonical primary Codex thread and persist its identity create-only.
 5. Preserve the ordered `instructionSources` returned by start/resume, bounded-read their contents,
    and bind their digest with repository, contract, profile, and thread identity. Before planning or
-   goal activation, run the deterministic task-classification gate and persist its authority-bound
+   execution, fail closed if `instructionSources` is missing or malformed; an explicitly returned
+   empty list remains valid. Before goal activation, run the deterministic task-classification gate
+   and persist its authority-bound
    decision create-only. Only a low-risk
 single-path eligible `feature` or `chore` workflow with one criterion and one exact safe proof command may be `simple`;
    ambiguity, risky work, decomposition, or `Planning: full` routes to `planned`.
@@ -1274,9 +1280,12 @@ single-path eligible `feature` or `chore` workflow with one criterion and one ex
 11. Create or resume one task branch from the pinned base SHA, then resume the same primary thread
     with write-capable implementation policy and the approved execution authorization as authority.
 12. Plans contain typed proof specifications and phase proof IDs. Symphony alone executes those
-    commands, with a thirty-minute timeout, one-MiB output ceiling, diagnostic tail, exact expected
-    exit semantics, repository pre/post digests, and at most three attempts. Agent shell events never
-    satisfy proof contracts.
+    commands through sandboxed app-server `command/exec`, including for SSH-backed workers. The
+    proof sandbox permits writes only under the issue workspace, disables network, removes known
+    publication and tracker credentials from the command environment, terminates the process with
+    its app-server connection, and applies a thirty-minute timeout, one-MiB output ceiling,
+    diagnostic tail, exact expected-exit semantics, repository pre/post digests, and at most three
+    attempts. No unsandboxed fallback exists, and agent shell events never satisfy proof contracts.
 13. For `planned`, preserve native-plan identity for visibility while immutable external proof,
     diagnosis, and phase receipts authoritatively gate ordered progress. Fixes require RED then a
     grounded diagnosis before GREEN; refactors require a clean baseline and preservation proofs.
@@ -1284,7 +1293,9 @@ single-path eligible `feature` or `chore` workflow with one criterion and one ex
     medium-effort implementation review bound to the exact head and repository state.
 15. Symphony alone pushes the task branch and creates or updates its single PR after validating
     ancestry, conventional commits, content, proof, review, and exact read-back head equality.
-    Completion evidence is generated from trusted receipts, never accepted from workspace JSON.
+    Before Linear handoff it reads the PR again and requires the same open repository, head SHA,
+    head branch, and base branch. Completion evidence is generated from trusted receipts, never
+    accepted from workspace JSON.
 16. Before each continuation turn, refresh all authority digests and require the same contract.
 17. Map the final attempt outcome to `active`, `blocked`, or `complete` and update the goal.
 18. On any error, fail the worker attempt (the orchestrator will retry).

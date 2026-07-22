@@ -49,7 +49,7 @@ defmodule SymphonyElixir.EnginePublisherTest do
           {:ok, {"https://github.com/acme/repo/pull/1\n", 0}}
 
         {"gh", ["pr", "view" | _]} ->
-          {:ok, {Jason.encode!(%{"url" => "https://github.com/acme/repo/pull/1", "headRefOid" => ctx.head, "headRefName" => "feature/sym-1-test", "baseRefName" => "main"}), 0}}
+          {:ok, {Jason.encode!(readback(ctx)), 0}}
 
         {"git", ["-C", ^workspace | git_args]} ->
           {:ok, System.cmd("git", ["-C", workspace | git_args], stderr_to_stdout: true)}
@@ -62,12 +62,57 @@ defmodule SymphonyElixir.EnginePublisherTest do
     assert_receive {:command, "git", ["-C", _, "push", "origin", "feature/sym-1-test"]}
   end
 
-  test "rejects malformed content before publication", ctx do
-    assert {:error, :invalid_pull_request_title} = EnginePublisher.publish(ctx.workspace, ctx.plan, "Bad title", "body")
+  test "reads back the current pull request identity", ctx do
+    assert {:ok, pull_request} =
+             EnginePublisher.read_pull_request(
+               ctx.workspace,
+               ctx.plan,
+               "https://github.com/acme/repo/pull/1",
+               command_runner: publishing_runner(ctx, readback(ctx))
+             )
 
+    assert pull_request["head_sha"] == ctx.head
+    assert pull_request["head_branch"] == "feature/sym-1-test"
+    assert pull_request["base_branch"] == "main"
+    assert pull_request["state"] == "OPEN"
+  end
+
+  test "rejects a closed pull request readback", ctx do
+    closed = %{readback(ctx) | "state" => "CLOSED"}
+
+    assert {:error, :published_pull_request_not_open} =
+             EnginePublisher.publish(
+               ctx.workspace,
+               ctx.plan,
+               "feat: change readme",
+               body(),
+               command_runner: publishing_runner(ctx, closed)
+             )
+  end
+
+  test "rejects a cross-repository pull request readback", ctx do
+    cross_repository = %{readback(ctx) | "isCrossRepository" => true}
+
+    assert {:error, :published_cross_repository_pull_request} =
+             EnginePublisher.publish(
+               ctx.workspace,
+               ctx.plan,
+               "feat: change readme",
+               body(),
+               command_runner: publishing_runner(ctx, cross_repository)
+             )
+  end
+
+  test "rejects a nonconventional pull request title", ctx do
+    assert {:error, :invalid_pull_request_title} = EnginePublisher.publish(ctx.workspace, ctx.plan, "Bad title", "body")
+  end
+
+  test "rejects tool self-attribution", ctx do
     body = "## Why\nGenerated with Codex\n## Summary\nx\n## Test plan\nmix test test/example_test.exs"
     assert {:error, :pull_request_self_attribution} = EnginePublisher.publish(ctx.workspace, ctx.plan, "feat: change readme", body)
+  end
 
+  test "rejects an incomplete pull request body", ctx do
     assert {:error, :invalid_pull_request_body} =
              EnginePublisher.publish(
                ctx.workspace,
@@ -75,7 +120,9 @@ defmodule SymphonyElixir.EnginePublisherTest do
                "feat: change readme",
                "## Why\n\n## Summary\nx\n## Test plan\nmix test test/example_test.exs"
              )
+  end
 
+  test "rejects a test plan that omits an approved proof", ctx do
     assert {:error, :pull_request_test_plan_mismatch} =
              EnginePublisher.publish(
                ctx.workspace,
@@ -230,7 +277,9 @@ defmodule SymphonyElixir.EnginePublisherTest do
       "url" => "https://github.com/acme/repo/pull/1",
       "headRefOid" => ctx.head,
       "headRefName" => "feature/sym-1-test",
-      "baseRefName" => "main"
+      "baseRefName" => "main",
+      "state" => "OPEN",
+      "isCrossRepository" => false
     }
   end
 

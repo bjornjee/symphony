@@ -1,9 +1,8 @@
 defmodule SymphonyElixir.CompletionEvidence do
   @moduledoc "Validates only engine-generated completion evidence from the trusted execution ledger."
 
-  alias SymphonyElixir.DeliveryControl
+  alias SymphonyElixir.{DeliveryControl, EnginePublisher, GitHubRepository, PlanningArtifact, RepositoryFingerprint}
   alias SymphonyElixir.Linear.{Issue, TaskContract}
-  alias SymphonyElixir.{PlanningArtifact, RepositoryFingerprint}
 
   @artifact_path Path.join(".symphony", "completion-evidence.json")
 
@@ -17,6 +16,8 @@ defmodule SymphonyElixir.CompletionEvidence do
          {:ok, plan} <- execution_plan(workspace, opts),
          {:ok, head_sha} <- RepositoryFingerprint.head(workspace, Keyword.get(opts, :worker_host)),
          :ok <- validate_identity(evidence, issue, contract, plan, head_sha),
+         {:ok, remote_pull_request} <- read_pull_request(workspace, plan, evidence["pull_request_url"], opts),
+         :ok <- validate_remote_pull_request(remote_pull_request, evidence, head_sha),
          :ok <- validate_criteria(evidence["criteria"], contract) do
       {:ok,
        %{
@@ -70,7 +71,9 @@ defmodule SymphonyElixir.CompletionEvidence do
       {evidence["workflow"] == plan["workflow"], :completion_evidence_workflow_mismatch},
       {evidence["repository_head_sha"] == head_sha, :completion_evidence_head_stale},
       {evidence["pr_head_sha"] == head_sha, :completion_evidence_pr_head_stale},
-      {valid_pull_request_url?(evidence["pull_request_url"]), :completion_evidence_pr_invalid},
+      {is_binary(evidence["pr_head_branch"]), :completion_evidence_pr_branch_invalid},
+      {is_binary(evidence["pr_base_branch"]), :completion_evidence_pr_base_invalid},
+      {match?({:ok, _}, GitHubRepository.pull_request_url(evidence["pull_request_url"])), :completion_evidence_pr_invalid},
       {pull_request_matches_plan?(evidence["pull_request_url"], plan), :completion_evidence_repository_mismatch}
     ]
 
@@ -94,47 +97,38 @@ defmodule SymphonyElixir.CompletionEvidence do
 
   defp validate_criteria(_criteria, _contract), do: {:error, :completion_evidence_criteria_malformed}
 
-  defp valid_pull_request_url?(url) when is_binary(url) do
-    case URI.parse(url) do
-      %URI{scheme: "https", host: "github.com", path: path} ->
-        match?([_, _, "pull", number] when number != "", String.split(path || "", "/", trim: true))
+  defp read_pull_request(workspace, plan, url, opts) do
+    reader = Keyword.get(opts, :pull_request_reader, &EnginePublisher.read_pull_request/4)
 
-      _ ->
-        false
+    case reader.(workspace, plan, url, opts) do
+      {:ok, pull_request} when is_map(pull_request) -> {:ok, pull_request}
+      {:error, reason} -> {:error, {:completion_evidence_pr_read_failed, reason}}
+      other -> {:error, {:completion_evidence_pr_read_failed, {:invalid_result, other}}}
     end
   end
 
-  defp valid_pull_request_url?(_url), do: false
+  defp validate_remote_pull_request(remote, evidence, head_sha) do
+    checks = [
+      {remote["url"] == evidence["pull_request_url"], :completion_evidence_remote_url_mismatch},
+      {remote["state"] == "OPEN", :completion_evidence_pr_not_open},
+      {remote["is_cross_repository"] == false, :completion_evidence_cross_repository_pr},
+      {remote["head_sha"] == head_sha, :completion_evidence_remote_head_stale},
+      {remote["head_branch"] == evidence["pr_head_branch"], :completion_evidence_remote_branch_mismatch},
+      {remote["base_branch"] == evidence["pr_base_branch"], :completion_evidence_remote_base_mismatch}
+    ]
+
+    case Enum.find(checks, fn {valid, _reason} -> not valid end) do
+      nil -> :ok
+      {_valid, reason} -> {:error, reason}
+    end
+  end
 
   defp pull_request_matches_plan?(url, plan) do
-    with {:ok, expected} <- origin_repository(plan_origin(plan)),
-         %URI{host: "github.com", path: path} <- URI.parse(url),
-         [owner, repo, "pull", _number] <- String.split(path || "", "/", trim: true) do
-      "#{owner}/#{repo}" == expected
+    with {:ok, expected} <- GitHubRepository.from_origin(plan_origin(plan)),
+         {:ok, %{repository: actual}} <- GitHubRepository.pull_request_url(url) do
+      actual == expected
     else
       _ -> false
-    end
-  end
-
-  defp origin_repository(origin) when is_binary(origin) do
-    case Regex.run(~r/^(?:git@)?github\.com:([^\/]+)\/(.+?)(?:\.git)?$/, origin, capture: :all_but_first) do
-      [owner, repo] -> {:ok, "#{owner}/#{String.trim_trailing(repo, ".git")}"}
-      _ -> https_origin_repository(origin)
-    end
-  end
-
-  defp origin_repository(_origin), do: :error
-
-  defp https_origin_repository(origin) do
-    case URI.parse(origin) do
-      %URI{host: "github.com", path: path} ->
-        case String.split(path || "", "/", trim: true) do
-          [owner, repo] -> {:ok, "#{owner}/#{String.trim_trailing(repo, ".git")}"}
-          _ -> :error
-        end
-
-      _ ->
-        :error
     end
   end
 

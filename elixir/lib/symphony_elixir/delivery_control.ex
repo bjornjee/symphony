@@ -112,14 +112,20 @@ defmodule SymphonyElixir.DeliveryControl do
   end
 
   defp validate_existing_publication(key, expected) do
-    case ExecutionLedger.read(key, "publication", "pull-request") do
+    case ExecutionLedger.read_required(
+           key,
+           "publication",
+           "pull-request",
+           :publication_receipt_missing,
+           :publication_receipt_invalid
+         ) do
       {:ok, existing} ->
         if Map.drop(existing, ["receipt_digest"]) == expected,
           do: {:ok, existing},
           else: {:error, :publication_receipt_drift}
 
-      other ->
-        other
+      {:error, _reason} = error ->
+        error
     end
   end
 
@@ -139,6 +145,8 @@ defmodule SymphonyElixir.DeliveryControl do
         "profile_digest" => plan["profile_digest"],
         "repository_head_sha" => publication["head_sha"],
         "pr_head_sha" => publication["head_sha"],
+        "pr_head_branch" => publication["head_branch"],
+        "pr_base_branch" => publication["base_branch"],
         "pull_request_url" => publication["url"],
         "criteria" => criteria,
         "proof_receipt_digests" => Enum.map(proof_receipts, & &1["receipt_digest"]),

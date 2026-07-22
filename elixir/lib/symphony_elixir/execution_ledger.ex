@@ -36,6 +36,17 @@ defmodule SymphonyElixir.ExecutionLedger do
     end
   end
 
+  @spec read_required(String.t(), String.t(), String.t(), atom(), atom()) ::
+          {:ok, map()} | {:error, term()}
+  def read_required(key, kind, id, missing_error, invalid_error)
+      when is_atom(missing_error) and is_atom(invalid_error) do
+    case read(key, kind, id) do
+      {:ok, receipt} -> {:ok, receipt}
+      :missing -> {:error, missing_error}
+      {:error, reason} -> {:error, {invalid_error, reason}}
+    end
+  end
+
   @spec path(String.t(), String.t(), String.t()) :: Path.t()
   def path(key, kind, id), do: Path.join([root(), key, kind, id <> ".json"])
 

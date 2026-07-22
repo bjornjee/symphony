@@ -31,6 +31,32 @@ defmodule SymphonyElixir.ExecutionLedgerTest do
     assert {:error, :invalid_ledger_component} = ExecutionLedger.read(key, "proof", "../one")
   end
 
+  test "maps a missing required receipt to the caller's domain error", %{key: key} do
+    assert {:error, :publication_receipt_missing} =
+             ExecutionLedger.read_required(
+               key,
+               "publication",
+               "pull-request",
+               :publication_receipt_missing,
+               :publication_receipt_invalid
+             )
+  end
+
+  test "wraps an invalid required receipt in the caller's domain error", %{key: key} do
+    path = ExecutionLedger.path(key, "publication", "pull-request")
+    File.mkdir_p!(Path.dirname(path))
+    File.write!(path, "{}")
+
+    assert {:error, {:publication_receipt_invalid, :invalid_receipt}} =
+             ExecutionLedger.read_required(
+               key,
+               "publication",
+               "pull-request",
+               :publication_receipt_missing,
+               :publication_receipt_invalid
+             )
+  end
+
   test "rejects oversized and corrupted receipts", %{key: key} do
     assert {:error, :receipt_too_large} =
              ExecutionLedger.create(key, "proof", "huge", %{

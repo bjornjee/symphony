@@ -238,7 +238,8 @@ defmodule SymphonyElixir.PlanningGate do
   defp read_and_validate(workspace, expected, worker_host, authority_digest) do
     case read(workspace, worker_host, authority_digest) do
       {:ok, existing} -> validate_existing(existing, expected)
-      other -> other
+      :missing -> {:error, :task_classification_disappeared}
+      {:error, _reason} = error -> error
     end
   end
 

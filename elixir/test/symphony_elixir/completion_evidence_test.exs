@@ -55,15 +55,36 @@ defmodule SymphonyElixir.CompletionEvidenceTest do
         "workflow" => plan["workflow"],
         "repository_head_sha" => state.base_sha,
         "pr_head_sha" => state.base_sha,
+        "pr_head_branch" => "feature/sym-1-test",
+        "pr_base_branch" => "main",
         "pull_request_url" => "https://github.com/acme/repo/pull/1",
         "criteria" => criteria
       })
 
-    %{workspace: workspace, issue: issue, contract: contract, plan: plan, key: key, evidence: evidence}
+    remote_pr = %{
+      "url" => "https://github.com/acme/repo/pull/1",
+      "head_sha" => state.base_sha,
+      "head_branch" => "feature/sym-1-test",
+      "base_branch" => "main",
+      "state" => "OPEN",
+      "is_cross_repository" => false
+    }
+
+    %{
+      workspace: workspace,
+      issue: issue,
+      contract: contract,
+      plan: plan,
+      key: key,
+      evidence: evidence,
+      remote_pr: remote_pr
+    }
   end
 
   test "accepts only ledger-derived evidence", ctx do
-    assert {:ok, validated} = CompletionEvidence.validate(ctx.workspace, ctx.issue, ctx.contract, %{}, execution_plan: ctx.plan, execution_ledger_key: ctx.key)
+    assert {:ok, validated} =
+             CompletionEvidence.validate(ctx.workspace, ctx.issue, ctx.contract, %{}, validation_opts(ctx))
+
     assert validated.artifact_digest == ctx.evidence["receipt_digest"]
   end
 
@@ -73,7 +94,14 @@ defmodule SymphonyElixir.CompletionEvidenceTest do
     File.write!(plan_path, Jason.encode!(ctx.plan))
 
     assert {:ok, validated} =
-             CompletionEvidence.validate(ctx.workspace, ctx.issue, ctx.contract, %{}, execution_ledger_key: ctx.key)
+             CompletionEvidence.validate(
+               ctx.workspace,
+               ctx.issue,
+               ctx.contract,
+               %{},
+               execution_ledger_key: ctx.key,
+               pull_request_reader: reader(ctx.remote_pr)
+             )
 
     assert validated.execution_plan_digest == ctx.plan["plan_digest"]
     assert CompletionEvidence.path(ctx.workspace) =~ ".symphony/completion-evidence.json"
@@ -85,7 +113,15 @@ defmodule SymphonyElixir.CompletionEvidenceTest do
 
     assert {:error, :trusted_execution_ledger_key_missing} = CompletionEvidence.validate(ctx.workspace, ctx.issue, ctx.contract, %{}, execution_plan: ctx.plan)
     stale = %{ctx.plan | "instruction_digest" => String.duplicate("f", 64)}
-    assert {:error, :completion_evidence_instruction_mismatch} = CompletionEvidence.validate(ctx.workspace, ctx.issue, ctx.contract, %{}, execution_plan: stale, execution_ledger_key: ctx.key)
+
+    assert {:error, :completion_evidence_instruction_mismatch} =
+             CompletionEvidence.validate(
+               ctx.workspace,
+               ctx.issue,
+               ctx.contract,
+               %{},
+               validation_opts(ctx, execution_plan: stale)
+             )
   end
 
   test "rejects a missing or unreadable sealed execution plan", ctx do
@@ -129,7 +165,8 @@ defmodule SymphonyElixir.CompletionEvidenceTest do
     assert {:error, :completion_evidence_criteria_malformed} =
              CompletionEvidence.validate(ctx.workspace, ctx.issue, ctx.contract, %{},
                execution_plan: ctx.plan,
-               execution_ledger_key: malformed_key
+               execution_ledger_key: malformed_key,
+               pull_request_reader: reader(ctx.remote_pr)
              )
 
     invalid_url_key = ExecutionLedger.key("invalid-url", ctx.issue.id, ctx.plan["plan_digest"])
@@ -154,7 +191,71 @@ defmodule SymphonyElixir.CompletionEvidenceTest do
     assert {:ok, _validated} =
              CompletionEvidence.validate(ctx.workspace, ctx.issue, ctx.contract, %{},
                execution_plan: plan,
-               execution_ledger_key: ctx.key
+               execution_ledger_key: ctx.key,
+               pull_request_reader: reader(ctx.remote_pr)
+             )
+  end
+
+  test "rejects a remotely closed pull request", ctx do
+    assert {:error, :completion_evidence_pr_not_open} =
+             CompletionEvidence.validate(
+               ctx.workspace,
+               ctx.issue,
+               ctx.contract,
+               %{},
+               validation_opts(ctx, pull_request_reader: reader(%{ctx.remote_pr | "state" => "CLOSED"}))
+             )
+  end
+
+  test "rejects a remotely changed pull request head", ctx do
+    stale = %{ctx.remote_pr | "head_sha" => String.duplicate("0", 40)}
+
+    assert {:error, :completion_evidence_remote_head_stale} =
+             CompletionEvidence.validate(
+               ctx.workspace,
+               ctx.issue,
+               ctx.contract,
+               %{},
+               validation_opts(ctx, pull_request_reader: reader(stale))
+             )
+  end
+
+  test "rejects a remotely changed pull request branch", ctx do
+    changed = %{ctx.remote_pr | "head_branch" => "feature/other"}
+
+    assert {:error, :completion_evidence_remote_branch_mismatch} =
+             CompletionEvidence.validate(
+               ctx.workspace,
+               ctx.issue,
+               ctx.contract,
+               %{},
+               validation_opts(ctx, pull_request_reader: reader(changed))
+             )
+  end
+
+  test "rejects a remotely retargeted pull request", ctx do
+    retargeted = %{ctx.remote_pr | "base_branch" => "release"}
+
+    assert {:error, :completion_evidence_remote_base_mismatch} =
+             CompletionEvidence.validate(
+               ctx.workspace,
+               ctx.issue,
+               ctx.contract,
+               %{},
+               validation_opts(ctx, pull_request_reader: reader(retargeted))
+             )
+  end
+
+  test "rejects a cross-repository pull request", ctx do
+    cross_repository = %{ctx.remote_pr | "is_cross_repository" => true}
+
+    assert {:error, :completion_evidence_cross_repository_pr} =
+             CompletionEvidence.validate(
+               ctx.workspace,
+               ctx.issue,
+               ctx.contract,
+               %{},
+               validation_opts(ctx, pull_request_reader: reader(cross_repository))
              )
   end
 
@@ -173,5 +274,20 @@ defmodule SymphonyElixir.CompletionEvidenceTest do
                execution_plan: Map.delete(ctx.plan, "repository"),
                execution_ledger_key: key
              )
+  end
+
+  defp validation_opts(ctx, overrides \\ []) do
+    Keyword.merge(
+      [
+        execution_plan: ctx.plan,
+        execution_ledger_key: ctx.key,
+        pull_request_reader: reader(ctx.remote_pr)
+      ],
+      overrides
+    )
+  end
+
+  defp reader(pull_request) do
+    fn _workspace, _plan, _url, _opts -> {:ok, pull_request} end
   end
 end

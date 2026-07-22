@@ -37,10 +37,10 @@ defmodule SymphonyElixir.AgentRunnerThreadResumeTest do
             printf '%s\n' '{"id":1,"result":{}}'
             ;;
           *'"method":"thread/start"'*)
-            printf '%s\n' '{"id":2,"result":{"thread":{"id":"thread-durable"}}}'
+            printf '%s\n' '{"id":2,"result":{"thread":{"id":"thread-durable"},"instructionSources":[]}}'
             ;;
           *'"method":"thread/resume"'*)
-            printf '%s\n' '{"id":5,"result":{"thread":{"id":"thread-durable"}}}'
+            printf '%s\n' '{"id":5,"result":{"thread":{"id":"thread-durable"},"instructionSources":[]}}'
             ;;
           *'"method":"thread/goal/set"'*)
             printf '%s\n' '{"id":4,"result":{"goal":{"status":"active"}}}'

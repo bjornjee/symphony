@@ -203,7 +203,11 @@ comment with the proposed child issue bodies and stop.
   `tracker.handoff_state`.
 - Repository changes require the engine-created task branch, a conventional
   commit, fresh final proof, and engine-owned PR publication before handoff.
-- Symphony binds the validated PR URL and head to trusted completion evidence
+- Proof tools run approved commands through Symphony's bounded app-server
+  sandbox with workspace-only writes and no network; agent shell output is not
+  proof.
+- Symphony binds the validated PR URL, head, head branch, and base branch to
+  trusted completion evidence, re-reads the open PR immediately before handoff,
   and includes the URL and exact reviewer action in `## Agent Handoff`.
 - Human-facing Linear comments must follow this convention:
   - `## Agent Handoff`: completed work, PR/diff link, verification, and action needed.

@@ -64,7 +64,7 @@ defmodule SymphonyElixir.ExecutionControl do
          command_result <-
            EngineCommand.run(proof_directory, proof["command"],
              timeout_ms: min(proof["timeout_ms"], 1_800_000),
-             worker_host: Keyword.get(opts, :worker_host)
+             executor: Keyword.get(opts, :command_executor)
            ),
          {:ok, after_state} <- RepositoryFingerprint.capture(workspace, Keyword.get(opts, :worker_host)) do
       {result, runner_error} = normalize_command_result(command_result)
@@ -112,9 +112,20 @@ defmodule SymphonyElixir.ExecutionControl do
       receipt = Map.merge(diagnosis, %{"plan_digest" => plan["plan_digest"], "red_receipt_digest" => red["receipt_digest"]})
 
       case ExecutionLedger.create(ledger_key, "diagnosis", "fix", receipt) do
-        {:ok, persisted} -> {:ok, persisted}
-        :exists -> ExecutionLedger.read(ledger_key, "diagnosis", "fix")
-        {:error, reason} -> {:error, reason}
+        {:ok, persisted} ->
+          {:ok, persisted}
+
+        :exists ->
+          ExecutionLedger.read_required(
+            ledger_key,
+            "diagnosis",
+            "fix",
+            :diagnosis_receipt_missing,
+            :diagnosis_receipt_invalid
+          )
+
+        {:error, reason} ->
+          {:error, reason}
       end
     end
   end
@@ -165,9 +176,20 @@ defmodule SymphonyElixir.ExecutionControl do
       }
 
       case ExecutionLedger.create(ledger_key, "phase", phase_id, receipt) do
-        {:ok, persisted} -> {:ok, persisted}
-        :exists -> ExecutionLedger.read(ledger_key, "phase", phase_id)
-        {:error, reason} -> {:error, reason}
+        {:ok, persisted} ->
+          {:ok, persisted}
+
+        :exists ->
+          ExecutionLedger.read_required(
+            ledger_key,
+            "phase",
+            phase_id,
+            :phase_receipt_missing,
+            :phase_receipt_invalid
+          )
+
+        {:error, reason} ->
+          {:error, reason}
       end
     end
   end
