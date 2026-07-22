@@ -1589,6 +1589,44 @@ defmodule SymphonyElixir.CoreTest do
     assert prompt =~ "Prove the correction"
   end
 
+  test "simple execution prompt skips native planning and preserves direct bounds" do
+    description =
+      TaskContractFixtures.valid_description(%{
+        "Goal" => "Correct one documentation example.",
+        "Scope" => "In:\n- docs/guide.md\n\nOut:\n- source code",
+        "Acceptance Criteria" => "- [ ] Guide example is current.",
+        "Verification" => "Run:\n`mix test test/docs_test.exs`",
+        "Risk" => "low",
+        "Notes For Agent" => "Workflow: chore"
+      })
+
+    issue = TaskContractFixtures.issue(%{identifier: "S-6", title: "docs: correct guide example", description: description})
+    assert {:ok, contract} = TaskContract.from_issue(issue)
+    assert {:ok, profile} = SymphonyElixir.WorkflowProfile.select(contract)
+
+    execution_plan = %{
+      "execution_mode" => "simple",
+      "plan_digest" => String.duplicate("a", 64),
+      "workflow" => "chore",
+      "profile_digest" => profile.digest,
+      "affected_paths" => ["docs/guide.md"],
+      "proof_commands" => ["mix test test/docs_test.exs"]
+    }
+
+    prompt =
+      PromptBuilder.build_execution_prompt(issue,
+        execution_plan: execution_plan,
+        workflow_profile: profile,
+        task_contract: contract
+      )
+
+    assert prompt =~ "no native implementation plan"
+    assert prompt =~ "docs/guide.md"
+    assert prompt =~ "mix test test/docs_test.exs"
+    assert prompt =~ "do not manufacture a plan-progress update"
+    refute prompt =~ "final native plan exactly matches"
+  end
+
   test "prompt builder renders issue datetime fields without crashing" do
     workflow_prompt = "Ticket {{ issue.identifier }} created={{ issue.created_at }} updated={{ issue.updated_at }}"
 

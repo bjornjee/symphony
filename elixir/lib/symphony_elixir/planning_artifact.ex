@@ -128,6 +128,42 @@ defmodule SymphonyElixir.PlanningArtifact do
     end
   end
 
+  @spec seal_simple(Path.t(), map(), String.t() | nil) :: {:ok, map()} | {:error, term()}
+  def seal_simple(workspace, %{"category" => "simple"} = classification, worker_host \\ nil)
+      when is_binary(workspace) do
+    semantic = %{
+      "schema_version" => @schema_version,
+      "execution_mode" => "simple",
+      "issue_id" => classification["issue_id"],
+      "issue_identifier" => classification["issue_identifier"],
+      "contract_digest" => classification["contract_digest"],
+      "workflow" => classification["workflow"],
+      "profile_digest" => classification["profile_digest"],
+      "primary_thread_id" => classification["primary_thread_id"],
+      "classification_digest" => classification["classification_digest"],
+      "repository" => classification["repository"],
+      "affected_paths" => classification["affected_paths"],
+      "proof_commands" => classification["proof_commands"],
+      "verification_profile" => "Targeted"
+    }
+
+    execution_plan = Map.put(semantic, "plan_digest", digest(semantic))
+
+    case persist_new(
+           execution_plan_path(workspace),
+           execution_plan,
+           @max_execution_plan_bytes,
+           :execution_plan_already_exists,
+           worker_host
+         ) do
+      {:error, :execution_plan_already_exists} ->
+        validate_existing_execution_plan(workspace, execution_plan, worker_host)
+
+      result ->
+        result
+    end
+  end
+
   @spec read_candidate(Path.t(), 1..3, String.t() | nil) :: :missing | {:ok, map()} | {:error, term()}
   def read_candidate(workspace, revision, worker_host \\ nil) when revision in 1..3 do
     read_json(candidate_path(workspace, revision), @max_candidate_bytes, worker_host)

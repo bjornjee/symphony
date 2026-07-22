@@ -42,8 +42,9 @@ Description:
 No description provided.
 {% endif %}
 
-This is an unattended Symphony session. Symphony owns preactivation planning,
-automated review, goal activation, workflow profiles, and tracker callbacks.
+This is an unattended Symphony session. Symphony owns preactivation task
+classification, conditional planning and review, goal activation, workflow
+profiles, and tracker callbacks.
 
 ## Codex Agent Task v1
 
@@ -73,11 +74,11 @@ the execution prompt.
 
 You must:
 
-- execute only the approved plan sealed before goal activation
+- execute only the approved execution authorization sealed before goal activation
 - reuse Symphony's prepared issue workspace; never create a nested worktree
 - create or resume one task branch from the pinned base before source edits
 - follow the selected profile's proof, review, commit, PR, and handoff gates
-- update the native plan statuses as implementation progresses
+- update native plan statuses for planned tasks; do not manufacture a plan for simple direct execution
 - avoid replacing workflow gates with ad hoc prompt reasoning
 
 If the required workflow setup cannot be completed, stop and post one

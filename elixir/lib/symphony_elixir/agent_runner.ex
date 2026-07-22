@@ -317,14 +317,14 @@ defmodule SymphonyElixir.AgentRunner do
                      workspace,
                      issue,
                      execution_plan["workflow"],
-                     get_in(execution_plan, ["candidate", "repository", "base_sha"]),
+                     execution_plan_base_sha(execution_plan),
                      worker_host
                    ) do
               RunAudit.append(workspace, issue, :task_branch_ready, %{
                 phase: "implementation",
                 status: "completed",
                 branch: task_branch,
-                base_sha: get_in(execution_plan, ["candidate", "repository", "base_sha"])
+                base_sha: execution_plan_base_sha(execution_plan)
               })
 
               Agent.update(runtime.proof_ledger, fn _planning_proofs -> %{} end)
@@ -375,8 +375,9 @@ defmodule SymphonyElixir.AgentRunner do
 
   defp record_execution_plan_approved(workspace, issue, session, execution_plan) do
     RunAudit.append(workspace, issue, :execution_plan_approved, %{
-      phase: "planning",
+      phase: if(execution_plan["execution_mode"] == "simple", do: "classification", else: "planning"),
       status: "completed",
+      execution_mode: execution_plan["execution_mode"] || "planned",
       plan_digest: execution_plan["plan_digest"],
       workflow: execution_plan["workflow"],
       profile_digest: execution_plan["profile_digest"],
@@ -385,6 +386,11 @@ defmodule SymphonyElixir.AgentRunner do
 
     :ok
   end
+
+  defp execution_plan_base_sha(%{"repository" => %{"base_sha" => base_sha}}), do: base_sha
+
+  defp execution_plan_base_sha(execution_plan),
+    do: get_in(execution_plan, ["candidate", "repository", "base_sha"])
 
   defp set_goal_and_record(workspace, issue, session, task_contract, execution_plan) do
     with :ok <- AppServer.set_goal(session, goal_objective(issue, task_contract, execution_plan)) do

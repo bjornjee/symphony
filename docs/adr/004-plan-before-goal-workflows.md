@@ -4,6 +4,8 @@ Context: Symphony cannot assume the agent-dashboard plugin exists, and goal-firs
 
 Decision: package Symphony-owned workflow profiles and run read-only native planning plus an isolated medium-effort review before goal activation.
 
+Qualification: ADR 005 permits a deterministic simple-task gate to seal direct execution without the planning and review turns.
+
 Decision: persist at most three immutable candidates and reviews, then seal one create-only execution plan whose digest is bound into the goal and completion evidence.
 
 Decision: infer restart state from immutable artifacts; do not add a mutable workflow-state file or a plugin fallback.

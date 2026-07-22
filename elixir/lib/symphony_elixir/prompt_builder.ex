@@ -37,22 +37,7 @@ defmodule SymphonyElixir.PromptBuilder do
     execution_plan = Keyword.fetch!(opts, :execution_plan)
 
     prompt =
-      """
-      The preactivation planning gate is complete and the Codex goal is active.
-
-      Execute only the approved execution plan below. It is the implementation authority for Linear #{issue.identifier}; do not reinterpret the raw Linear description as permission to expand scope.
-      Preserve the native plan created during preactivation. Execute its typed phases in order, keep exactly one phase in progress, and mark a phase completed only after its proof and evidence requirements pass.
-      Do not add, remove, rename, reorder, or skip approved phases. Symphony rejects handoff unless the final native plan exactly matches the approved phases and every phase is completed.
-      Create or resume the single task branch from the pinned base SHA before the first source edit. Reuse this issue workspace and never create a nested worktree.
-      Follow the approved verification profile and exact proof commands. Produce the required PR and Symphony-validated completion evidence.
-
-      Approved plan digest: #{execution_plan["plan_digest"]}
-      Approved execution plan:
-      ```json
-      #{Jason.encode!(execution_plan["candidate"], pretty: true)}
-      ```
-      """
-      |> String.trim()
+      execution_prompt(issue, execution_plan)
       |> maybe_append_workflow_profile(Keyword.get(opts, :workflow_profile))
 
     maybe_append_completion_evidence_contract(
@@ -60,6 +45,44 @@ defmodule SymphonyElixir.PromptBuilder do
       Keyword.get(opts, :task_contract),
       execution_plan
     )
+  end
+
+  defp execution_prompt(issue, %{"execution_mode" => "simple"} = execution_plan) do
+    """
+    Symphony's preactivation classification gate approved direct execution and the Codex goal is active.
+
+    This is a simple task, so no native implementation plan or automated plan review is required. Do not create a plan merely to restate the task.
+    Work only on the single approved path for Linear #{issue.identifier}; the pinned contract and direct execution authorization below are the implementation authority.
+    Create or resume the single task branch from the pinned base SHA before the first source edit. Reuse this issue workspace and never create a nested worktree.
+    Run the exact approved proof command, review the final diff, create the required PR, and produce Symphony-validated completion evidence.
+    Stop and report the concrete reason if another path, proof command, workflow, or higher-risk boundary becomes necessary; do not silently promote or expand the task during implementation.
+
+    Direct execution digest: #{execution_plan["plan_digest"]}
+    Direct execution authorization:
+    ```json
+    #{Jason.encode!(Map.drop(execution_plan, ["plan_digest"]), pretty: true)}
+    ```
+    """
+    |> String.trim()
+  end
+
+  defp execution_prompt(issue, execution_plan) do
+    """
+    The preactivation planning gate is complete and the Codex goal is active.
+
+    Execute only the approved execution plan below. It is the implementation authority for Linear #{issue.identifier}; do not reinterpret the raw Linear description as permission to expand scope.
+    Preserve the native plan created during preactivation. Execute its typed phases in order, keep exactly one phase in progress, and mark a phase completed only after its proof and evidence requirements pass.
+    Do not add, remove, rename, reorder, or skip approved phases. Symphony rejects handoff unless the final native plan exactly matches the approved phases and every phase is completed.
+    Create or resume the single task branch from the pinned base SHA before the first source edit. Reuse this issue workspace and never create a nested worktree.
+    Follow the approved verification profile and exact proof commands. Produce the required PR and Symphony-validated completion evidence.
+
+    Approved plan digest: #{execution_plan["plan_digest"]}
+    Approved execution plan:
+    ```json
+    #{Jason.encode!(execution_plan["candidate"], pretty: true)}
+    ```
+    """
+    |> String.trim()
   end
 
   defp maybe_append_completion_evidence_contract(
@@ -104,7 +127,7 @@ defmodule SymphonyElixir.PromptBuilder do
     Machine-validated handoff evidence (required before the configured handoff state):
 
     - Write `.symphony/completion-evidence.json` only after the proof commands and repository PR exist.
-    - Before writing completion evidence, update the native plan so every approved execution phase is `completed`; Symphony validates exact phase identity and completion independently.
+    #{plan_progress_instruction(execution_plan)}
     - Copy `issue_id`, `issue_identifier`, and `plan_digest` exactly from `.symphony/execution-manifest.json`; copy `execution_plan_digest`, `workflow`, and `profile_digest` from `.symphony/execution-plan.json`.
     - Write a temporary file in `.symphony/`, then atomically rename it to that path. Replacing the same plan-digest envelope is idempotent.
     - For every criterion below, reference an `event_id` from an engine-written command-completion audit event whose `exit_code` is `0` and whose proof command covers that criterion.
@@ -127,6 +150,12 @@ defmodule SymphonyElixir.PromptBuilder do
   end
 
   defp maybe_append_completion_evidence_contract(prompt, _contract, _execution_plan), do: prompt
+
+  defp plan_progress_instruction(%{"execution_mode" => "simple"}),
+    do: "- This direct execution has no approved native-plan phases; do not manufacture a plan-progress update for handoff."
+
+  defp plan_progress_instruction(_execution_plan),
+    do: "- Before writing completion evidence, update the native plan so every approved execution phase is `completed`; Symphony validates exact phase identity and completion independently."
 
   defp plan_value(plan, key) when is_map(plan), do: Map.get(plan, key, "<approved #{key}>")
   defp plan_value(_plan, key), do: "<approved #{key}>"

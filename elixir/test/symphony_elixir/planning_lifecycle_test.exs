@@ -108,6 +108,40 @@ defmodule SymphonyElixir.PlanningLifecycleTest do
              )
   end
 
+  test "simple tasks seal direct execution without a plan or review turn", ctx do
+    description =
+      TaskContractFixtures.valid_description(%{
+        "Goal" => "Correct one documentation example.",
+        "Scope" => "In:\n- docs/guide.md\n\nOut:\n- source code",
+        "Acceptance Criteria" => "- [ ] Guide example is current.",
+        "Verification" => "Run:\n`mix test test/docs_test.exs`",
+        "Risk" => "low",
+        "Notes For Agent" => "Workflow: chore"
+      })
+
+    issue = TaskContractFixtures.issue(%{title: "docs: correct guide example", description: description})
+    {:ok, contract} = TaskContract.from_issue(issue)
+    {:ok, profile} = WorkflowProfile.select(contract)
+
+    assert {:ok, plan} =
+             PlanningLifecycle.run(
+               %{role: :primary, thread_id: "primary-thread"},
+               ctx.workspace,
+               issue,
+               contract,
+               profile,
+               repository_capture: fn _, _ -> {:ok, ctx.repository} end,
+               issue_fetcher: fn [_id] -> {:ok, [issue]} end,
+               run_turn: fn _, _, _, _ -> flunk("simple task must not start a planning turn") end,
+               start_reviewer_session: fn _, _ -> flunk("simple task must not start a reviewer") end
+             )
+
+    assert plan["execution_mode"] == "simple"
+    assert plan["candidate"] == nil
+    assert plan["repository"]["base_sha"] == ctx.repository.base_sha
+    assert plan["proof_commands"] == ["mix test test/docs_test.exs"]
+  end
+
   test "rejects a planning turn that emits a file-change event", ctx do
     run_turn = fn _session, _prompt, _issue, opts ->
       assert %{"success" => false} = opts[:tool_executor].("unexpected", %{})

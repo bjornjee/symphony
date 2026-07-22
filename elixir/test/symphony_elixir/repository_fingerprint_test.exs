@@ -37,6 +37,7 @@ defmodule SymphonyElixir.RepositoryFingerprintTest do
     assert {:ok, first} = RepositoryFingerprint.capture(workspace)
     File.mkdir_p!(Path.join(workspace, ".symphony"))
     File.write!(Path.join(workspace, ".symphony/plan-candidate-1.json"), "{}")
+    File.write!(Path.join(workspace, ".symphony/task-classification.json"), "{}")
     assert {:ok, second} = RepositoryFingerprint.capture(workspace)
     assert first.digest == second.digest
   end

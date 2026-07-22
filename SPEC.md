@@ -249,6 +249,13 @@ readable; the current task contract is the validation authority.
 
 #### 4.1.5.2 Preactivation Planning Artifacts
 
+Before planning, Symphony persists one immutable `.symphony/task-classification.json` bound to the
+issue contract, workflow profile, canonical primary thread, and preactivation repository digest.
+The deterministic gate classifies a task as `simple` only when it is a low-risk `feature`, `fix`,
+`refactor`, or `chore` with one path, one acceptance criterion, and one exact proof command, with no decomposition,
+risky-boundary signal, or `Planning: full` directive. Every failed or ambiguous guard classifies
+the task as `planned`.
+
 Symphony persists at most three immutable `.symphony/plan-candidate-N.json` files and three matching
 `.symphony/plan-review-N.json` files. Each candidate binds the issue contract, trusted workflow
 profile, canonical primary thread, bounded scope and scale, exact proof commands, rollback,
@@ -257,9 +264,11 @@ typed execution phases with stable ids, prior-phase dependencies, affected paths
 profiles, phase proof commands, invariants, stop conditions, and evidence requirements. Each review
 binds its verdict and findings to the exact candidate and profile digests.
 
-An approved pair is sealed create-only as `.symphony/execution-plan.json`. Its semantic digest is
-immutable and becomes part of the later Codex goal and completion evidence. State is inferred from
-these immutable artifacts; there is no mutable workflow-state file.
+For `planned` tasks, an approved pair is sealed create-only as `.symphony/execution-plan.json`. For
+`simple` tasks, Symphony seals the bounded classification directly into the same execution
+authorization artifact without a native planning turn or reviewer. Its semantic digest is immutable
+and becomes part of the later Codex goal and completion evidence. State is inferred from these
+immutable artifacts; there is no mutable workflow-state file.
 
 #### 4.1.5.3 Completion Evidence
 
@@ -1243,28 +1252,34 @@ Behavior:
    workflow profile; reject missing, unknown, or ambiguous selection before workspace execution.
 3. Create/reuse the issue workspace and atomically create or validate the execution manifest.
 4. Start or resume the exact canonical primary Codex thread and persist its identity create-only.
-5. Without setting a goal, run a read-only planning turn on that thread. Deny approval requests,
-   require at least one `turn/plan/updated`, accept exactly one structured candidate, reject file
-   changes, and compare bounded pre/post repository fingerprints.
-6. Run an isolated read-only reviewer thread with `effort: medium` and only the review submission
-   tool. Persist its exact candidate-bound verdict.
-7. For `revise`, resume the primary thread with blocking findings. Permit two revisions; a third
+5. Before planning or goal activation, run the deterministic task-classification gate and persist
+   its repository-, contract-, profile-, and thread-bound decision create-only. Only a low-risk
+   single-path eligible workflow with one criterion and one exact proof command may be `simple`;
+   ambiguity, risky work, decomposition, or `Planning: full` routes to `planned`.
+6. For `planned`, without setting a goal, run a read-only planning turn on that thread. Deny approval
+   requests, require at least one `turn/plan/updated`, accept exactly one structured candidate,
+   reject file changes, and compare bounded pre/post repository fingerprints. For `simple`, seal the
+   bounded direct-execution authorization without starting a native planning turn.
+7. For `planned`, run an isolated read-only reviewer thread with `effort: medium` and only the review
+   submission tool. Persist its exact candidate-bound verdict. `simple` tasks do not start a reviewer.
+8. For `revise`, resume the primary thread with blocking findings. Permit two revisions; a third
    rejection publishes one deterministic read-back-verified `## Agent Blocked` comment and moves the
    issue to Human Review.
-8. Before approval, refresh the Linear contract and revalidate the workflow, thread, candidate,
-   review, and repository digests. Seal `.symphony/execution-plan.json` create-only.
-9. Set the app-server goal to `active`, binding contract, profile, and execution-plan digests. Goal
+9. Before sealing, refresh the Linear contract and revalidate the workflow, thread, classification,
+   candidate/review when present, and repository digests. Seal `.symphony/execution-plan.json`
+   create-only.
+10. Set the app-server goal to `active`, binding contract, profile, and execution-plan digests. Goal
    setup is idempotently replayed after a restart.
-10. Create or resume one task branch from the pinned base SHA, then resume the same primary thread
-    with write-capable implementation policy and the approved plan as authority.
-11. Preserve the approved native-plan phase identity and order, keep at most one phase in progress,
-    and complete each phase only after its proof and evidence gate. Handoff is pending until the
-    engine-observed final native plan exactly matches the approved phases and marks all completed.
-12. Run workflow-specific proof, create the PR, and validate completion evidence against the final
+11. Create or resume one task branch from the pinned base SHA, then resume the same primary thread
+    with write-capable implementation policy and the approved execution authorization as authority.
+12. For `planned`, preserve the approved native-plan phase identity and order, keep at most one phase
+    in progress, and complete each phase only after its proof and evidence gate. For `simple`, do not
+    manufacture plan phases; enforce the single path and proof command from the direct authorization.
+13. Run workflow-specific proof, create the PR, and validate completion evidence against the final
     local and PR head SHA.
-13. Before each continuation turn, refresh the issue and require the same contract digest.
-14. Map the final attempt outcome to `active`, `blocked`, or `complete` and update the goal.
-15. On any error, fail the worker attempt (the orchestrator will retry).
+14. Before each continuation turn, refresh the issue and require the same contract digest.
+15. Map the final attempt outcome to `active`, `blocked`, or `complete` and update the goal.
+16. On any error, fail the worker attempt (the orchestrator will retry).
 
 Note:
 

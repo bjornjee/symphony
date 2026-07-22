@@ -11,9 +11,10 @@ This workflow is owned by Symphony and is safe for unattended execution.
 
 ### Phase gate
 
-- Execute approved phases in order. Start a phase only after all of its `depends_on` phases are complete.
-- Keep exactly one native-plan phase `in_progress`. After satisfying its proof and evidence requirements, mark it `completed` before starting the next phase.
-- Treat each phase's paths, verification profile, proof commands, invariants, and stop conditions as an execution contract.
+- For planned execution, execute approved phases in order. Start a phase only after all of its `depends_on` phases are complete.
+- For planned execution, keep exactly one native-plan phase `in_progress`. After satisfying its proof and evidence requirements, mark it `completed` before starting the next phase.
+- For simple direct execution, do not manufacture native-plan phases. Treat the one affected path and proof command in the direct authorization as hard bounds.
+- Treat approved phase or direct-execution paths, verification profile, proof commands, invariants, and stop conditions as an execution contract.
 - Use Surgical, Targeted, or Full verification proportionally. Escalate the profile and stop for plan review if the diff or risk outgrows the approved profile.
 - A failed proof is evidence. Diagnose it within the current phase; do not weaken assertions, delete coverage, or change expected behavior merely to obtain GREEN.
 

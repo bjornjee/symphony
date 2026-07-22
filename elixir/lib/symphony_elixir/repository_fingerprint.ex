@@ -13,7 +13,8 @@ defmodule SymphonyElixir.RepositoryFingerprint do
     ".symphony/run-audit.md",
     ".symphony/plan-candidate-*.json",
     ".symphony/plan-review-*.json",
-    ".symphony/execution-plan.json"
+    ".symphony/execution-plan.json",
+    ".symphony/task-classification.json"
   ]
 
   @type snapshot :: %{origin: String.t(), base_sha: String.t(), digest: String.t()}

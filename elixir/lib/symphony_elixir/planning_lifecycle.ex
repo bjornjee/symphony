@@ -5,7 +5,7 @@ defmodule SymphonyElixir.PlanningLifecycle do
 
   alias SymphonyElixir.Codex.AppServer
   alias SymphonyElixir.Linear.{Issue, TaskContract}
-  alias SymphonyElixir.{PlanningArtifact, RepositoryFingerprint, Tracker, WorkflowProfile}
+  alias SymphonyElixir.{PlanningArtifact, PlanningGate, RepositoryFingerprint, Tracker, WorkflowProfile}
 
   @max_revisions 3
   @read_only_policy %{"type" => "readOnly", "networkAccess" => false}
@@ -28,10 +28,69 @@ defmodule SymphonyElixir.PlanningLifecycle do
     worker_host = Keyword.get(opts, :worker_host)
     capture = Keyword.get(opts, :repository_capture, &RepositoryFingerprint.capture/2)
 
-    with {:ok, repository} <- capture.(workspace, worker_host) do
+    with {:ok, repository} <- capture.(workspace, worker_host),
+         {:ok, classification} <-
+           PlanningGate.classify(
+             workspace,
+             issue,
+             contract,
+             profile,
+             primary_session.thread_id,
+             repository,
+             worker_host
+           ) do
       context = context(issue, contract, profile, primary_session.thread_id, repository)
-      run_revision(primary_session, workspace, issue, contract, profile, context, 1, opts)
+
+      emit_lifecycle(opts, :task_classified, %{
+        phase: "classification",
+        status: "completed",
+        category: classification["category"],
+        classification_digest: classification["classification_digest"]
+      })
+
+      route_classification(
+        classification,
+        primary_session,
+        workspace,
+        issue,
+        contract,
+        profile,
+        context,
+        opts
+      )
     end
+  end
+
+  defp route_classification(
+         %{"category" => "simple"} = classification,
+         _primary_session,
+         workspace,
+         issue,
+         contract,
+         profile,
+         context,
+         opts
+       ) do
+    with :ok <- revalidate_authority(issue, contract, profile, context, opts) do
+      PlanningArtifact.seal_simple(
+        workspace,
+        classification,
+        Keyword.get(opts, :worker_host)
+      )
+    end
+  end
+
+  defp route_classification(
+         %{"category" => "planned"},
+         primary_session,
+         workspace,
+         issue,
+         contract,
+         profile,
+         context,
+         opts
+       ) do
+    run_revision(primary_session, workspace, issue, contract, profile, context, 1, opts)
   end
 
   defp run_revision(primary_session, workspace, issue, contract, profile, context, revision, opts) do

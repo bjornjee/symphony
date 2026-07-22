@@ -79,16 +79,26 @@ Linear reflects the handoff immediately.
 
 ## Agent Execution
 
-Symphony owns scheduling, preactivation review, and the selected built-in
-workflow profile.
+Symphony owns scheduling, preactivation classification and review, and the
+selected built-in workflow profile.
+
+Before preactivation planning, Symphony classifies the pinned contract. A
+low-risk `feature`, `fix`, `refactor`, or `chore` may execute directly only when
+its conventional title matches the workflow, `Scope.In` names one path, there
+is one acceptance criterion, `Verification` contains one exact backtick-delimited
+command, and no risky or decomposition signal is present.
+All other tasks receive native planning and medium-effort automated review.
+`Planning: full` in `Notes For Agent` always selects the reviewed path.
 
 Agents must:
 
-- execute the approved plan sealed before goal activation
-- execute its typed phases in order, satisfy only prior-phase dependencies, and keep exactly one
-  native-plan phase in progress
-- mark a phase completed only after its proof and evidence requirements pass; handoff requires an
-  exact all-completed native plan
+- execute the approved execution authorization sealed before goal activation
+- for planned tasks, execute typed phases in order, satisfy only prior-phase dependencies, and keep
+  exactly one native-plan phase in progress
+- for simple tasks, remain within the one approved path and proof command without manufacturing
+  native-plan phases
+- for planned tasks, mark a phase completed only after its proof and evidence requirements pass;
+  handoff requires an exact all-completed native plan
 - reuse Symphony's issue workspace and never create a nested worktree
 - create or resume one task branch from the pinned base after goal activation
 - follow the selected profile's proof, review, commit, and PR gates
