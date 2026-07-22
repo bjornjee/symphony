@@ -23,7 +23,7 @@ defmodule SymphonyElixir.AppServerTest do
         printf 'JSON:%s\n' "$line" >> "#{trace_file}"
         case "$count" in
           1) printf '%s\n' '{"id":1,"result":{}}' ;;
-          3) printf '%s\n' '{"id":5,"result":{"thread":{"id":"thread-persisted"},"cwd":"#{workspace}","approvalPolicy":"never","approvalsReviewer":"user","model":"test","modelProvider":"test","sandbox":"workspace-write"}}' ;;
+          3) printf '%s\n' '{"id":5,"result":{"thread":{"id":"thread-persisted"},"instructionSources":[{"path":"/global/AGENTS.md"},{"path":"#{workspace}/AGENTS.md"}],"cwd":"#{workspace}","approvalPolicy":"never","approvalsReviewer":"user","model":"test","modelProvider":"test","sandbox":"workspace-write"}}' ;;
           4) printf '%s\n' '{"id":4,"result":{"goal":{"status":"blocked"}}}' ;;
         esac
       done
@@ -37,8 +37,21 @@ defmodule SymphonyElixir.AppServerTest do
         codex_approval_policy: "never"
       )
 
-      assert {:ok, session} = AppServer.start_session(workspace, thread_id: "thread-persisted")
+      dynamic_tools = [%{"name" => "current_tool", "description" => "current", "inputSchema" => %{}}]
+
+      assert {:ok, session} =
+               AppServer.start_session(workspace,
+                 thread_id: "thread-persisted",
+                 dynamic_tools: dynamic_tools
+               )
+
       assert session.thread_id == "thread-persisted"
+
+      assert session.instruction_sources == [
+               %{"path" => "/global/AGENTS.md"},
+               %{"path" => "#{workspace}/AGENTS.md"}
+             ]
+
       assert :ok = AppServer.set_goal_status(session, "blocked")
 
       assert {:error, {:unsupported_goal_status, "paused"}} =
@@ -61,6 +74,7 @@ defmodule SymphonyElixir.AppServerTest do
       assert resume["params"]["cwd"] == canonical_workspace
       assert resume["params"]["approvalPolicy"] == "never"
       assert resume["params"]["sandbox"] == "workspace-write"
+      assert resume["params"]["dynamicTools"] == dynamic_tools
 
       assert goal_update = Enum.find(requests, &(&1["method"] == "thread/goal/set"))
       assert goal_update["params"] == %{"threadId" => "thread-persisted", "status" => "blocked"}

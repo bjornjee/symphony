@@ -14,10 +14,20 @@ defmodule SymphonyElixir.RepositoryFingerprint do
     ".symphony/plan-candidate-*.json",
     ".symphony/plan-review-*.json",
     ".symphony/execution-plan.json",
-    ".symphony/task-classification.json"
+    ".symphony/task-classification.json",
+    ".symphony/completion-evidence.json",
+    ".symphony/authorities/**"
   ]
 
-  @type snapshot :: %{origin: String.t(), base_sha: String.t(), digest: String.t()}
+  @type snapshot :: %{
+          origin: String.t(),
+          base_sha: String.t(),
+          digest: String.t(),
+          clean: boolean(),
+          status_digest: String.t(),
+          staged_digest: String.t(),
+          unstaged_digest: String.t()
+        }
 
   @spec capture(Path.t(), String.t() | nil) :: {:ok, snapshot()} | {:error, term()}
   def capture(workspace, worker_host \\ nil) when is_binary(workspace) do
@@ -36,7 +46,17 @@ defmodule SymphonyElixir.RepositoryFingerprint do
         {:error, :invalid_repository_identity}
       else
         digest = sha256([base_sha, <<0>>, status, <<0>>, unstaged, <<0>>, staged])
-        {:ok, %{origin: origin, base_sha: base_sha, digest: digest}}
+
+        {:ok,
+         %{
+           origin: origin,
+           base_sha: base_sha,
+           digest: digest,
+           clean: String.trim(status) == "" and staged == "" and unstaged == "",
+           status_digest: sha256(status),
+           staged_digest: sha256(staged),
+           unstaged_digest: sha256(unstaged)
+         }}
       end
     end
   end
@@ -46,6 +66,19 @@ defmodule SymphonyElixir.RepositoryFingerprint do
     with {:ok, sha} <- git(workspace, worker_host, ["rev-parse", "HEAD"]) do
       sha = String.trim(sha)
       if Regex.match?(~r/^[a-f0-9]{40,64}$/, sha), do: {:ok, sha}, else: {:error, :invalid_repository_head}
+    end
+  end
+
+  @spec changed_paths(Path.t(), String.t(), String.t() | nil) :: {:ok, [String.t()]} | {:error, term()}
+  def changed_paths(workspace, base_sha, worker_host \\ nil) do
+    with {:ok, committed} <- git(workspace, worker_host, ["diff", "--name-only", "#{base_sha}..HEAD", "--", "."] ++ exclusions()),
+         {:ok, status} <- git(workspace, worker_host, status_args()) do
+      status_paths =
+        status
+        |> String.split("\n", trim: true)
+        |> Enum.map(fn line -> line |> String.slice(3..-1//1) |> String.split(" -> ") |> List.last() end)
+
+      {:ok, (String.split(committed, "\n", trim: true) ++ status_paths) |> Enum.uniq() |> Enum.sort()}
     end
   end
 

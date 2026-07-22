@@ -54,7 +54,8 @@ defmodule SymphonyElixir.PromptBuilder do
     This is a simple task, so no native implementation plan or automated plan review is required. Do not create a plan merely to restate the task.
     Work only on the single approved path for Linear #{issue.identifier}; the pinned contract and direct execution authorization below are the implementation authority.
     Create or resume the single task branch from the pinned base SHA before the first source edit. Reuse this issue workspace and never create a nested worktree.
-    Run the exact approved proof command, review the final diff, create the required PR, and produce Symphony-validated completion evidence.
+    Commit the final tree, call `run_plan_proof` for the exact approved final proof, and call `publish_pull_request`. Symphony alone runs proofs, pushes, creates the PR, and generates completion evidence.
+    Do not run proof commands in your shell, push, invoke GitHub, or write `.symphony/completion-evidence.json` yourself.
     Stop and report the concrete reason if another path, proof command, workflow, or higher-risk boundary becomes necessary; do not silently promote or expand the task during implementation.
 
     Direct execution digest: #{execution_plan["plan_digest"]}
@@ -74,7 +75,9 @@ defmodule SymphonyElixir.PromptBuilder do
     Preserve the native plan created during preactivation. Execute its typed phases in order, keep exactly one phase in progress, and mark a phase completed only after its proof and evidence requirements pass.
     Do not add, remove, rename, reorder, or skip approved phases. Symphony rejects handoff unless the final native plan exactly matches the approved phases and every phase is completed.
     Create or resume the single task branch from the pinned base SHA before the first source edit. Reuse this issue workspace and never create a nested worktree.
-    Follow the approved verification profile and exact proof commands. Produce the required PR and Symphony-validated completion evidence.
+    Call `run_plan_proof` for each approved proof ID and `complete_execution_phase` after its dependencies and proofs pass. For fixes, call `submit_fix_diagnosis` after RED and before GREEN.
+    After all phases, commit the final tree and rerun the final proof against the clean commit. Then call `request_implementation_review`; address a revise verdict and rerun stale final proof before requesting review again. Once approved, call `publish_pull_request`.
+    Do not run approved proofs in your shell, push, invoke GitHub, use network access, or write completion evidence. Symphony owns those actions.
 
     Approved plan digest: #{execution_plan["plan_digest"]}
     Approved execution plan:
@@ -90,32 +93,6 @@ defmodule SymphonyElixir.PromptBuilder do
          %SymphonyElixir.Linear.TaskContract{} = contract,
          execution_plan
        ) do
-    criteria =
-      Enum.map(contract.acceptance_criteria, fn criterion ->
-        %{
-          "criterion_id" => criterion.id,
-          "proof" => %{
-            "kind" => "run_audit_command",
-            "event_id" => "<engine-observed proof event_id>"
-          }
-        }
-      end)
-
-    envelope = %{
-      "schema_version" => 2,
-      "issue_id" => "<current issue id>",
-      "issue_identifier" => "<current issue identifier>",
-      "plan_digest" => contract.digest,
-      "execution_plan_digest" => plan_value(execution_plan, "plan_digest"),
-      "workflow" => plan_value(execution_plan, "workflow"),
-      "profile_digest" => plan_value(execution_plan, "profile_digest"),
-      "criteria" => criteria,
-      "workflow_proof" => workflow_proof_shape(execution_plan),
-      "pull_request_url" => "https://github.com/<owner>/<repository>/pull/<number>",
-      "pr_head_sha" => "<exact PR head SHA>",
-      "repository_head_sha" => "<same reviewed final local HEAD SHA>"
-    }
-
     criterion_index =
       Enum.map_join(contract.acceptance_criteria, "\n", fn criterion ->
         "- `#{criterion.id}`: #{criterion.text}"
@@ -124,27 +101,19 @@ defmodule SymphonyElixir.PromptBuilder do
     """
     #{prompt}
 
-    Machine-validated handoff evidence (required before the configured handoff state):
+    Engine-owned delivery contract:
 
-    - Write `.symphony/completion-evidence.json` only after the proof commands and repository PR exist.
+    - Approved commands may only be executed with `run_plan_proof`; agent shell command events never satisfy proof contracts.
     #{plan_progress_instruction(execution_plan)}
-    - Copy `issue_id`, `issue_identifier`, and `plan_digest` exactly from `.symphony/execution-manifest.json`; copy `execution_plan_digest`, `workflow`, and `profile_digest` from `.symphony/execution-plan.json`.
-    - Write a temporary file in `.symphony/`, then atomically rename it to that path. Replacing the same plan-digest envelope is idempotent.
-    - For every criterion below, reference an `event_id` from an engine-written command-completion audit event whose `exit_code` is `0` and whose proof command covers that criterion.
-    - Populate `workflow_proof` with the workflow-specific RED/GREEN, baseline/final, validator, or Surgical review evidence required by the approved plan.
-    - Set both head SHA fields to the final reviewed commit. Proof against an older local head or a PR whose head differs is rejected.
-    - Do not use prose, checkbox state, edited audit JSON, or your own claimed exit code as proof; Symphony validates references against its in-memory event ledger.
-    - `pull_request_url` must be an existing HTTPS GitHub pull request URL for this workspace's `origin` repository. Symphony resolves it with `gh pr view`; an invented, inaccessible, issue, compare, branch, or cross-repository URL is rejected.
-    - Do not create the completed-work `## Agent Handoff` comment or move the issue to the configured handoff state. Symphony validates this artifact, publishes and reads back the deterministic handoff, then performs that state transition.
+    - Commit before the final proof. Any edit or commit invalidates final proof and implementation-review approval.
+    - Planned or Full work requires `request_implementation_review`. Two revisions are allowed; a third rejection moves the issue to Human Review.
+    - `publish_pull_request` is the only push/PR path. Its body must contain `## Why`, `## Summary`, and an exact `## Test plan` listing every approved command.
+    - Symphony generates completion evidence from trusted external receipts and owns the Linear handoff. Never create or edit completion evidence, the handoff comment, or issue state.
 
     Pinned acceptance criteria:
     #{criterion_index}
 
-    Completion evidence v2 shape:
-
-    ```json
-    #{Jason.encode!(envelope, pretty: true)}
-    ```
+    Approved execution plan: `#{plan_value(execution_plan, "plan_digest")}`
     """
     |> String.trim()
   end
@@ -160,18 +129,6 @@ defmodule SymphonyElixir.PromptBuilder do
   defp plan_value(plan, key) when is_map(plan), do: Map.get(plan, key, "<approved #{key}>")
   defp plan_value(_plan, key), do: "<approved #{key}>"
 
-  defp workflow_proof_shape(%{"workflow" => "fix"}),
-    do: %{"red_event_id" => "<failing event>", "green_event_id" => "<later passing event>"}
-
-  defp workflow_proof_shape(%{"workflow" => "refactor"}),
-    do: %{"baseline_event_id" => "<green baseline>", "final_proof_event_id" => "<final green proof>"}
-
-  defp workflow_proof_shape(%{"workflow" => "chore"}),
-    do: %{"validator_event_id" => "<validator event, or use surgical_review>"}
-
-  defp workflow_proof_shape(_execution_plan),
-    do: %{"final_proof_event_id" => "<final green proof>", "red_event_id" => "<when required by plan>"}
-
   defp maybe_append_workflow_profile(prompt, %SymphonyElixir.WorkflowProfile{} = profile) do
     """
     #{prompt}
@@ -179,7 +136,6 @@ defmodule SymphonyElixir.PromptBuilder do
     Trusted Symphony workflow profile:
 
     - name: `#{profile.name}`
-    - version: `#{profile.version}`
     - digest: `#{profile.digest}`
 
     #{profile.instructions}

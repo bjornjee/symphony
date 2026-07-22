@@ -3,7 +3,7 @@ defmodule SymphonyElixir.PlanningArtifact do
   Validates and persists the immutable artifacts in the preactivation planning lifecycle.
   """
 
-  alias SymphonyElixir.WorkspaceArtifact
+  alias SymphonyElixir.{ProofContract, WorkspaceArtifact}
 
   @schema_version 1
   @artifact_dir ".symphony"
@@ -14,14 +14,14 @@ defmodule SymphonyElixir.PlanningArtifact do
   @candidate_fields ~w(
     issue_id issue_identifier contract_digest workflow profile_digest primary_thread_id
     ordered_steps affected_paths scope execution_context scale_shape verification_profile
-    proof_commands risks invariants rollback evidence_requirements repository
+    proofs red_policy red_waiver_rationale risks invariants rollback evidence_requirements repository
   )
   @review_fields ~w(
     candidate_digest verdict blocking_findings advisory_findings workflow profile_digest
   )
   @phase_fields ~w(
-    id step status affected_paths depends_on verification_profile proof_commands invariants
-    stop_conditions evidence_requirements
+    id step status affected_paths depends_on verification_profile proof_ids criterion_ids
+    invariants stop_conditions evidence_requirements
   )
 
   @spec candidate_tool_specs() :: [map()]
@@ -52,16 +52,18 @@ defmodule SymphonyElixir.PlanningArtifact do
       when is_binary(workspace) and revision in 1..3 do
     with :ok <- validate_exact_fields(candidate, @candidate_fields),
          :ok <- validate_context(candidate, context),
-         :ok <- validate_candidate_content(candidate),
+         :ok <- validate_candidate_content(candidate, context),
          :ok <- validate_native_plan(candidate["ordered_steps"], native_plan) do
+      semantic_candidate = Map.merge(candidate, Map.take(context, ["instruction_digest", "authority_digest"]))
+
       persisted =
-        candidate
+        semantic_candidate
         |> Map.put("schema_version", @schema_version)
         |> Map.put("revision", revision)
-        |> Map.put("candidate_digest", digest(candidate))
+        |> Map.put("candidate_digest", digest(semantic_candidate))
 
       persist_new(
-        candidate_path(workspace, revision),
+        candidate_path(workspace, revision, context["authority_digest"]),
         persisted,
         @max_candidate_bytes,
         {:candidate_already_exists, revision},
@@ -76,14 +78,16 @@ defmodule SymphonyElixir.PlanningArtifact do
       when is_binary(workspace) and revision in 1..3 do
     with :ok <- validate_exact_fields(review, @review_fields),
          :ok <- validate_review(review, candidate, context) do
+      semantic_review = Map.merge(review, Map.take(context, ["instruction_digest", "authority_digest"]))
+
       persisted =
-        review
+        semantic_review
         |> Map.put("schema_version", @schema_version)
         |> Map.put("revision", revision)
-        |> Map.put("review_digest", digest(review))
+        |> Map.put("review_digest", digest(semantic_review))
 
       persist_new(
-        review_path(workspace, revision),
+        review_path(workspace, revision, context["authority_digest"]),
         persisted,
         @max_review_bytes,
         {:review_already_exists, revision},
@@ -102,6 +106,8 @@ defmodule SymphonyElixir.PlanningArtifact do
         "contract_digest" => candidate["contract_digest"],
         "workflow" => candidate["workflow"],
         "profile_digest" => candidate["profile_digest"],
+        "instruction_digest" => candidate["instruction_digest"],
+        "authority_digest" => candidate["authority_digest"],
         "primary_thread_id" => candidate["primary_thread_id"],
         "revision" => candidate["revision"],
         "candidate_digest" => candidate["candidate_digest"],
@@ -113,14 +119,14 @@ defmodule SymphonyElixir.PlanningArtifact do
       execution_plan = Map.put(semantic, "plan_digest", digest(semantic))
 
       case persist_new(
-             execution_plan_path(workspace),
+             execution_plan_path(workspace, candidate["authority_digest"]),
              execution_plan,
              @max_execution_plan_bytes,
              :execution_plan_already_exists,
              worker_host
            ) do
         {:error, :execution_plan_already_exists} ->
-          validate_existing_execution_plan(workspace, execution_plan, worker_host)
+          validate_existing_execution_plan(workspace, execution_plan, worker_host, candidate["authority_digest"])
 
         result ->
           result
@@ -139,25 +145,27 @@ defmodule SymphonyElixir.PlanningArtifact do
       "contract_digest" => classification["contract_digest"],
       "workflow" => classification["workflow"],
       "profile_digest" => classification["profile_digest"],
+      "instruction_digest" => classification["instruction_digest"],
+      "authority_digest" => classification["authority_digest"],
       "primary_thread_id" => classification["primary_thread_id"],
       "classification_digest" => classification["classification_digest"],
       "repository" => classification["repository"],
       "affected_paths" => classification["affected_paths"],
-      "proof_commands" => classification["proof_commands"],
+      "proofs" => classification["proofs"],
       "verification_profile" => "Targeted"
     }
 
     execution_plan = Map.put(semantic, "plan_digest", digest(semantic))
 
     case persist_new(
-           execution_plan_path(workspace),
+           execution_plan_path(workspace, classification["authority_digest"]),
            execution_plan,
            @max_execution_plan_bytes,
            :execution_plan_already_exists,
            worker_host
          ) do
       {:error, :execution_plan_already_exists} ->
-        validate_existing_execution_plan(workspace, execution_plan, worker_host)
+        validate_existing_execution_plan(workspace, execution_plan, worker_host, classification["authority_digest"])
 
       result ->
         result
@@ -169,9 +177,21 @@ defmodule SymphonyElixir.PlanningArtifact do
     read_json(candidate_path(workspace, revision), @max_candidate_bytes, worker_host)
   end
 
+  @spec read_candidate(Path.t(), 1..3, String.t() | nil, String.t()) ::
+          :missing | {:ok, map()} | {:error, term()}
+  def read_candidate(workspace, revision, worker_host, authority_digest) when revision in 1..3 do
+    read_json(candidate_path(workspace, revision, authority_digest), @max_candidate_bytes, worker_host)
+  end
+
   @spec read_review(Path.t(), 1..3, String.t() | nil) :: :missing | {:ok, map()} | {:error, term()}
   def read_review(workspace, revision, worker_host \\ nil) when revision in 1..3 do
     read_json(review_path(workspace, revision), @max_review_bytes, worker_host)
+  end
+
+  @spec read_review(Path.t(), 1..3, String.t() | nil, String.t()) ::
+          :missing | {:ok, map()} | {:error, term()}
+  def read_review(workspace, revision, worker_host, authority_digest) when revision in 1..3 do
+    read_json(review_path(workspace, revision, authority_digest), @max_review_bytes, worker_host)
   end
 
   @spec read_execution_plan(Path.t(), String.t() | nil) :: :missing | {:ok, map()} | {:error, term()}
@@ -179,17 +199,35 @@ defmodule SymphonyElixir.PlanningArtifact do
     read_json(execution_plan_path(workspace), @max_execution_plan_bytes, worker_host)
   end
 
+  @spec read_execution_plan(Path.t(), String.t() | nil, String.t()) ::
+          :missing | {:ok, map()} | {:error, term()}
+  def read_execution_plan(workspace, worker_host, authority_digest) do
+    read_json(execution_plan_path(workspace, authority_digest), @max_execution_plan_bytes, worker_host)
+  end
+
   @spec candidate_path(Path.t(), 1..3) :: Path.t()
   def candidate_path(workspace, revision),
     do: Path.join([workspace, @artifact_dir, "plan-candidate-#{revision}.json"])
+
+  @spec candidate_path(Path.t(), 1..3, String.t() | nil) :: Path.t()
+  def candidate_path(workspace, revision, authority_digest),
+    do: Path.join([artifact_directory(workspace, authority_digest), "plan-candidate-#{revision}.json"])
 
   @spec review_path(Path.t(), 1..3) :: Path.t()
   def review_path(workspace, revision),
     do: Path.join([workspace, @artifact_dir, "plan-review-#{revision}.json"])
 
+  @spec review_path(Path.t(), 1..3, String.t() | nil) :: Path.t()
+  def review_path(workspace, revision, authority_digest),
+    do: Path.join([artifact_directory(workspace, authority_digest), "plan-review-#{revision}.json"])
+
   @spec execution_plan_path(Path.t()) :: Path.t()
   def execution_plan_path(workspace),
     do: Path.join([workspace, @artifact_dir, "execution-plan.json"])
+
+  @spec execution_plan_path(Path.t(), String.t() | nil) :: Path.t()
+  def execution_plan_path(workspace, authority_digest),
+    do: Path.join(artifact_directory(workspace, authority_digest), "execution-plan.json")
 
   @spec digest(term()) :: String.t()
   def digest(value) do
@@ -216,7 +254,7 @@ defmodule SymphonyElixir.PlanningArtifact do
     if mismatches == [], do: :ok, else: {:error, {:candidate_context_mismatch, mismatches}}
   end
 
-  defp validate_candidate_content(candidate) do
+  defp validate_candidate_content(candidate, context) do
     with :ok <- nonempty_string(candidate["issue_id"], "issue_id"),
          :ok <- nonempty_string(candidate["issue_identifier"], "issue_identifier"),
          :ok <- digest_string(candidate["contract_digest"], "contract_digest"),
@@ -229,7 +267,16 @@ defmodule SymphonyElixir.PlanningArtifact do
          :ok <- nonempty_string(candidate["execution_context"], "execution_context"),
          :ok <- nonempty_string(candidate["scale_shape"], "scale_shape"),
          :ok <- verification_profile(candidate["verification_profile"]),
-         :ok <- string_list(candidate["proof_commands"], "proof_commands", false),
+         :ok <- red_policy(candidate["red_policy"], candidate["red_waiver_rationale"]),
+         :ok <-
+           ProofContract.validate(
+             candidate["proofs"],
+             candidate["ordered_steps"],
+             context["criterion_ids"] || [],
+             candidate["affected_paths"],
+             workflow: candidate["workflow"],
+             red_policy: candidate["red_policy"]
+           ),
          :ok <- string_list(candidate["risks"], "risks", true),
          :ok <- string_list(candidate["invariants"], "invariants", false),
          :ok <- nonempty_string(candidate["rollback"], "rollback"),
@@ -298,12 +345,18 @@ defmodule SymphonyElixir.PlanningArtifact do
     end
   end
 
-  defp validate_existing_execution_plan(workspace, expected, worker_host) do
-    case read_execution_plan(workspace, worker_host) do
+  defp validate_existing_execution_plan(workspace, expected, worker_host, authority_digest) do
+    case read_execution_plan(workspace, worker_host, authority_digest) do
       {:ok, ^expected} -> {:ok, expected}
       {:ok, existing} -> {:error, {:execution_plan_drift, existing["plan_digest"], expected["plan_digest"]}}
       other -> other
     end
+  end
+
+  defp artifact_directory(workspace, nil), do: Path.join(workspace, @artifact_dir)
+
+  defp artifact_directory(workspace, authority_digest) do
+    Path.join([workspace, @artifact_dir, "authorities", authority_digest])
   end
 
   defp persist_new(path, artifact, max_bytes, exists_error, worker_host) do
@@ -377,7 +430,8 @@ defmodule SymphonyElixir.PlanningArtifact do
          :ok <- string_list(step["affected_paths"], "ordered_steps.affected_paths", false),
          :ok <- phase_dependencies(step["depends_on"], prior_ids),
          :ok <- verification_profile(step["verification_profile"]),
-         :ok <- string_list(step["proof_commands"], "ordered_steps.proof_commands", true),
+         :ok <- string_list(step["proof_ids"], "ordered_steps.proof_ids", false),
+         :ok <- string_list(step["criterion_ids"], "ordered_steps.criterion_ids", true),
          :ok <- string_list(step["invariants"], "ordered_steps.invariants", false),
          :ok <- string_list(step["stop_conditions"], "ordered_steps.stop_conditions", false),
          :ok <- string_list(step["evidence_requirements"], "ordered_steps.evidence_requirements", true) do
@@ -440,6 +494,14 @@ defmodule SymphonyElixir.PlanningArtifact do
 
   defp repository(_value), do: {:error, {:invalid_field, "repository"}}
 
+  defp red_policy("required", nil), do: :ok
+  defp red_policy("required", ""), do: :ok
+
+  defp red_policy("waived", rationale) when is_binary(rationale) and byte_size(rationale) in 1..8_192,
+    do: :ok
+
+  defp red_policy(_policy, _rationale), do: {:error, {:invalid_field, "red_policy"}}
+
   defp encoded_size(value, max_bytes) do
     if byte_size(Jason.encode!(value)) <= max_bytes,
       do: :ok,
@@ -488,7 +550,8 @@ defmodule SymphonyElixir.PlanningArtifact do
               "affected_paths" => Map.put(string_array, "minItems", 1),
               "depends_on" => string_array,
               "verification_profile" => %{"type" => "string", "enum" => ~w(Surgical Targeted Full)},
-              "proof_commands" => string_array,
+              "proof_ids" => Map.put(string_array, "minItems", 1),
+              "criterion_ids" => string_array,
               "invariants" => Map.put(string_array, "minItems", 1),
               "stop_conditions" => Map.put(string_array, "minItems", 1),
               "evidence_requirements" => string_array
@@ -505,7 +568,14 @@ defmodule SymphonyElixir.PlanningArtifact do
         "execution_context" => string,
         "scale_shape" => string,
         "verification_profile" => %{"type" => "string", "enum" => ~w(Surgical Targeted Full)},
-        "proof_commands" => Map.put(string_array, "minItems", 1),
+        "proofs" => %{
+          "type" => "array",
+          "minItems" => 1,
+          "maxItems" => @max_items,
+          "items" => proof_schema(string, string_array)
+        },
+        "red_policy" => %{"type" => "string", "enum" => ~w(required waived)},
+        "red_waiver_rationale" => %{"type" => ["string", "null"], "maxLength" => 8192},
         "risks" => string_array,
         "invariants" => Map.put(string_array, "minItems", 1),
         "rollback" => string,
@@ -520,6 +590,26 @@ defmodule SymphonyElixir.PlanningArtifact do
             "preactivation_digest" => string
           }
         }
+      }
+    }
+  end
+
+  defp proof_schema(string, string_array) do
+    fields = ~w(id phase_id role command working_directory expected_exit timeout_ms criterion_ids)
+
+    %{
+      "type" => "object",
+      "additionalProperties" => false,
+      "required" => fields,
+      "properties" => %{
+        "id" => %{"type" => "string", "pattern" => "^[a-z][a-z0-9_-]{0,63}$"},
+        "phase_id" => %{"type" => "string", "pattern" => "^[a-z][a-z0-9_-]{0,63}$"},
+        "role" => %{"type" => "string", "enum" => ~w(red green baseline phase final validator)},
+        "command" => string,
+        "working_directory" => string,
+        "expected_exit" => %{"type" => "string", "enum" => ~w(success failure)},
+        "timeout_ms" => %{"type" => "integer", "minimum" => 1, "maximum" => 1_800_000},
+        "criterion_ids" => string_array
       }
     }
   end

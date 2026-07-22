@@ -24,6 +24,7 @@ defmodule SymphonyElixir.Codex.AppServer do
           thread_sandbox: String.t(),
           turn_sandbox_policy: map(),
           thread_id: String.t(),
+          instruction_sources: [map()],
           workspace: Path.t(),
           worker_host: String.t() | nil
         }
@@ -48,7 +49,7 @@ defmodule SymphonyElixir.Codex.AppServer do
       metadata = port_metadata(port, worker_host)
 
       with {:ok, session_policies} <- session_policies(expanded_workspace, worker_host),
-           {:ok, thread_id} <-
+           {:ok, thread_id, instruction_sources} <-
              do_start_session(
                port,
                expanded_workspace,
@@ -65,6 +66,7 @@ defmodule SymphonyElixir.Codex.AppServer do
            thread_sandbox: session_policies.thread_sandbox,
            turn_sandbox_policy: session_policies.turn_sandbox_policy,
            thread_id: thread_id,
+           instruction_sources: instruction_sources,
            workspace: expanded_workspace,
            worker_host: worker_host
          }}
@@ -352,9 +354,14 @@ defmodule SymphonyElixir.Codex.AppServer do
 
   defp do_start_session(port, workspace, session_policies, thread_id, dynamic_tools) do
     case send_initialize(port) do
-      :ok when is_binary(thread_id) -> resume_thread(port, workspace, session_policies, thread_id)
-      :ok -> start_thread(port, workspace, session_policies, dynamic_tools)
-      {:error, reason} -> {:error, reason}
+      :ok when is_binary(thread_id) ->
+        resume_thread(port, workspace, session_policies, thread_id, dynamic_tools)
+
+      :ok ->
+        start_thread(port, workspace, session_policies, dynamic_tools)
+
+      {:error, reason} ->
+        {:error, reason}
     end
   end
 
@@ -362,7 +369,8 @@ defmodule SymphonyElixir.Codex.AppServer do
          port,
          workspace,
          %{approval_policy: approval_policy, thread_sandbox: thread_sandbox},
-         thread_id
+         thread_id,
+         dynamic_tools
        ) do
     send_message(port, %{
       "method" => "thread/resume",
@@ -371,13 +379,14 @@ defmodule SymphonyElixir.Codex.AppServer do
         "threadId" => thread_id,
         "approvalPolicy" => approval_policy,
         "sandbox" => thread_sandbox,
-        "cwd" => workspace
+        "cwd" => workspace,
+        "dynamicTools" => dynamic_tools
       }
     })
 
     case await_response(port, @thread_resume_id) do
-      {:ok, %{"thread" => %{"id" => ^thread_id}}} ->
-        {:ok, thread_id}
+      {:ok, %{"thread" => %{"id" => ^thread_id}} = response} ->
+        {:ok, thread_id, instruction_sources(response)}
 
       {:ok, %{"thread" => %{"id" => resumed_thread_id}}} ->
         {:error, {:resumed_thread_mismatch, thread_id, resumed_thread_id}}
@@ -408,9 +417,9 @@ defmodule SymphonyElixir.Codex.AppServer do
     })
 
     case await_response(port, @thread_start_id) do
-      {:ok, %{"thread" => thread_payload}} ->
+      {:ok, %{"thread" => thread_payload} = response} ->
         case thread_payload do
-          %{"id" => thread_id} -> {:ok, thread_id}
+          %{"id" => thread_id} -> {:ok, thread_id, instruction_sources(response)}
           _ -> {:error, {:invalid_thread_payload, thread_payload}}
         end
 
@@ -418,6 +427,9 @@ defmodule SymphonyElixir.Codex.AppServer do
         other
     end
   end
+
+  defp instruction_sources(%{"instructionSources" => sources}) when is_list(sources), do: sources
+  defp instruction_sources(_response), do: []
 
   defp start_turn(
          port,

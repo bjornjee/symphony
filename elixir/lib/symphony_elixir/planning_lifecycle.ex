@@ -14,14 +14,8 @@ defmodule SymphonyElixir.PlanningLifecycle do
   @spec run(map(), Path.t(), Issue.t(), TaskContract.t(), WorkflowProfile.t(), keyword()) ::
           {:ok, map()} | {:error, term()}
   def run(primary_session, workspace, issue, contract, profile, opts \\ []) do
-    worker_host = Keyword.get(opts, :worker_host)
     opts = Keyword.put(opts, :planning_workspace, workspace)
-
-    case PlanningArtifact.read_execution_plan(workspace, worker_host) do
-      {:ok, plan} -> validate_execution_plan(plan, issue, contract, profile, primary_session.thread_id)
-      :missing -> run_new(primary_session, workspace, issue, contract, profile, opts)
-      {:error, _reason} = error -> error
-    end
+    run_new(primary_session, workspace, issue, contract, profile, opts)
   end
 
   defp run_new(primary_session, workspace, issue, contract, profile, opts) do
@@ -29,6 +23,21 @@ defmodule SymphonyElixir.PlanningLifecycle do
     capture = Keyword.get(opts, :repository_capture, &RepositoryFingerprint.capture/2)
 
     with {:ok, repository} <- capture.(workspace, worker_host),
+         authority <- authority_context(issue, contract, profile, primary_session.thread_id, repository, opts) do
+      context = context(issue, contract, profile, primary_session.thread_id, repository, authority)
+
+      case PlanningArtifact.read_execution_plan(workspace, worker_host, context["authority_digest"]) do
+        {:ok, plan} -> validate_execution_plan(plan, issue, contract, profile, primary_session.thread_id, context)
+        :missing -> start_new_authority(primary_session, workspace, issue, contract, profile, repository, context, opts)
+        {:error, _reason} = error -> error
+      end
+    end
+  end
+
+  defp start_new_authority(primary_session, workspace, issue, contract, profile, repository, context, opts) do
+    worker_host = Keyword.get(opts, :worker_host)
+
+    with true <- Map.get(repository, :clean, true) || {:error, :preactivation_repository_not_clean},
          {:ok, classification} <-
            PlanningGate.classify(
              workspace,
@@ -37,10 +46,9 @@ defmodule SymphonyElixir.PlanningLifecycle do
              profile,
              primary_session.thread_id,
              repository,
-             worker_host
+             worker_host,
+             context
            ) do
-      context = context(issue, contract, profile, primary_session.thread_id, repository)
-
       emit_lifecycle(opts, :task_classified, %{
         phase: "classification",
         status: "completed",
@@ -218,7 +226,7 @@ defmodule SymphonyElixir.PlanningLifecycle do
        ) do
     worker_host = Keyword.get(opts, :worker_host)
 
-    case PlanningArtifact.read_candidate(workspace, revision, worker_host) do
+    case PlanningArtifact.read_candidate(workspace, revision, worker_host, context["authority_digest"]) do
       {:ok, candidate} -> validate_existing_candidate(candidate, context, revision)
       :missing -> run_planning_turn(primary_session, workspace, issue, contract, profile, context, revision, opts)
       {:error, _reason} = error -> error
@@ -284,7 +292,7 @@ defmodule SymphonyElixir.PlanningLifecycle do
   defp review_for_revision(workspace, issue, contract, profile, context, candidate, revision, opts) do
     worker_host = Keyword.get(opts, :worker_host)
 
-    case PlanningArtifact.read_review(workspace, revision, worker_host) do
+    case PlanningArtifact.read_review(workspace, revision, worker_host, context["authority_digest"]) do
       {:ok, review} -> validate_existing_review(review, candidate, context, revision)
       :missing -> run_review_turn(workspace, issue, contract, profile, context, candidate, revision, opts)
       {:error, _reason} = error -> error
@@ -370,6 +378,7 @@ defmodule SymphonyElixir.PlanningLifecycle do
          true <- refreshed_contract.digest == contract.digest || {:error, :preactivation_contract_drift},
          {:ok, refreshed_profile} <- WorkflowProfile.select(refreshed_contract),
          true <- refreshed_profile.digest == profile.digest || {:error, :preactivation_profile_drift},
+         :ok <- revalidate_instructions(opts),
          {:ok, repository} <- capture.(context_workspace(opts), worker_host),
          :ok <- validate_repository_context(repository, context) do
       :ok
@@ -442,7 +451,7 @@ defmodule SymphonyElixir.PlanningLifecycle do
 
   defp hex(value, width), do: value |> Integer.to_string(16) |> String.pad_leading(width, "0")
 
-  defp validate_execution_plan(plan, issue, contract, profile, thread_id) do
+  defp validate_execution_plan(plan, issue, contract, profile, thread_id, context) do
     expected_digest = plan |> Map.delete("plan_digest") |> PlanningArtifact.digest()
 
     cond do
@@ -451,6 +460,8 @@ defmodule SymphonyElixir.PlanningLifecycle do
       plan["contract_digest"] != contract.digest -> {:error, :execution_plan_contract_drift}
       plan["profile_digest"] != profile.digest -> {:error, :execution_plan_profile_drift}
       plan["primary_thread_id"] != thread_id -> {:error, :execution_plan_thread_drift}
+      plan["instruction_digest"] != context["instruction_digest"] -> {:error, :execution_plan_instruction_drift}
+      plan["authority_digest"] != context["authority_digest"] -> {:error, :execution_plan_authority_drift}
       true -> {:ok, plan}
     end
   end
@@ -463,7 +474,10 @@ defmodule SymphonyElixir.PlanningLifecycle do
       candidate["candidate_digest"] != PlanningArtifact.digest(Map.drop(candidate, ["schema_version", "revision", "candidate_digest"])) ->
         {:error, :candidate_digest_mismatch}
 
-      Enum.any?(Map.keys(context), &(candidate[&1] != context[&1])) ->
+      Enum.any?(
+        ~w(issue_id issue_identifier contract_digest workflow profile_digest primary_thread_id repository instruction_digest authority_digest),
+        &(Map.has_key?(context, &1) and candidate[&1] != context[&1])
+      ) ->
         {:error, :candidate_context_drift}
 
       true ->
@@ -491,13 +505,14 @@ defmodule SymphonyElixir.PlanningLifecycle do
     end
   end
 
-  defp context(issue, contract, profile, thread_id, repository) do
+  defp context(issue, contract, profile, thread_id, repository, authority) do
     %{
       "issue_id" => issue.id,
       "issue_identifier" => issue.identifier,
       "contract_digest" => contract.digest,
       "workflow" => profile.name,
       "profile_digest" => profile.digest,
+      "criterion_ids" => Enum.map(contract.acceptance_criteria, & &1.id),
       "primary_thread_id" => thread_id,
       "repository" => %{
         "origin" => repository.origin,
@@ -505,6 +520,34 @@ defmodule SymphonyElixir.PlanningLifecycle do
         "preactivation_digest" => repository.digest
       }
     }
+    |> Map.merge(Map.new(authority, fn {key, value} -> {to_string(key), value} end))
+  end
+
+  defp authority_context(issue, contract, profile, thread_id, repository, opts) do
+    case Keyword.get(opts, :instruction_authority) do
+      nil ->
+        %{}
+
+      %{digest: instruction_digest} ->
+        authority_digest =
+          PlanningArtifact.digest([
+            issue.id,
+            contract.digest,
+            profile.digest,
+            thread_id,
+            repository.origin,
+            instruction_digest
+          ])
+
+        %{instruction_digest: instruction_digest, authority_digest: authority_digest}
+    end
+  end
+
+  defp revalidate_instructions(opts) do
+    case Keyword.get(opts, :instruction_authority) do
+      nil -> :ok
+      authority -> SymphonyElixir.InstructionAuthority.revalidate(authority)
+    end
   end
 
   defp repository_matches_context?(repository, context) do
@@ -607,7 +650,8 @@ defmodule SymphonyElixir.PlanningLifecycle do
     No goal is active. Do not edit files, create branches, commit, push, call external mutation APIs, request approval, or ask the operator questions.
     Inspect only the bounded repository context needed to plan. Use the native plan tool and finish with one final plan update.
     Then call `submit_execution_plan` exactly once. Its ordered_steps must exactly match that final native plan update by step text and order.
-    Treat every ordered step as an independently verifiable execution phase. Give it a stable id, only prior-phase dependencies, affected paths, verification profile, exact proof commands, invariants, stop conditions, and evidence requirements.
+    Treat every ordered step as an independently verifiable execution phase. Give it a stable id, only prior-phase dependencies, affected paths, verification profile, proof IDs, criterion IDs, invariants, stop conditions, and evidence requirements.
+    Define every proof as a typed contract with id, phase_id, role, exact command, safe repository-relative working_directory, expected_exit, timeout_ms, and criterion_ids. Every criterion must be covered. Set red_policy to required or waived; waived requires a concrete red_waiver_rationale.
 
     #{revision_guidance}
 
@@ -616,7 +660,7 @@ defmodule SymphonyElixir.PlanningLifecycle do
     Contract:
     #{contract.description}
 
-    Trusted workflow: #{profile.name} v#{profile.version} (#{profile.digest})
+    Trusted workflow: #{profile.name} (#{profile.digest})
     #{profile.instructions}
 
     Engine-pinned identity fields for the submission:
@@ -628,7 +672,7 @@ defmodule SymphonyElixir.PlanningLifecycle do
   defp review_prompt(issue, contract, profile, candidate) do
     """
     You are Symphony's isolated automated execution-plan reviewer. Review only; do not edit files, request approval, ask the operator, or call external mutation APIs.
-    Check contract and acceptance-criteria alignment, bounded scope, execution context, scale safety, workflow gates, exact proof commands, unsupported assumptions, rollback, and risky-work invariants.
+    Check contract and acceptance-criteria alignment, bounded scope, execution context, scale safety, workflow gates, typed proof sufficiency and safety, unsupported assumptions, rollback, and risky-work invariants.
     Reject phases that are not independently verifiable, depend on later work, omit meaningful stop conditions, hide scope in a broad path, or cannot map their objective to the final native plan.
     Call `submit_plan_review` exactly once with verdict `approve` or `revise`. An approval must have no blocking findings; a revision must have at least one concrete blocking finding.
 
@@ -637,7 +681,7 @@ defmodule SymphonyElixir.PlanningLifecycle do
     Contract:
     #{contract.description}
 
-    Trusted workflow: #{profile.name} v#{profile.version} (#{profile.digest})
+    Trusted workflow: #{profile.name} (#{profile.digest})
     #{profile.instructions}
 
     Exact candidate:

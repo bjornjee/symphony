@@ -14,4 +14,4 @@ Consequences: preactivation time and tokens are outside native goal accounting, 
 
 Consequences: contract, profile, thread, repository, plan, review, proof, and PR-head drift fail closed.
 
-Rollback: retain phase-one Symphony profiles and revert the preactivation runner and v2 evidence validation to the former goal-first runner.
+Rollback: retain Symphony-owned profiles and revert the preactivation runner to the former goal-first runner; the external control ledger becomes unused after active tasks drain.

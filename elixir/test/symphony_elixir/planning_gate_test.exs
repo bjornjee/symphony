@@ -38,16 +38,18 @@ defmodule SymphonyElixir.PlanningGateTest do
 
     assert classification["category"] == "simple"
     assert classification["affected_paths"] == ["docs/guide.md"]
-    assert classification["proof_commands"] == ["mix test test/docs_test.exs"]
+
+    assert [%{"command" => "mix test test/docs_test.exs", "role" => "final"}] =
+             Enum.map(classification["proofs"], &Map.take(&1, ["command", "role"]))
+
     assert byte_size(classification["classification_digest"]) == 64
   end
 
-  test "permits low-risk single-path feature, fix, and refactor workflows", ctx do
+  test "permits low-risk single-path feature and chore workflows", ctx do
     Enum.each(
       [
         {"feat: adjust one formatter behavior", "feature"},
-        {"fix: correct one formatter edge case", "fix"},
-        {"refactor: rename one private formatter helper", "refactor"}
+        {"docs: correct one guide example", "chore"}
       ],
       fn {title, workflow} ->
         {issue, contract, profile} = simple_task(%{"Notes For Agent" => "Workflow: #{workflow}"}, title)
@@ -66,6 +68,29 @@ defmodule SymphonyElixir.PlanningGateTest do
     )
   end
 
+  test "routes fix and refactor through reviewed planning", ctx do
+    Enum.each(
+      [
+        {"fix: correct one formatter edge case", "fix"},
+        {"refactor: rename one private formatter helper", "refactor"}
+      ],
+      fn {title, workflow} ->
+        {issue, contract, profile} =
+          simple_task(%{"Notes For Agent" => "Workflow: #{workflow}"}, title)
+
+        assert {:ok, %{"category" => "planned", "workflow" => ^workflow}} =
+                 PlanningGate.classify(
+                   Path.join(ctx.workspace, workflow),
+                   issue,
+                   contract,
+                   profile,
+                   "primary-thread",
+                   ctx.repository
+                 )
+      end
+    )
+  end
+
   test "falls through to full planning unless every simple-task guard passes", ctx do
     cases = [
       %{"Risk" => "medium"},
@@ -73,6 +98,10 @@ defmodule SymphonyElixir.PlanningGateTest do
       %{"Scope" => "In:\n- ../../outside.md\n\nOut:\n- source code"},
       %{"Acceptance Criteria" => "- [ ] Guide is current.\n- [ ] Links are valid."},
       %{"Verification" => "Run:\n`mix test test/docs_test.exs`\n`mix format --check-formatted`"},
+      %{
+        "Verification" => "Run:\n`git -C . commit -am unsafe`",
+        "Notes For Agent" => "Workflow: chore"
+      },
       %{"Notes For Agent" => "Workflow: fix"},
       %{"Goal" => "Change deployment credentials."},
       %{"Context" => "This changes an authorization boundary."},

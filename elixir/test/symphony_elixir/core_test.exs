@@ -1333,17 +1333,17 @@ defmodule SymphonyElixir.CoreTest do
     assert prompt =~ "Ticket S-4"
   end
 
-  test "prompt builder supplies the pinned machine-evidence contract" do
+  test "prompt builder supplies the engine-owned delivery contract" do
     write_workflow_file!(Workflow.workflow_file_path(), prompt: "Ticket {{ issue.identifier }}")
     issue = TaskContractFixtures.issue(%{identifier: "PIN-16"})
     assert {:ok, contract} = TaskContract.from_issue(issue)
 
     prompt = PromptBuilder.build_prompt(issue, task_contract: contract)
 
-    assert prompt =~ ".symphony/completion-evidence.json"
-    assert prompt =~ contract.digest
-    assert prompt =~ "run_audit_command"
-    assert prompt =~ "pull_request_url"
+    assert prompt =~ "run_plan_proof"
+    assert prompt =~ "request_implementation_review"
+    assert prompt =~ "publish_pull_request"
+    refute prompt =~ "run_audit_command"
 
     for criterion <- contract.acceptance_criteria do
       assert prompt =~ criterion.id
@@ -1364,7 +1364,7 @@ defmodule SymphonyElixir.CoreTest do
     issue = TaskContractFixtures.issue(%{state: "Human Review"})
     assert {:ok, contract} = TaskContract.from_issue(issue)
 
-    assert {:error, {:handoff_evidence_invalid, :completion_evidence_missing}} =
+    assert {:error, {:handoff_evidence_invalid, :trusted_execution_ledger_key_missing}} =
              AgentRunner.validate_handoff_for_test(
                workspace,
                issue,
@@ -1568,10 +1568,23 @@ defmodule SymphonyElixir.CoreTest do
             "affected_paths" => ["lib/example.ex"],
             "depends_on" => [],
             "verification_profile" => "Targeted",
-            "proof_commands" => ["mix test test/example_test.exs"],
+            "proof_ids" => ["final-proof"],
+            "criterion_ids" => Enum.map(contract.acceptance_criteria, & &1.id),
             "invariants" => ["valid behavior remains stable"],
             "stop_conditions" => ["stop if the contract changes"],
             "evidence_requirements" => ["GREEN event"]
+          }
+        ],
+        "proofs" => [
+          %{
+            "id" => "final-proof",
+            "phase_id" => "prove",
+            "role" => "final",
+            "command" => "mix test test/example_test.exs",
+            "working_directory" => ".",
+            "expected_exit" => "success",
+            "timeout_ms" => 60_000,
+            "criterion_ids" => Enum.map(contract.acceptance_criteria, & &1.id)
           }
         ]
       }
@@ -1610,7 +1623,18 @@ defmodule SymphonyElixir.CoreTest do
       "workflow" => "chore",
       "profile_digest" => profile.digest,
       "affected_paths" => ["docs/guide.md"],
-      "proof_commands" => ["mix test test/docs_test.exs"]
+      "proofs" => [
+        %{
+          "id" => "final",
+          "phase_id" => "direct",
+          "role" => "final",
+          "command" => "mix test test/docs_test.exs",
+          "working_directory" => ".",
+          "expected_exit" => "success",
+          "timeout_ms" => 60_000,
+          "criterion_ids" => Enum.map(contract.acceptance_criteria, & &1.id)
+        }
+      ]
     }
 
     prompt =
@@ -1888,7 +1912,7 @@ defmodule SymphonyElixir.CoreTest do
 
       write_workflow_file!(Workflow.workflow_file_path(),
         workspace_root: workspace_root,
-        hook_after_create: "cp #{Path.join(template_repo, "README.md")} README.md",
+        hook_after_create: "git clone #{template_repo} .",
         codex_command: "#{codex_binary} app-server"
       )
 
@@ -1989,7 +2013,7 @@ defmodule SymphonyElixir.CoreTest do
 
       write_workflow_file!(Workflow.workflow_file_path(),
         workspace_root: workspace_root,
-        hook_after_create: "cp #{Path.join(template_repo, "README.md")} README.md",
+        hook_after_create: "git clone #{template_repo} .",
         codex_command: "#{codex_binary} app-server"
       )
 
@@ -2099,7 +2123,7 @@ defmodule SymphonyElixir.CoreTest do
 
       write_workflow_file!(Workflow.workflow_file_path(),
         workspace_root: workspace_root,
-        hook_after_create: "cp #{Path.join(template_repo, "README.md")} README.md",
+        hook_after_create: "git clone #{template_repo} .",
         codex_command: "#{codex_binary} app-server"
       )
 
@@ -2309,7 +2333,7 @@ defmodule SymphonyElixir.CoreTest do
 
       write_workflow_file!(Workflow.workflow_file_path(),
         workspace_root: workspace_root,
-        hook_after_create: "cp #{Path.join(template_repo, "README.md")} README.md",
+        hook_after_create: "git clone #{template_repo} .",
         codex_command: "#{codex_binary} app-server",
         max_turns: 3
       )
@@ -2398,7 +2422,7 @@ defmodule SymphonyElixir.CoreTest do
       refute Enum.at(turn_texts, 1) =~ "You are an agent for this repository."
       assert Enum.at(turn_texts, 1) =~ "Continuation guidance:"
       assert Enum.at(turn_texts, 1) =~ "continuation turn #2 of 3"
-      assert Enum.at(turn_texts, 1) =~ "refresh that artifact before doing more implementation"
+      assert Enum.at(turn_texts, 1) =~ "resume the earliest incomplete approved phase"
       assert Enum.at(turn_texts, 1) =~ "Symphony owns those external writes after validation"
       assert Enum.at(turn_texts, 1) =~ "If a PR, commit, or proof result already exists"
       assert Enum.at(turn_texts, 1) =~ "Record the reason for the extra turn in `.symphony/run-audit.md`"
@@ -2486,7 +2510,7 @@ defmodule SymphonyElixir.CoreTest do
 
       write_workflow_file!(Workflow.workflow_file_path(),
         workspace_root: workspace_root,
-        hook_after_create: "cp #{Path.join(template_repo, "README.md")} README.md",
+        hook_after_create: "git clone #{template_repo} .",
         codex_command: "#{codex_binary} app-server",
         max_turns: 2
       )

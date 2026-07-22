@@ -18,6 +18,17 @@ defmodule SymphonyElixir.TaskBranch do
     end
   end
 
+  @spec validate(Path.t(), Issue.t(), String.t(), String.t(), String.t() | nil) :: :ok | {:error, term()}
+  def validate(workspace, %Issue{} = issue, workflow, base_sha, worker_host \\ nil) do
+    expected = branch_name(issue, workflow)
+
+    with {:ok, current} <- git(workspace, worker_host, ["branch", "--show-current"]),
+         true <- String.trim(current) == expected || {:error, {:unexpected_task_branch, String.trim(current)}},
+         {:ok, ^expected} <- validate_branch_base(workspace, worker_host, expected, base_sha, "HEAD") do
+      :ok
+    end
+  end
+
   defp ensure_branch(workspace, worker_host, branch, _head, branch, base_sha) do
     validate_branch_base(workspace, worker_host, branch, base_sha, "HEAD")
   end

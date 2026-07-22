@@ -104,6 +104,7 @@ defmodule SymphonyElixir.PlanningLifecycleTest do
                ctx.issue,
                ctx.contract,
                ctx.profile,
+               repository_capture: fn _, _ -> {:ok, ctx.repository} end,
                run_turn: fn _, _, _, _ -> flunk("approved restart must not rerun a turn") end
              )
   end
@@ -139,7 +140,63 @@ defmodule SymphonyElixir.PlanningLifecycleTest do
     assert plan["execution_mode"] == "simple"
     assert plan["candidate"] == nil
     assert plan["repository"]["base_sha"] == ctx.repository.base_sha
-    assert plan["proof_commands"] == ["mix test test/docs_test.exs"]
+
+    assert [%{"command" => "mix test test/docs_test.exs", "role" => "final"}] =
+             Enum.map(plan["proofs"], &Map.take(&1, ["command", "role"]))
+  end
+
+  test "clean preimplementation instruction drift creates a new authority namespace", ctx do
+    instruction = Path.join(ctx.workspace, "AGENTS.md")
+    File.write!(instruction, "first doctrine\n")
+    {:ok, first_authority} = SymphonyElixir.InstructionAuthority.capture([%{"path" => instruction}])
+
+    description =
+      TaskContractFixtures.valid_description(%{
+        "Goal" => "Correct one documentation example.",
+        "Scope" => "In:\n- docs/guide.md\n\nOut:\n- source code",
+        "Acceptance Criteria" => "- [ ] Guide example is current.",
+        "Verification" => "Run:\n`mix test test/docs_test.exs`",
+        "Risk" => "low",
+        "Notes For Agent" => "Workflow: chore"
+      })
+
+    issue = TaskContractFixtures.issue(%{title: "docs: correct guide example", description: description})
+    {:ok, contract} = TaskContract.from_issue(issue)
+    {:ok, profile} = WorkflowProfile.select(contract)
+
+    common = [
+      repository_capture: fn _, _ -> {:ok, ctx.repository} end,
+      issue_fetcher: fn [_id] -> {:ok, [issue]} end,
+      run_turn: fn _, _, _, _ -> flunk("simple task must not plan") end
+    ]
+
+    assert {:ok, first} =
+             PlanningLifecycle.run(
+               %{role: :primary, thread_id: "primary-thread"},
+               ctx.workspace,
+               issue,
+               contract,
+               profile,
+               Keyword.put(common, :instruction_authority, first_authority)
+             )
+
+    File.write!(instruction, "second doctrine\n")
+    {:ok, second_authority} = SymphonyElixir.InstructionAuthority.capture([%{"path" => instruction}])
+
+    assert {:ok, second} =
+             PlanningLifecycle.run(
+               %{role: :primary, thread_id: "primary-thread"},
+               ctx.workspace,
+               issue,
+               contract,
+               profile,
+               Keyword.put(common, :instruction_authority, second_authority)
+             )
+
+    refute first["authority_digest"] == second["authority_digest"]
+    refute first["plan_digest"] == second["plan_digest"]
+    assert File.exists?(SymphonyElixir.PlanningArtifact.execution_plan_path(ctx.workspace, first["authority_digest"]))
+    assert File.exists?(SymphonyElixir.PlanningArtifact.execution_plan_path(ctx.workspace, second["authority_digest"]))
   end
 
   test "rejects a planning turn that emits a file-change event", ctx do
@@ -354,7 +411,12 @@ defmodule SymphonyElixir.PlanningLifecycleTest do
       "execution_context" => "request/response; once per request",
       "scale_shape" => "bounded by one request",
       "verification_profile" => "Targeted",
-      "proof_commands" => ["mix test test/example_test.exs"],
+      "proofs" => [
+        proof("phase-proof", "inspect", "phase", "success", ctx),
+        proof("final-proof", "implement", "final", "success", ctx)
+      ],
+      "red_policy" => "waived",
+      "red_waiver_rationale" => "The plan changes no independently testable behavior before implementation.",
       "risks" => [],
       "invariants" => ["existing behavior remains stable"],
       "rollback" => "revert the task commit",
@@ -375,10 +437,24 @@ defmodule SymphonyElixir.PlanningLifecycleTest do
       "affected_paths" => ["lib/example.ex"],
       "depends_on" => depends_on,
       "verification_profile" => "Targeted",
-      "proof_commands" => ["mix test test/example_test.exs"],
+      "proof_ids" => if(id == "inspect", do: ["phase-proof"], else: ["final-proof"]),
+      "criterion_ids" => [],
       "invariants" => ["existing behavior remains stable"],
       "stop_conditions" => ["Stop if the approved scope must expand"],
       "evidence_requirements" => []
+    }
+  end
+
+  defp proof(id, phase_id, role, expected_exit, ctx) do
+    %{
+      "id" => id,
+      "phase_id" => phase_id,
+      "role" => role,
+      "command" => "mix test test/example_test.exs",
+      "working_directory" => ".",
+      "expected_exit" => expected_exit,
+      "timeout_ms" => 60_000,
+      "criterion_ids" => Enum.map(ctx.contract.acceptance_criteria, & &1.id)
     }
   end
 end

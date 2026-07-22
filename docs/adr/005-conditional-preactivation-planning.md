@@ -4,7 +4,7 @@ Context: mandatory planning and medium review add avoidable latency to provably 
 
 Decision: run a deterministic, engine-owned classification gate before planning and goal activation.
 
-Decision: only eligible low-risk workflows with one path, criterion, and proof command may use direct execution; PR, CI, and build work remains planned.
+Decision: only eligible low-risk feature or chore workflows with one path, criterion, and safe proof command may use direct execution; fixes, refactors, PR, CI, and build work remain planned because their evidence gates require reviewed phases.
 
 Decision: ambiguity, risky-boundary signals, decomposition, and `Planning: full` always select the reviewed planning path.
 

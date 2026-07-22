@@ -17,9 +17,21 @@ defmodule SymphonyElixir.WorkflowProfileTest do
 
     assert {:ok, profile} = issue |> contract!() |> WorkflowProfile.select()
     assert profile.name == "fix"
-    assert profile.version == 1
+    refute Map.has_key?(profile, :version)
     assert byte_size(profile.digest) == 64
     assert profile.instructions =~ "Ground the defect"
+  end
+
+  test "digest is derived only from the workflow name and rendered instructions" do
+    assert {:ok, profile} = WorkflowProfile.load("fix")
+
+    expected =
+      [profile.name, profile.instructions]
+      |> Jason.encode!()
+      |> then(&:crypto.hash(:sha256, &1))
+      |> Base.encode16(case: :lower)
+
+    assert profile.digest == expected
   end
 
   test "falls back to the conventional title prefix" do

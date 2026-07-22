@@ -83,7 +83,7 @@ Symphony owns scheduling, preactivation classification and review, and the
 selected built-in workflow profile.
 
 Before preactivation planning, Symphony classifies the pinned contract. A
-low-risk `feature`, `fix`, `refactor`, or `chore` may execute directly only when
+low-risk `feature` or `chore` may execute directly only when
 its conventional title matches the workflow, `Scope.In` names one path, there
 is one acceptance criterion, `Verification` contains one exact backtick-delimited
 command, and no risky or decomposition signal is present.

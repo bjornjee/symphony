@@ -14,7 +14,7 @@ This workflow is owned by Symphony and is safe for unattended execution.
 - For planned execution, execute approved phases in order. Start a phase only after all of its `depends_on` phases are complete.
 - For planned execution, keep exactly one native-plan phase `in_progress`. After satisfying its proof and evidence requirements, mark it `completed` before starting the next phase.
 - For simple direct execution, do not manufacture native-plan phases. Treat the one affected path and proof command in the direct authorization as hard bounds.
-- Treat approved phase or direct-execution paths, verification profile, proof commands, invariants, and stop conditions as an execution contract.
+- Treat approved phase or direct-execution paths, verification profile, typed proof IDs, invariants, and stop conditions as an execution contract.
 - Use Surgical, Targeted, or Full verification proportionally. Escalate the profile and stop for plan review if the diff or risk outgrows the approved profile.
 - A failed proof is evidence. Diagnose it within the current phase; do not weaken assertions, delete coverage, or change expected behavior merely to obtain GREEN.
 
@@ -22,9 +22,9 @@ This workflow is owned by Symphony and is safe for unattended execution.
 
 - Review the full branch diff against the pinned base for correctness, security, scope drift, hidden coupling, and work that scales with global state.
 - Check every changed trust boundary for validation, authorization, injection, secret exposure, path safety, and unsafe external calls.
-- Run the approved final proof against the final repository head. Proof from an older head is stale.
-- Use conventional commits, push the one task branch, and create a pull request before writing completion evidence.
-- The pull request must explain why the change exists, summarize the complete branch diff, and list the exact proof executed.
+- Commit, then run the approved final proof through `run_plan_proof` against the clean final repository head. Proof from an older head is stale.
+- Use conventional commits, then request the required implementation review and publish only through `publish_pull_request`.
+- The pull request must explain why the change exists, summarize the complete branch diff, and list every exact approved proof command. Symphony pushes and publishes it.
 
 ### Stop conditions
 

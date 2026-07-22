@@ -41,8 +41,10 @@ defmodule SymphonyElixir.TestSupport do
 
         File.mkdir_p!(workflow_root)
         workflow_file = Path.join(workflow_root, "workflow.md")
+        execution_state_root = Path.join(workflow_root, "execution-state")
         write_workflow_file!(workflow_file)
         Workflow.set_workflow_file_path(workflow_file)
+        Application.put_env(:symphony_elixir, :execution_state_root, execution_state_root)
         if Process.whereis(SymphonyElixir.WorkflowStore), do: SymphonyElixir.WorkflowStore.force_reload()
         stop_default_http_server()
 
@@ -51,6 +53,7 @@ defmodule SymphonyElixir.TestSupport do
           Application.delete_env(:symphony_elixir, :server_port_override)
           Application.delete_env(:symphony_elixir, :memory_tracker_issues)
           Application.delete_env(:symphony_elixir, :memory_tracker_recipient)
+          Application.delete_env(:symphony_elixir, :execution_state_root)
           File.rm_rf(workflow_root)
         end)
 
@@ -77,9 +80,41 @@ defmodule SymphonyElixir.TestSupport do
   def restore_env(key, nil), do: System.delete_env(key)
   def restore_env(key, value), do: System.put_env(key, value)
 
-  def approve_execution_plan(session, _workspace, issue, contract, profile, _opts) do
+  def approve_execution_plan(session, workspace, issue, contract, profile, opts) do
+    worker_host = Keyword.get(opts, :worker_host)
+    {:ok, repository} = SymphonyElixir.RepositoryFingerprint.capture(workspace, worker_host)
+    instruction_digest = opts |> Keyword.fetch!(:instruction_authority) |> Map.fetch!(:digest)
+
+    authority_digest =
+      SymphonyElixir.PlanningArtifact.digest([
+        issue.id,
+        contract.digest,
+        profile.digest,
+        session.thread_id,
+        repository.origin,
+        instruction_digest
+      ])
+
     candidate = %{
-      "repository" => %{"base_sha" => String.duplicate("a", 40)},
+      "repository" => %{
+        "origin" => repository.origin,
+        "base_sha" => repository.base_sha,
+        "preactivation_digest" => repository.digest
+      },
+      "affected_paths" => ["README.md"],
+      "ordered_steps" => [],
+      "proofs" => [
+        %{
+          "id" => "final",
+          "phase_id" => "implement",
+          "role" => "final",
+          "command" => "mise exec -- make all",
+          "working_directory" => ".",
+          "expected_exit" => "success",
+          "timeout_ms" => 1_800_000,
+          "criterion_ids" => Enum.map(contract.acceptance_criteria, & &1.id)
+        }
+      ],
       "evidence_requirements" => []
     }
 
@@ -90,6 +125,8 @@ defmodule SymphonyElixir.TestSupport do
       "contract_digest" => contract.digest,
       "workflow" => profile.name,
       "profile_digest" => profile.digest,
+      "instruction_digest" => instruction_digest,
+      "authority_digest" => authority_digest,
       "primary_thread_id" => session.thread_id,
       "revision" => 1,
       "candidate_digest" => String.duplicate("b", 64),
@@ -101,8 +138,8 @@ defmodule SymphonyElixir.TestSupport do
     {:ok, Map.put(semantic, "plan_digest", SymphonyElixir.PlanningArtifact.digest(semantic))}
   end
 
-  def accept_task_branch(_workspace, issue, workflow, _base_sha, _worker_host) do
-    {:ok, "#{workflow}/#{String.downcase(issue.identifier)}-test"}
+  def accept_task_branch(workspace, issue, workflow, base_sha, worker_host) do
+    SymphonyElixir.TaskBranch.ensure(workspace, issue, workflow, base_sha, worker_host)
   end
 
   def stop_default_http_server do

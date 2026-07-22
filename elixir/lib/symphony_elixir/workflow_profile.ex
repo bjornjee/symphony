@@ -5,7 +5,6 @@ defmodule SymphonyElixir.WorkflowProfile do
 
   alias SymphonyElixir.Linear.TaskContract
 
-  @version 1
   @names ~w(feature fix refactor chore pr)
   @title_prefixes %{
     "feat" => "feature",
@@ -18,11 +17,10 @@ defmodule SymphonyElixir.WorkflowProfile do
     "pr" => "pr"
   }
 
-  defstruct [:name, :version, :digest, :instructions]
+  defstruct [:name, :digest, :instructions]
 
   @type t :: %__MODULE__{
           name: String.t(),
-          version: pos_integer(),
           digest: String.t(),
           instructions: String.t()
         }
@@ -42,7 +40,7 @@ defmodule SymphonyElixir.WorkflowProfile do
     instructions = String.trim(common) <> "\n\n" <> String.trim(specific)
 
     digest =
-      [@version, name, instructions]
+      [name, instructions]
       |> Jason.encode!()
       |> then(&:crypto.hash(:sha256, &1))
       |> Base.encode16(case: :lower)
@@ -50,7 +48,6 @@ defmodule SymphonyElixir.WorkflowProfile do
     {:ok,
      %__MODULE__{
        name: name,
-       version: @version,
        digest: digest,
        instructions: instructions
      }}

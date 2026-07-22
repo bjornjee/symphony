@@ -7,7 +7,7 @@
 3. **Conditional cleanup:** clean only problems in the approved diff. Do not delete files, prune tests, rewrite history, or perform broad refactors without explicit authority.
 4. **Relevant formatting:** run formatters only for touched languages or repository-defined final gates; do not create unrelated formatting churn.
 5. **Final gate:** run the approved proof against the final head. High or critical correctness or security findings, failing checks, stale proof, or PR/head mismatch block delivery.
-6. **Publish:** validate conventional commits, push the task branch, and create the pull request with a conventional title, why-focused summary, complete diff summary, and exact test plan.
+6. **Publish:** submit a conventional title, why-focused summary, complete diff summary, and exact test plan through `publish_pull_request`; Symphony validates commits, pushes the task branch, and creates or updates the pull request.
 
 ### Workflow invariants
 

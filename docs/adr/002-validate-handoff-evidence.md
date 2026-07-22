@@ -1,5 +1,7 @@
 # ADR 002: Validate durable handoff evidence
 
+Superseded by ADR 006. Agent-authored envelopes and current-run in-memory proof events are no longer accepted.
+
 ## Context
 
 PIN-14 pins an issue plan, but tracker state and agent prose cannot prove that each criterion passed

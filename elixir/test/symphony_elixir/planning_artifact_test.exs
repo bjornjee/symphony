@@ -30,13 +30,13 @@ defmodule SymphonyElixir.PlanningArtifactTest do
     candidate =
       Map.merge(context, %{
         "ordered_steps" => [
-          phase("reproduce", "Reproduce the defect", "in_progress", [], ["mix test test/example_test.exs"]),
+          phase("reproduce", "Reproduce the defect", "in_progress", [], ["red"]),
           phase(
             "fix",
             "Implement and prove the fix",
             "pending",
             ["reproduce"],
-            ["mix test test/example_test.exs"]
+            ["final"]
           )
         ],
         "affected_paths" => ["lib/example.ex", "test/example_test.exs"],
@@ -44,7 +44,12 @@ defmodule SymphonyElixir.PlanningArtifactTest do
         "execution_context" => "request/response; one validation per request",
         "scale_shape" => "bounded by one request payload",
         "verification_profile" => "Targeted",
-        "proof_commands" => ["mix test test/example_test.exs"],
+        "proofs" => [
+          proof("red", "reproduce", "red", "failure"),
+          proof("final", "fix", "final", "success")
+        ],
+        "red_policy" => "required",
+        "red_waiver_rationale" => nil,
         "risks" => ["shared validation path"],
         "invariants" => ["valid inputs remain accepted"],
         "rollback" => "revert the task commit",
@@ -269,7 +274,7 @@ defmodule SymphonyElixir.PlanningArtifactTest do
       put_in(candidate, ["ordered_steps", Access.at(1), "depends_on"], ["missing-phase"]),
       Map.put(candidate, "affected_paths", []),
       Map.put(candidate, "affected_paths", nil),
-      Map.put(candidate, "proof_commands", []),
+      Map.put(candidate, "proofs", []),
       Map.put(candidate, "risks", [1]),
       Map.put(candidate, "rollback", ""),
       Map.put(candidate, "scope", %{"in" => [], "out" => []}),
@@ -367,7 +372,7 @@ defmodule SymphonyElixir.PlanningArtifactTest do
     assert {:error, :artifact_not_an_object} = PlanningArtifact.read_review(workspace, 1)
   end
 
-  defp phase(id, step, status, depends_on, proof_commands) do
+  defp phase(id, step, status, depends_on, proof_ids) do
     %{
       "id" => id,
       "step" => step,
@@ -375,10 +380,24 @@ defmodule SymphonyElixir.PlanningArtifactTest do
       "affected_paths" => ["lib/example.ex", "test/example_test.exs"],
       "depends_on" => depends_on,
       "verification_profile" => "Targeted",
-      "proof_commands" => proof_commands,
+      "proof_ids" => proof_ids,
+      "criterion_ids" => [],
       "invariants" => ["valid inputs remain accepted"],
       "stop_conditions" => ["Stop if the observed failure differs from the reported defect"],
       "evidence_requirements" => ["Record the engine-observed command event"]
+    }
+  end
+
+  defp proof(id, phase_id, role, expected_exit) do
+    %{
+      "id" => id,
+      "phase_id" => phase_id,
+      "role" => role,
+      "command" => "mix test test/example_test.exs",
+      "working_directory" => ".",
+      "expected_exit" => expected_exit,
+      "timeout_ms" => 60_000,
+      "criterion_ids" => []
     }
   end
 end

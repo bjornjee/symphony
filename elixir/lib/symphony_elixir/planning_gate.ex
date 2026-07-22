@@ -7,7 +7,7 @@ defmodule SymphonyElixir.PlanningGate do
   """
 
   alias SymphonyElixir.Linear.{Issue, TaskContract}
-  alias SymphonyElixir.{PlanningArtifact, WorkflowProfile, WorkspaceArtifact}
+  alias SymphonyElixir.{PlanningArtifact, ProofContract, WorkflowProfile, WorkspaceArtifact}
 
   @artifact_path Path.join(".symphony", "task-classification.json")
   @max_artifact_bytes 16_384
@@ -24,13 +24,16 @@ defmodule SymphonyElixir.PlanningGate do
           WorkflowProfile.t(),
           String.t(),
           map(),
-          String.t() | nil
+          String.t() | nil,
+          map()
         ) :: {:ok, map()} | {:error, term()}
-  def classify(workspace, issue, contract, profile, thread_id, repository, worker_host \\ nil) do
-    expected = classification(issue, contract, profile, thread_id, repository)
+  def classify(workspace, issue, contract, profile, thread_id, repository, worker_host \\ nil, authority \\ %{}) do
+    expected = classification(issue, contract, profile, thread_id, repository, authority)
 
-    case read(workspace, worker_host) do
-      :missing -> persist(workspace, expected, worker_host)
+    authority_digest = authority[:authority_digest] || authority["authority_digest"]
+
+    case read(workspace, worker_host, authority_digest) do
+      :missing -> persist(workspace, expected, worker_host, authority_digest)
       {:ok, existing} -> validate_existing(existing, expected)
       {:error, _reason} = error -> error
     end
@@ -39,10 +42,16 @@ defmodule SymphonyElixir.PlanningGate do
   @spec artifact_path(Path.t()) :: Path.t()
   def artifact_path(workspace), do: Path.join(workspace, @artifact_path)
 
-  defp classification(issue, contract, profile, thread_id, repository) do
+  @spec artifact_path(Path.t(), String.t() | nil) :: Path.t()
+  def artifact_path(workspace, nil), do: artifact_path(workspace)
+
+  def artifact_path(workspace, authority_digest),
+    do: Path.join([workspace, ".symphony", "authorities", authority_digest, "task-classification.json"])
+
+  defp classification(issue, contract, profile, thread_id, repository, authority) do
     affected_paths = in_scope_paths(contract.sections["Scope"])
-    proof_commands = proof_commands(contract.sections["Verification"])
-    guard_failures = guard_failures(issue, contract, profile, affected_paths, proof_commands)
+    verification_commands = verification_commands(contract.sections["Verification"])
+    guard_failures = guard_failures(issue, contract, profile, affected_paths, verification_commands)
 
     semantic = %{
       "schema_version" => 1,
@@ -51,10 +60,12 @@ defmodule SymphonyElixir.PlanningGate do
       "contract_digest" => contract.digest,
       "workflow" => profile.name,
       "profile_digest" => profile.digest,
+      "instruction_digest" => authority[:instruction_digest] || authority["instruction_digest"],
+      "authority_digest" => authority[:authority_digest] || authority["authority_digest"],
       "primary_thread_id" => thread_id,
       "category" => if(guard_failures == [], do: "simple", else: "planned"),
       "affected_paths" => affected_paths,
-      "proof_commands" => proof_commands,
+      "proofs" => simple_proofs(verification_commands, contract.acceptance_criteria),
       "guard_failures" => guard_failures,
       "repository" => repository_context(repository)
     }
@@ -62,13 +73,34 @@ defmodule SymphonyElixir.PlanningGate do
     Map.put(semantic, "classification_digest", PlanningArtifact.digest(semantic))
   end
 
-  defp guard_failures(issue, contract, profile, affected_paths, proof_commands) do
+  defp simple_proofs([command], criteria) do
+    [
+      %{
+        "id" => "final",
+        "phase_id" => "direct",
+        "role" => "final",
+        "command" => command,
+        "working_directory" => ".",
+        "expected_exit" => "success",
+        "timeout_ms" => 1_800_000,
+        "criterion_ids" => Enum.map(criteria, & &1.id)
+      }
+    ]
+  end
+
+  defp simple_proofs(_commands, _criteria), do: []
+
+  defp guard_failures(issue, contract, profile, affected_paths, verification_commands) do
     []
     |> require(simple_workflow?(contract.title, profile.name), "workflow and title are not eligible for simple execution")
     |> require(String.downcase(String.trim(contract.sections["Risk"])) == "low", "risk is not low")
     |> require(length(contract.acceptance_criteria) == 1, "task does not have exactly one acceptance criterion")
     |> require(length(affected_paths) == 1, "scope does not name exactly one path")
-    |> require(length(proof_commands) == 1, "verification does not name exactly one proof command")
+    |> require(length(verification_commands) == 1, "verification does not name exactly one proof command")
+    |> require(
+      safe_direct_proof?(verification_commands, affected_paths, contract.acceptance_criteria),
+      "verification command is not safe for direct engine execution"
+    )
     |> require(not Enum.member?(issue.labels, "codex-decompose"), "task is marked for decomposition")
     |> require(not full_planning_requested?(contract), "full planning was explicitly requested")
     |> require(not risky_boundary?(contract), "task text names a risky boundary")
@@ -82,8 +114,6 @@ defmodule SymphonyElixir.PlanningGate do
       [prefix] ->
         {String.downcase(prefix), workflow} in [
           {"feat", "feature"},
-          {"fix", "fix"},
-          {"refactor", "refactor"},
           {"docs", "chore"},
           {"chore", "chore"}
         ]
@@ -92,6 +122,27 @@ defmodule SymphonyElixir.PlanningGate do
         false
     end
   end
+
+  defp safe_direct_proof?([command], [path], criteria) do
+    criterion_ids = Enum.map(criteria, & &1.id)
+
+    phase = %{
+      "id" => "direct",
+      "depends_on" => [],
+      "affected_paths" => [path],
+      "proof_ids" => ["final"],
+      "criterion_ids" => criterion_ids
+    }
+
+    ProofContract.validate(
+      simple_proofs([command], criteria),
+      [phase],
+      criterion_ids,
+      [path]
+    ) == :ok
+  end
+
+  defp safe_direct_proof?(_commands, _paths, _criteria), do: false
 
   defp full_planning_requested?(contract) do
     Regex.match?(~r/^Planning:\s*full\s*$/mi, Map.get(contract.sections, "Notes For Agent", ""))
@@ -153,14 +204,14 @@ defmodule SymphonyElixir.PlanningGate do
       Enum.all?(Path.split(path), &(&1 not in [".", ".."]))
   end
 
-  defp proof_commands(verification) when is_binary(verification) do
+  defp verification_commands(verification) when is_binary(verification) do
     ~r/`([^`\n]+)`/
     |> Regex.scan(verification, capture: :all_but_first)
     |> Enum.map(fn [command] -> String.trim(command) end)
     |> Enum.reject(&(&1 == ""))
   end
 
-  defp proof_commands(_verification), do: []
+  defp verification_commands(_verification), do: []
 
   defp repository_context(repository) do
     %{
@@ -170,29 +221,29 @@ defmodule SymphonyElixir.PlanningGate do
     }
   end
 
-  defp persist(workspace, classification, worker_host) do
+  defp persist(workspace, classification, worker_host, authority_digest) do
     payload = Jason.encode!(classification, pretty: true) <> "\n"
 
     if byte_size(payload) > @max_artifact_bytes do
       {:error, {:task_classification_too_large, @max_artifact_bytes}}
     else
-      case WorkspaceArtifact.create_exclusive(artifact_path(workspace), payload, worker_host) do
+      case WorkspaceArtifact.create_exclusive(artifact_path(workspace, authority_digest), payload, worker_host) do
         :ok -> {:ok, classification}
-        :exists -> read_and_validate(workspace, classification, worker_host)
+        :exists -> read_and_validate(workspace, classification, worker_host, authority_digest)
         {:error, reason} -> {:error, {:task_classification_write_failed, reason}}
       end
     end
   end
 
-  defp read_and_validate(workspace, expected, worker_host) do
-    case read(workspace, worker_host) do
+  defp read_and_validate(workspace, expected, worker_host, authority_digest) do
+    case read(workspace, worker_host, authority_digest) do
       {:ok, existing} -> validate_existing(existing, expected)
       other -> other
     end
   end
 
-  defp read(workspace, worker_host) do
-    case WorkspaceArtifact.read(artifact_path(workspace), @max_artifact_bytes, worker_host) do
+  defp read(workspace, worker_host, authority_digest) do
+    case WorkspaceArtifact.read(artifact_path(workspace, authority_digest), @max_artifact_bytes, worker_host) do
       :missing -> :missing
       {:ok, payload} -> decode(payload)
       {:error, reason} -> {:error, {:task_classification_read_failed, reason}}

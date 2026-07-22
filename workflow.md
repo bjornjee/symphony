@@ -97,15 +97,16 @@ The local workpad should include:
 - selected Symphony workflow profile and digest
 - execution context and scale shape
 - in-scope and out-of-scope boundaries
-- verification profile and proof command
+- verification profile and typed proof IDs
 - invariant contract only when risk requires it
 
-Linear comments are human-facing only. For completed implementation work,
-atomically write `.symphony/completion-evidence.json` and leave the issue
-active. Do not create `## Agent Handoff` or move the issue: Symphony renders
-one deterministic handoff from validated evidence, reads it back, and only
-then performs `tracker.handoff_state`. Questions, blockers, and decomposition
-remain governed by their existing semantic comment contracts.
+Linear comments are human-facing only. For completed implementation work, use
+the engine-owned proof, review, and `publish_pull_request` tools. Do not write
+completion evidence, push, create a PR directly, create `## Agent Handoff`, or
+move the issue: Symphony derives immutable evidence from its external ledger,
+renders one deterministic handoff, reads it back, and only then performs
+`tracker.handoff_state`. Questions, blockers, and decomposition remain governed
+by their existing semantic comment contracts.
 
 ## Run audit and latency control
 
@@ -197,13 +198,13 @@ comment with the proposed child issue bodies and stop.
   and project scope.
 - Do not expand scope for adjacent cleanup; create or propose a follow-up issue.
 - For completed work, do not create `## Agent Handoff` or move the issue;
-  atomically write completion evidence and let Symphony publish, read back,
-  and transition to `tracker.handoff_state`.
-- When implementation changes repository files, prefer a branch, commit, and PR
-  before handoff. The human-facing comment must include either the PR URL or
-  the reason no PR was created.
-- If a PR is created, completion evidence must contain its validated URL;
-  Symphony includes it and the exact reviewer action in `## Agent Handoff`.
+  commit the approved tree and call `publish_pull_request`. Symphony publishes,
+  derives completion evidence, reads the PR and handoff back, and transitions to
+  `tracker.handoff_state`.
+- Repository changes require the engine-created task branch, a conventional
+  commit, fresh final proof, and engine-owned PR publication before handoff.
+- Symphony binds the validated PR URL and head to trusted completion evidence
+  and includes the URL and exact reviewer action in `## Agent Handoff`.
 - Human-facing Linear comments must follow this convention:
   - `## Agent Handoff`: completed work, PR/diff link, verification, and action needed.
   - `## Agent Question`: exact question, options/tradeoffs, and why the agent stopped.
