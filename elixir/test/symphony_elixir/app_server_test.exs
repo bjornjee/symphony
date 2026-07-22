@@ -296,6 +296,93 @@ defmodule SymphonyElixir.AppServerTest do
     end
   end
 
+  test "app server applies planning turn overrides and a narrow dynamic tool set" do
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-app-server-planning-policy-#{System.unique_integer([:positive])}"
+      )
+
+    try do
+      workspace_root = Path.join(test_root, "workspaces")
+      workspace = Path.join(workspace_root, "MT-1002")
+      codex_binary = Path.join(test_root, "fake-codex")
+      trace_file = Path.join(test_root, "codex-planning-policy.trace")
+      File.mkdir_p!(workspace)
+
+      File.write!(codex_binary, """
+      #!/bin/sh
+      count=0
+      while IFS= read -r line; do
+        count=$((count + 1))
+        printf 'JSON:%s\n' "$line" >> "#{trace_file}"
+        case "$count" in
+          1) printf '%s\n' '{"id":1,"result":{}}' ;;
+          2) printf '%s\n' '{"id":2,"result":{"thread":{"id":"thread-1002"}}}' ;;
+          3) printf '%s\n' '{"id":3,"result":{"turn":{"id":"turn-1002"}}}' ;;
+          4) printf '%s\n' '{"method":"turn/completed"}'; exit 0 ;;
+        esac
+      done
+      """)
+
+      File.chmod!(codex_binary, 0o755)
+
+      write_workflow_file!(Workflow.workflow_file_path(),
+        workspace_root: workspace_root,
+        codex_command: "#{codex_binary} app-server",
+        codex_approval_policy: "never"
+      )
+
+      issue = %Issue{
+        id: "issue-planning-policy",
+        identifier: "MT-1002",
+        title: "Plan safely",
+        description: "Plan without writes",
+        state: "In Progress",
+        url: "https://example.org/issues/MT-1002",
+        labels: []
+      }
+
+      dynamic_tools = [
+        %{
+          "name" => "submit_execution_plan",
+          "description" => "Submit the execution plan.",
+          "inputSchema" => %{"type" => "object"}
+        }
+      ]
+
+      assert {:ok, session} =
+               AppServer.start_session(workspace, dynamic_tools: dynamic_tools)
+
+      assert {:ok, _result} =
+               AppServer.run_turn(session, "Plan", issue,
+                 sandbox_policy: %{"type" => "readOnly"},
+                 approval_policy: %{"type" => "reject"},
+                 auto_approve_requests: false,
+                 effort: "medium"
+               )
+
+      :ok = AppServer.stop_session(session)
+
+      requests =
+        trace_file
+        |> File.read!()
+        |> String.split("\n", trim: true)
+        |> Enum.map(&String.trim_leading(&1, "JSON:"))
+        |> Enum.map(&Jason.decode!/1)
+
+      assert start = Enum.find(requests, &(&1["method"] == "thread/start"))
+      assert start["params"]["dynamicTools"] == dynamic_tools
+
+      assert turn = Enum.find(requests, &(&1["method"] == "turn/start"))
+      assert turn["params"]["sandboxPolicy"] == %{"type" => "readOnly"}
+      assert turn["params"]["approvalPolicy"] == %{"type" => "reject"}
+      assert turn["params"]["effort"] == "medium"
+    after
+      File.rm_rf(test_root)
+    end
+  end
+
   test "app server marks request-for-input events as a hard failure" do
     test_root =
       Path.join(

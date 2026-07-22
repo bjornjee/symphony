@@ -609,7 +609,7 @@ defmodule SymphonyElixir.LiveE2ETest do
         project["id"],
         active_state["id"],
         "Symphony live e2e #{context.backend} issue for #{project["name"]}",
-        if(context.pilot?, do: live_pilot_description(), else: valid_description())
+        live_agent_description(project["slugId"])
       )
 
     write_live_workflow!(context, team, handoff_state, project)
@@ -650,6 +650,13 @@ defmodule SymphonyElixir.LiveE2ETest do
   defp verify_live_agent_flow!(context, issue, project, completed_project_status) do
     {runtime_info, pilot_context} = run_live_agent!(context.backend, issue)
 
+    ordering_events =
+      if pilot_context,
+        do: pilot_context.first_events,
+        else: read_audit_events!(runtime_info.audit_events_path)
+
+    assert_preactivation_order!(ordering_events)
+
     assert read_worker_result!(runtime_info, @result_file) ==
              expected_result(issue.identifier, project["slugId"])
 
@@ -683,10 +690,11 @@ defmodule SymphonyElixir.LiveE2ETest do
     assert issue_has_comment?(issue_snapshot, HandoffPublisher.render(issue, contract, evidence))
   end
 
-  defp pilot_after_create_hook(true),
-    do: "git init -q && git remote add origin git@github.com:bjornjee/symphony.git"
-
-  defp pilot_after_create_hook(false), do: nil
+  defp pilot_after_create_hook(_pilot?) do
+    "git init -q && git config user.email symphony-live@example.com && " <>
+      "git config user.name 'Symphony Live' && git commit --allow-empty -qm initial && " <>
+      "git remote add origin git@github.com:bjornjee/symphony.git"
+  end
 
   defp live_issue_prompt(true, project_slug) do
     live_pilot_prompt(project_slug, System.fetch_env!("SYMPHONY_LIVE_PULL_REQUEST_URL"))
@@ -723,9 +731,10 @@ defmodule SymphonyElixir.LiveE2ETest do
     end
   end
 
-  defp live_pilot_description do
+  defp live_agent_description(project_slug) do
     valid_description(%{
-      "Goal" => "Prove the bounded PIN-18 operational handoff with a disposable Linear issue.",
+      "Goal" => "Create LIVE_E2E_RESULT.txt with the exact two-line result specified in Context.",
+      "Context" => "Write exactly `identifier=<current Linear identifier>` followed by `project=#{project_slug}` on the next line.",
       "Scope" => "In:\n- LIVE_E2E_RESULT.txt\n\nOut:\n- repository source changes",
       "Acceptance Criteria" =>
         "- [ ] LIVE_E2E_RESULT.txt exists in the prepared workspace.\n" <>
@@ -733,6 +742,25 @@ defmodule SymphonyElixir.LiveE2ETest do
       "Verification" => "Run:\n`cat LIVE_E2E_RESULT.txt`",
       "Risk" => "low"
     })
+  end
+
+  defp assert_preactivation_order!(events) do
+    ordered = [
+      "execution_plan_candidate_persisted",
+      "execution_plan_review_persisted",
+      "execution_plan_approved",
+      "codex_goal_set",
+      "codex_turn_started"
+    ]
+
+    indexes =
+      Enum.map(ordered, fn event ->
+        Enum.find_index(events, &(&1["event"] == event)) ||
+          flunk("missing live preactivation event #{event}")
+      end)
+
+    assert indexes == Enum.sort(indexes)
+    assert length(indexes) == length(Enum.uniq(indexes))
   end
 
   defp run_live_agent!(:local, issue) do

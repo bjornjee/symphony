@@ -9,11 +9,17 @@ defmodule SymphonyElixir.AgentRunner do
   alias SymphonyElixir.CompletionEvidence
   alias SymphonyElixir.Config
   alias SymphonyElixir.ExecutionManifest
+  alias SymphonyElixir.ExecutionPlanProgress
   alias SymphonyElixir.HandoffPublisher
   alias SymphonyElixir.Linear.{Issue, TaskContract}
+  alias SymphonyElixir.PlanningArtifact
+  alias SymphonyElixir.PlanningLifecycle
   alias SymphonyElixir.PromptBuilder
+  alias SymphonyElixir.RepositoryFingerprint
   alias SymphonyElixir.RunAudit
+  alias SymphonyElixir.TaskBranch
   alias SymphonyElixir.Tracker
+  alias SymphonyElixir.WorkflowProfile
   alias SymphonyElixir.Workspace
 
   @type worker_host :: String.t() | nil
@@ -69,31 +75,37 @@ defmodule SymphonyElixir.AgentRunner do
 
   @spec run(Issue.t(), pid() | nil, keyword()) :: :ok | no_return()
   def run(issue, codex_update_recipient \\ nil, opts \\ []) do
-    case task_contract_for_issue(issue, opts) do
-      {:ok, task_contract} ->
-        opts = Keyword.put(opts, :task_contract, task_contract)
-        # The orchestrator owns host retries so one worker lifetime never hops machines.
-        worker_host = selected_worker_host(Keyword.get(opts, :worker_host), Config.settings!().worker.ssh_hosts)
+    with {:ok, task_contract} <- task_contract_for_issue(issue, opts),
+         {:ok, workflow_profile} <- WorkflowProfile.select(task_contract) do
+      opts =
+        opts
+        |> Keyword.put(:task_contract, task_contract)
+        |> Keyword.put(:workflow_profile, workflow_profile)
 
-        Logger.info("Starting agent run for #{issue_context(issue)} worker_host=#{worker_host_for_log(worker_host)} plan_digest=#{task_contract.digest}")
+      # The orchestrator owns host retries so one worker lifetime never hops machines.
+      worker_host = selected_worker_host(Keyword.get(opts, :worker_host), Config.settings!().worker.ssh_hosts)
 
-        case run_on_worker_host(issue, codex_update_recipient, opts, worker_host) do
-          :ok ->
-            :ok
+      Logger.info(
+        "Starting agent run for #{issue_context(issue)} worker_host=#{worker_host_for_log(worker_host)} contract_digest=#{task_contract.digest} workflow=#{workflow_profile.name} workflow_digest=#{workflow_profile.digest}"
+      )
 
-          {:error, reason} ->
-            Logger.error("Agent run failed for #{issue_context(issue)}: #{inspect(reason)}")
-            raise RuntimeError, "Agent run failed for #{issue_context(issue)}: #{inspect(reason)}"
-        end
+      case run_on_worker_host(issue, codex_update_recipient, opts, worker_host) do
+        :ok ->
+          :ok
 
+        {:error, reason} ->
+          Logger.error("Agent run failed for #{issue_context(issue)}: #{inspect(reason)}")
+          raise RuntimeError, "Agent run failed for #{issue_context(issue)}: #{inspect(reason)}"
+      end
+    else
       {:error, errors} when is_list(errors) ->
         message = Enum.join(errors, "; ")
         Logger.warning("Task contract invalid for #{issue_context(issue)}: #{message}")
         raise RuntimeError, "Task contract invalid for #{issue_context(issue)}: #{message}"
 
       {:error, reason} ->
-        Logger.warning("Task contract rejected for #{issue_context(issue)}: #{inspect(reason)}")
-        raise RuntimeError, "Task contract rejected for #{issue_context(issue)}: #{inspect(reason)}"
+        Logger.warning("Task contract or workflow rejected for #{issue_context(issue)}: #{inspect(reason)}")
+        raise RuntimeError, "Task contract or workflow rejected for #{issue_context(issue)}: #{inspect(reason)}"
     end
   end
 
@@ -165,19 +177,31 @@ defmodule SymphonyElixir.AgentRunner do
   defp normalize_run_result({:ok, _completion_info}), do: :ok
   defp normalize_run_result({:error, _reason} = error), do: error
 
-  defp codex_message_handler(recipient, issue, workspace, proof_ledger) do
+  defp codex_message_handler(recipient, issue, workspace, proof_ledger, plan_progress, worker_host) do
     fn message ->
       case RunAudit.append_codex_update(workspace, issue, message) do
-        {:ok, %{event_id: event_id, exit_code: exit_code}} ->
-          record_observed_proof(proof_ledger, event_id, exit_code)
+        {:ok, %{event_id: event_id} = proof} ->
+          record_observed_proof(proof_ledger, event_id, proof, workspace, worker_host)
 
         {:ok, nil} ->
           :ok
       end
 
+      record_native_plan_progress(plan_progress, message)
+
       send_codex_update(recipient, issue, message)
     end
   end
+
+  defp record_native_plan_progress(
+         plan_progress,
+         %{payload: %{"method" => "turn/plan/updated", "params" => params}}
+       ) do
+    plan = params["plan"] || params["steps"] || params["items"]
+    if is_list(plan), do: Agent.update(plan_progress, fn _previous -> plan end), else: :ok
+  end
+
+  defp record_native_plan_progress(_plan_progress, _message), do: :ok
 
   defp send_codex_update(recipient, %Issue{id: issue_id}, message)
        when is_binary(issue_id) and is_pid(recipient) do
@@ -219,11 +243,13 @@ defmodule SymphonyElixir.AgentRunner do
     task_contract = Keyword.fetch!(opts, :task_contract)
 
     {:ok, proof_ledger} = Agent.start_link(fn -> %{} end)
+    {:ok, plan_progress} = Agent.start_link(fn -> nil end)
 
     runtime = %{
       issue_state_fetcher: issue_state_fetcher,
       opts: opts,
       proof_ledger: proof_ledger,
+      plan_progress: plan_progress,
       worker_host: worker_host
     }
 
@@ -241,15 +267,73 @@ defmodule SymphonyElixir.AgentRunner do
           try do
             runtime = Map.put(runtime, :thread_id, session.thread_id)
 
-            with {:ok, _thread_id} <-
-                   ThreadIdentity.pin(workspace, session.thread_id, worker_host),
-                 :ok <- AppServer.set_goal(session, goal_objective(issue)) do
-              RunAudit.append(workspace, issue, :codex_goal_set, %{
-                phase: "codex_goal",
+            planning_opts =
+              runtime.opts
+              |> Keyword.put(:worker_host, worker_host)
+              |> Keyword.put(
+                :on_message,
+                codex_message_handler(
+                  codex_update_recipient,
+                  issue,
+                  workspace,
+                  runtime.proof_ledger,
+                  runtime.plan_progress,
+                  worker_host
+                )
+              )
+              |> Keyword.put(:lifecycle_event, fn event, attrs ->
+                RunAudit.append(workspace, issue, event, attrs)
+
+                send_codex_update(codex_update_recipient, issue, %{
+                  event: :workflow_phase,
+                  timestamp: DateTime.utc_now(),
+                  phase: attrs[:phase],
+                  status: attrs[:status],
+                  revision: attrs[:revision],
+                  verdict: attrs[:verdict]
+                })
+              end)
+
+            planning_runner =
+              Keyword.get(runtime.opts, :planning_lifecycle_runner, &PlanningLifecycle.run/6)
+
+            task_branch_ensurer =
+              Keyword.get(runtime.opts, :task_branch_ensurer, &TaskBranch.ensure/5)
+
+            with {:ok, _thread_id} <- ThreadIdentity.pin(workspace, session.thread_id, worker_host),
+                 {:ok, execution_plan} <-
+                   planning_runner.(
+                     session,
+                     workspace,
+                     issue,
+                     task_contract,
+                     Keyword.fetch!(runtime.opts, :workflow_profile),
+                     planning_opts
+                   ),
+                 :ok <- record_execution_plan_approved(workspace, issue, session, execution_plan),
+                 :ok <- set_goal_and_record(workspace, issue, session, task_contract, execution_plan),
+                 {:ok, task_branch} <-
+                   task_branch_ensurer.(
+                     workspace,
+                     issue,
+                     execution_plan["workflow"],
+                     get_in(execution_plan, ["candidate", "repository", "base_sha"]),
+                     worker_host
+                   ) do
+              RunAudit.append(workspace, issue, :task_branch_ready, %{
+                phase: "implementation",
                 status: "completed",
-                goal_status: "active",
-                thread_id: session.thread_id
+                branch: task_branch,
+                base_sha: get_in(execution_plan, ["candidate", "repository", "base_sha"])
               })
+
+              Agent.update(runtime.proof_ledger, fn _planning_proofs -> %{} end)
+              Agent.update(runtime.plan_progress, fn _planning_plan -> nil end)
+
+              runtime = %{
+                runtime
+                | opts: Keyword.put(runtime.opts, :execution_plan, execution_plan)
+              }
 
               result =
                 do_run_codex_turns(
@@ -285,16 +369,51 @@ defmodule SymphonyElixir.AgentRunner do
       end
     after
       Agent.stop(proof_ledger)
+      Agent.stop(plan_progress)
+    end
+  end
+
+  defp record_execution_plan_approved(workspace, issue, session, execution_plan) do
+    RunAudit.append(workspace, issue, :execution_plan_approved, %{
+      phase: "planning",
+      status: "completed",
+      plan_digest: execution_plan["plan_digest"],
+      workflow: execution_plan["workflow"],
+      profile_digest: execution_plan["profile_digest"],
+      thread_id: session.thread_id
+    })
+
+    :ok
+  end
+
+  defp set_goal_and_record(workspace, issue, session, task_contract, execution_plan) do
+    with :ok <- AppServer.set_goal(session, goal_objective(issue, task_contract, execution_plan)) do
+      RunAudit.append(workspace, issue, :codex_goal_set, %{
+        phase: "codex_goal",
+        status: "completed",
+        goal_status: "active",
+        plan_digest: execution_plan["plan_digest"],
+        thread_id: session.thread_id
+      })
+
+      :ok
     end
   end
 
   defp start_codex_session(workspace, worker_host) do
     case ThreadIdentity.read(workspace, worker_host) do
       :missing ->
-        AppServer.start_session(workspace, worker_host: worker_host)
+        AppServer.start_session(workspace,
+          worker_host: worker_host,
+          dynamic_tools: PlanningArtifact.candidate_tool_specs()
+        )
 
       {:ok, thread_id} ->
-        AppServer.start_session(workspace, worker_host: worker_host, thread_id: thread_id)
+        AppServer.start_session(workspace,
+          worker_host: worker_host,
+          thread_id: thread_id,
+          dynamic_tools: PlanningArtifact.candidate_tool_specs()
+        )
 
       {:error, _reason} = error ->
         error
@@ -353,7 +472,15 @@ defmodule SymphonyElixir.AgentRunner do
            app_session,
            prompt,
            issue,
-           on_message: codex_message_handler(codex_update_recipient, issue, workspace, runtime.proof_ledger)
+           on_message:
+             codex_message_handler(
+               codex_update_recipient,
+               issue,
+               workspace,
+               runtime.proof_ledger,
+               runtime.plan_progress,
+               runtime.worker_host
+             )
          ) do
       {:ok, turn_session} ->
         Logger.info("Completed agent run for #{issue_context(issue)} session_id=#{turn_session[:session_id]} workspace=#{workspace} turn=#{turn_number}/#{max_turns}")
@@ -477,7 +604,8 @@ defmodule SymphonyElixir.AgentRunner do
     {:error, reason}
   end
 
-  defp build_turn_prompt(issue, opts, 1, _max_turns), do: PromptBuilder.build_prompt(issue, opts)
+  defp build_turn_prompt(issue, opts, 1, _max_turns),
+    do: PromptBuilder.build_execution_prompt(issue, opts)
 
   defp build_turn_prompt(_issue, _opts, turn_number, max_turns) do
     """
@@ -486,6 +614,7 @@ defmodule SymphonyElixir.AgentRunner do
     - The previous Codex turn completed normally, but the Linear issue is still in an active state.
     - This is continuation turn ##{turn_number} of #{max_turns} for the current agent run.
     - Resume from the current workspace and workpad state instead of restarting from scratch.
+    - Inspect the native plan and resume the earliest incomplete approved phase. Do not add, remove, rename, reorder, or skip phases.
     - The original task instructions and prior turn context are already present in this thread, so do not restate them before acting.
     - First check whether the implementation is already complete but `.symphony/completion-evidence.json` is missing or stale; if so, refresh that artifact before doing more implementation.
     - If a PR, commit, or proof result already exists, verify only the missing handoff facts instead of rerunning broad setup, research, or full test gates.
@@ -496,17 +625,17 @@ defmodule SymphonyElixir.AgentRunner do
     """
   end
 
-  defp goal_objective(issue) do
+  defp goal_objective(issue, task_contract, execution_plan) do
     issue
-    |> raw_goal_objective()
+    |> raw_goal_objective(task_contract, execution_plan)
     |> String.slice(0, 4_000)
   end
 
-  defp raw_goal_objective(%Issue{identifier: identifier, title: title}) do
+  defp raw_goal_objective(%Issue{identifier: identifier}, task_contract, execution_plan) do
     """
-    Complete Linear #{identifier}: #{title}.
-
-    Use Symphony's prepared workspace, worktree, env setup, issue prompt, and local workpad as the task packet. Preserve agent-dashboard conventions for scoped planning, verification profile selection, implementation proof, commit, PR creation, and one semantic Linear handoff. Do not stop while the issue remains actionable; either deliver a PR-backed handoff or record one real external blocker/question for human review.
+    Deliver Linear #{identifier} under contract #{task_contract.digest} and workflow
+    #{execution_plan["profile_digest"]} using approved execution plan #{execution_plan["plan_digest"]}. Preserve scope
+    and produce Symphony-validated proof and PR handoff.
     """
     |> String.trim()
   end
@@ -576,18 +705,59 @@ defmodule SymphonyElixir.AgentRunner do
 
   defp finish_handoff(workspace, issue, refreshed_issue, task_contract, runtime, turn_number) do
     opts =
-      [worker_host: runtime.worker_host, thread_id: Map.get(runtime, :thread_id)] ++
+      [
+        worker_host: runtime.worker_host,
+        thread_id: Map.get(runtime, :thread_id),
+        execution_plan: Keyword.get(runtime.opts, :execution_plan)
+      ] ++
         Keyword.take(runtime.opts, [:completion_evidence_validator, :handoff_publisher, :handoff_state])
 
-    handoff_after_turn(
-      workspace,
-      issue,
-      refreshed_issue,
-      task_contract,
-      Agent.get(runtime.proof_ledger, & &1),
-      opts,
-      turn_number
-    )
+    execution_plan = Keyword.get(runtime.opts, :execution_plan)
+    native_plan = Agent.get(runtime.plan_progress, & &1)
+
+    case validate_execution_progress(execution_plan, native_plan) do
+      :ok ->
+        handoff_after_turn(
+          workspace,
+          issue,
+          refreshed_issue,
+          task_contract,
+          Agent.get(runtime.proof_ledger, & &1),
+          opts,
+          turn_number
+        )
+
+      {:error, reason} ->
+        handle_execution_progress_pending(
+          workspace,
+          issue,
+          refreshed_issue,
+          reason,
+          turn_number
+        )
+    end
+  end
+
+  defp validate_execution_progress(
+         %{"candidate" => %{"ordered_steps" => [_phase | _]}} = execution_plan,
+         native_plan
+       ) do
+    ExecutionPlanProgress.validate(execution_plan, native_plan)
+  end
+
+  defp validate_execution_progress(_execution_plan, _native_plan), do: :ok
+
+  defp handle_execution_progress_pending(workspace, issue, refreshed_issue, reason, turn_number) do
+    RunAudit.append(workspace, issue, :execution_plan_progress_pending, %{
+      phase: "implementation",
+      status: "pending",
+      reason: reason,
+      turn_number: turn_number
+    })
+
+    if active_issue_state?(refreshed_issue.state) and issue_routable?(refreshed_issue),
+      do: {:continue, refreshed_issue},
+      else: {:error, {:execution_plan_progress_invalid, reason}}
   end
 
   defp handoff_after_turn(workspace, issue, refreshed_issue, task_contract, proofs, opts, turn_number) do
@@ -794,10 +964,21 @@ defmodule SymphonyElixir.AgentRunner do
      })}
   end
 
-  defp record_observed_proof(proof_ledger, event_id, exit_code) do
+  defp record_observed_proof(proof_ledger, event_id, proof, workspace, worker_host) do
+    head_sha =
+      case RepositoryFingerprint.head(workspace, worker_host) do
+        {:ok, sha} -> sha
+        {:error, _reason} -> nil
+      end
+
     Agent.update(proof_ledger, fn proofs ->
       if map_size(proofs) < 256 do
-        Map.put(proofs, event_id, %{exit_code: exit_code})
+        Map.put(proofs, event_id, %{
+          exit_code: proof.exit_code,
+          command: proof.command,
+          sequence: map_size(proofs) + 1,
+          head_sha: head_sha
+        })
       else
         Map.put(proofs, "__proof_limit_exceeded__", %{exit_code: -1})
       end

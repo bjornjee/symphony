@@ -42,9 +42,8 @@ Description:
 No description provided.
 {% endif %}
 
-This is an unattended Symphony session. Symphony schedules the run, sets a
-Codex app-server thread goal for the Linear issue, and owns callbacks.
-The agent-dashboard plugin provides quality conventions inside Codex.
+This is an unattended Symphony session. Symphony owns preactivation planning,
+automated review, goal activation, workflow profiles, and tracker callbacks.
 
 ## Codex Agent Task v1
 
@@ -68,22 +67,17 @@ one focused proof command, decompose before implementation.
 
 ## Agent execution conventions
 
-Symphony owns scheduling, app-server goal setup, and Linear callbacks. The
-selected `agent-dashboard:*` workflow owns how you work inside the repository
-when it is compatible with unattended execution.
+Symphony owns scheduling, app-server goal setup, workflow selection, and
+Linear callbacks. Follow the trusted Symphony workflow profile appended to
+the execution prompt.
 
 You must:
 
-- select the smallest matching `agent-dashboard` workflow before editing
-- follow that workflow's branch, worktree, environment setup, proof, commit,
-  PR, and cleanup gates exactly when the workflow is unattended-compatible
-- for `agent-dashboard:feature`, preserve the worktree, env, planning,
-  verification, commit, PR, and handoff conventions without invoking the
-  interactive `$agent-dashboard:feature` skill gate
-- use isolated git worktrees for `feature`, `fix`, and `refactor` work
-- copy and validate `.env*` files when the selected workflow's worktree setup
-  requires it
-- run environment setup through the selected workflow's sentinel rules
+- execute only the approved plan sealed before goal activation
+- reuse Symphony's prepared issue workspace; never create a nested worktree
+- create or resume one task branch from the pinned base before source edits
+- follow the selected profile's proof, review, commit, PR, and handoff gates
+- update the native plan statuses as implementation progresses
 - avoid replacing workflow gates with ad hoc prompt reasoning
 
 If the required workflow setup cannot be completed, stop and post one
@@ -99,7 +93,7 @@ planning, progress, or raw proof comments to Linear.
 The local workpad should include:
 
 - context packet: ticket driver, target repo, links, affected paths, expected outcome
-- selected agent-dashboard workflow and reason
+- selected Symphony workflow profile and digest
 - execution context and scale shape
 - in-scope and out-of-scope boundaries
 - verification profile and proof command
@@ -143,23 +137,15 @@ or the full audit into Linear.
 
 ## Workflow selection
 
-Choose the smallest matching agent-dashboard workflow from issue content:
+Symphony selects exactly one built-in profile before workspace execution:
 
-- bug, regression, broken behavior: `agent-dashboard:fix`
-- new user-visible behavior: `agent-dashboard:feature`
-- docs, config, dependency, generated metadata, or mechanical change: `agent-dashboard:chore`
-- behavior-preserving structure change: `agent-dashboard:refactor`
-- PR finalization or release handoff: `agent-dashboard:pr`
+- exact `Workflow: feature|fix|refactor|chore|pr` in `Notes For Agent`
+- otherwise a conventional title prefix (`feat`, `fix`, `refactor`, `chore`,
+  `docs`, `ci`, `build`, or `pr`)
+- otherwise fail closed as ambiguous
 
-If the issue explicitly names an unattended-compatible
-`agent-dashboard:<workflow>`, Symphony may prepend the corresponding
-`$agent-dashboard:<workflow>` invocation before this prompt reaches Codex.
-Treat that as the selected plugin workflow.
-
-If the issue explicitly names `agent-dashboard:feature`, Symphony sets a real
-Codex app-server thread goal and injects a Symphony-compatible feature
-contract instead of invoking `$agent-dashboard:feature`, because that skill
-requires interactive Codex Plan Mode.
+The selected profile is versioned and digest-bound to the candidate, review,
+approved execution plan, goal, and completion evidence.
 
 Record the selected workflow and reason in the local workpad, not Linear.
 

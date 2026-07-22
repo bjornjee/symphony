@@ -247,7 +247,21 @@ canonical `text` pairs. Criterion IDs are content-derived and independent of che
 Duplicate criterion text is invalid. Older pinned manifests without this additive field remain
 readable; the current task contract is the validation authority.
 
-#### 4.1.5.2 Completion Evidence
+#### 4.1.5.2 Preactivation Planning Artifacts
+
+Symphony persists at most three immutable `.symphony/plan-candidate-N.json` files and three matching
+`.symphony/plan-review-N.json` files. Each candidate binds the issue contract, trusted workflow
+profile, canonical primary thread, bounded scope and scale, exact proof commands, rollback,
+repository origin, base SHA, and preactivation repository digest. Its ordered native-plan steps are
+typed execution phases with stable ids, prior-phase dependencies, affected paths, verification
+profiles, phase proof commands, invariants, stop conditions, and evidence requirements. Each review
+binds its verdict and findings to the exact candidate and profile digests.
+
+An approved pair is sealed create-only as `.symphony/execution-plan.json`. Its semantic digest is
+immutable and becomes part of the later Codex goal and completion evidence. State is inferred from
+these immutable artifacts; there is no mutable workflow-state file.
+
+#### 4.1.5.3 Completion Evidence
 
 Agent-owned JSON document stored at `.symphony/completion-evidence.json` in one issue workspace.
 The agent writes a temporary sibling and atomically renames it into place after proof commands and
@@ -256,15 +270,20 @@ idempotent.
 
 Fields:
 
-- `schema_version` (`1`)
+- `schema_version` (`2`)
 - `issue_id`
 - `issue_identifier`
 - `plan_digest`
+- `execution_plan_digest`
+- `workflow` and `profile_digest`
 - `criteria`, with exactly one entry per pinned acceptance criterion:
   - `criterion_id`
   - `proof.kind` (`run_audit_command`)
   - `proof.event_id`
 - `pull_request_url`
+- `pr_head_sha` and `repository_head_sha`
+- `workflow_proof`, containing workflow-specific RED/GREEN, baseline/final, validator, or Surgical
+  review evidence
 
 Symphony owns validation. A proof event ID MUST identify a successful command completion observed
 by the engine during the current run and retained in its bounded in-memory ledger. Workspace prose,
@@ -275,8 +294,8 @@ repository origin, plus one repository-host lookup that MUST resolve the canonic
 
 Explicit rejection classes include missing or oversized artifacts, malformed or unsupported
 schema, issue or digest mismatch, missing/unmatched/duplicate criteria, malformed/unobserved/failed
-proof, proof-ledger overflow, missing/invalid/unavailable PR URL, repository mismatch, and unavailable
-origin.
+proof, stale proof head, missing workflow gates, proof-ledger overflow, missing/invalid/unavailable
+PR URL, PR/local head mismatch, repository mismatch, and unavailable origin.
 
 After validation, Symphony derives a deterministic SHA-256 key from the issue ID, pinned plan
 digest, and validated semantic completion-artifact digest (criterion set plus PR URL). Current-run
@@ -1220,16 +1239,32 @@ The `Agent Runner` wraps workspace + prompt + app-server client.
 Behavior:
 
 1. Revalidate the task contract without trusting caller-supplied metadata.
-2. Create/reuse workspace for issue.
-3. Atomically create or validate the execution manifest.
-4. Read the workspace's canonical Codex thread identity, if present.
-5. Start app-server and either create the first thread or resume the exact canonical thread.
-6. Persist a newly created thread identity with an atomic create-only write before any turn.
-7. Set the app-server thread goal for the issue to `active`.
-8. Start the first turn and forward app-server events to orchestrator.
-9. Before each continuation turn, refresh the issue and require the same plan digest.
-10. Map the final attempt outcome to `active`, `blocked`, or `complete` and update the goal.
-11. On any error, fail the worker attempt (the orchestrator will retry).
+2. Deterministically select and hash one trusted `feature`, `fix`, `refactor`, `chore`, or `pr`
+   workflow profile; reject missing, unknown, or ambiguous selection before workspace execution.
+3. Create/reuse the issue workspace and atomically create or validate the execution manifest.
+4. Start or resume the exact canonical primary Codex thread and persist its identity create-only.
+5. Without setting a goal, run a read-only planning turn on that thread. Deny approval requests,
+   require at least one `turn/plan/updated`, accept exactly one structured candidate, reject file
+   changes, and compare bounded pre/post repository fingerprints.
+6. Run an isolated read-only reviewer thread with `effort: medium` and only the review submission
+   tool. Persist its exact candidate-bound verdict.
+7. For `revise`, resume the primary thread with blocking findings. Permit two revisions; a third
+   rejection publishes one deterministic read-back-verified `## Agent Blocked` comment and moves the
+   issue to Human Review.
+8. Before approval, refresh the Linear contract and revalidate the workflow, thread, candidate,
+   review, and repository digests. Seal `.symphony/execution-plan.json` create-only.
+9. Set the app-server goal to `active`, binding contract, profile, and execution-plan digests. Goal
+   setup is idempotently replayed after a restart.
+10. Create or resume one task branch from the pinned base SHA, then resume the same primary thread
+    with write-capable implementation policy and the approved plan as authority.
+11. Preserve the approved native-plan phase identity and order, keep at most one phase in progress,
+    and complete each phase only after its proof and evidence gate. Handoff is pending until the
+    engine-observed final native plan exactly matches the approved phases and marks all completed.
+12. Run workflow-specific proof, create the PR, and validate completion evidence against the final
+    local and PR head SHA.
+13. Before each continuation turn, refresh the issue and require the same contract digest.
+14. Map the final attempt outcome to `active`, `blocked`, or `complete` and update the goal.
+15. On any error, fail the worker attempt (the orchestrator will retry).
 
 Note:
 

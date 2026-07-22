@@ -48,6 +48,7 @@ defmodule SymphonyElixir.AgentRunnerThreadResumeTest do
             ;;
           *'"method":"turn/start"'*)
             printf '%s\n' '{"id":3,"result":{"turn":{"id":"turn-retry"}}}'
+            printf '%s\n' '{"method":"turn/plan/updated","params":{"plan":[{"step":"Implement and prove the task","status":"completed"}]}}'
             printf '%s\n' '{"method":"item/completed","params":{"item":{"type":"commandExecution","command":"mise exec -- make all","exitCode":0}}}'
             printf '%s\n' '{"method":"turn/completed"}'
             ;;
@@ -77,15 +78,29 @@ defmodule SymphonyElixir.AgentRunnerThreadResumeTest do
       assert {:ok, contract} = TaskContract.from_issue(issue)
       pull_request_url = "https://github.com/bjornjee/symphony/pull/15"
 
-      evidence_validator = fn workspace, evidence_issue, evidence_contract, proofs, _opts ->
+      evidence_validator = fn workspace, evidence_issue, evidence_contract, proofs, opts ->
         [{proof_event_id, %{exit_code: 0}}] = Map.to_list(proofs)
+        head_sha = String.duplicate("a", 40)
+
+        proofs =
+          Map.new(proofs, fn {event_id, proof} ->
+            {event_id, proof |> Map.put(:head_sha, head_sha) |> Map.put(:sequence, 1)}
+          end)
+
+        execution_plan = Keyword.fetch!(opts, :execution_plan)
 
         payload = %{
-          "schema_version" => 1,
+          "schema_version" => 2,
           "issue_id" => evidence_issue.id,
           "issue_identifier" => evidence_issue.identifier,
           "plan_digest" => evidence_contract.digest,
+          "execution_plan_digest" => execution_plan["plan_digest"],
+          "workflow" => execution_plan["workflow"],
+          "profile_digest" => execution_plan["profile_digest"],
           "pull_request_url" => pull_request_url,
+          "pr_head_sha" => head_sha,
+          "repository_head_sha" => head_sha,
+          "workflow_proof" => %{"final_proof_event_id" => proof_event_id},
           "criteria" =>
             Enum.map(evidence_contract.acceptance_criteria, fn criterion ->
               %{
@@ -100,7 +115,11 @@ defmodule SymphonyElixir.AgentRunnerThreadResumeTest do
 
         CompletionEvidence.validate(workspace, evidence_issue, evidence_contract, proofs,
           origin_url: "git@github.com:bjornjee/symphony.git",
-          pull_request_verifier: fn url, _workspace, _worker_host -> {:ok, url} end
+          execution_plan: execution_plan,
+          repository_head_sha: head_sha,
+          pull_request_verifier: fn url, _workspace, _worker_host ->
+            {:ok, %{url: url, head_sha: head_sha}}
+          end
         )
       end
 
@@ -120,7 +139,9 @@ defmodule SymphonyElixir.AgentRunnerThreadResumeTest do
       run_opts = [
         issue_state_fetcher: issue_state_fetcher,
         completion_evidence_validator: evidence_validator,
-        handoff_publisher: publisher
+        handoff_publisher: publisher,
+        planning_lifecycle_runner: &approve_execution_plan_with_phase/6,
+        task_branch_ensurer: &accept_task_branch/5
       ]
 
       assert :ok = AgentRunner.run(issue, nil, run_opts)
@@ -160,5 +181,39 @@ defmodule SymphonyElixir.AgentRunnerThreadResumeTest do
     after
       File.rm_rf(test_root)
     end
+  end
+
+  defp approve_execution_plan_with_phase(session, workspace, issue, contract, profile, opts) do
+    {:ok, execution_plan} =
+      SymphonyElixir.TestSupport.approve_execution_plan(
+        session,
+        workspace,
+        issue,
+        contract,
+        profile,
+        opts
+      )
+
+    ordered_steps = [
+      %{
+        "id" => "implement",
+        "step" => "Implement and prove the task",
+        "status" => "in_progress",
+        "affected_paths" => ["README.md"],
+        "depends_on" => [],
+        "verification_profile" => "Targeted",
+        "proof_commands" => ["mise exec -- make all"],
+        "invariants" => ["the approved task remains bounded"],
+        "stop_conditions" => ["stop if the task contract changes"],
+        "evidence_requirements" => ["final proof event"]
+      }
+    ]
+
+    semantic =
+      execution_plan
+      |> Map.delete("plan_digest")
+      |> put_in(["candidate", "ordered_steps"], ordered_steps)
+
+    {:ok, Map.put(semantic, "plan_digest", SymphonyElixir.PlanningArtifact.digest(semantic))}
   end
 end

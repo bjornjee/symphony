@@ -3,7 +3,7 @@ defmodule SymphonyElixir.Codex.ThreadIdentity do
   Owns the immutable Codex thread identity for one issue workspace.
   """
 
-  alias SymphonyElixir.SSH
+  alias SymphonyElixir.WorkspaceArtifact
 
   @schema_version 1
   @artifact_dir ".symphony"
@@ -21,45 +21,26 @@ defmodule SymphonyElixir.Codex.ThreadIdentity do
 
   @spec read(Path.t(), String.t() | nil) :: :missing | {:ok, String.t()} | {:error, term()}
   def read(workspace, nil) when is_binary(workspace) do
-    artifact_path = path(workspace)
-
-    case File.stat(artifact_path) do
-      {:ok, %{size: size}} when size <= @max_artifact_bytes ->
-        case File.read(artifact_path) do
-          {:ok, payload} -> decode(payload)
-          {:error, reason} -> {:error, {:thread_identity_read_failed, reason}}
-        end
-
-      {:ok, %{size: size}} ->
-        {:error, {:thread_identity_too_large, size}}
-
-      {:error, :enoent} ->
-        :missing
-
-      {:error, reason} ->
-        {:error, {:thread_identity_read_failed, reason}}
+    case WorkspaceArtifact.read(path(workspace), @max_artifact_bytes) do
+      {:ok, payload} -> decode(payload)
+      :missing -> :missing
+      {:error, {:artifact_too_large, max_bytes}} -> {:error, {:thread_identity_too_large, max_bytes + 1}}
+      {:error, reason} -> {:error, {:thread_identity_read_failed, reason}}
     end
   end
 
   def read(workspace, worker_host) when is_binary(workspace) and is_binary(worker_host) do
-    command =
-      "identity=#{shell_escape(path(workspace))}; " <>
-        "if [ ! -f \"$identity\" ]; then exit 44; fi; " <>
-        "size=$(wc -c < \"$identity\"); " <>
-        ~s|if [ "$size" -gt #{@max_artifact_bytes} ]; then printf '%s' "$size"; exit 46; fi; | <>
-        "cat \"$identity\""
-
-    case SSH.run(worker_host, command, stderr_to_stdout: true) do
-      {:ok, {payload, 0}} ->
+    case WorkspaceArtifact.read(path(workspace), @max_artifact_bytes, worker_host) do
+      {:ok, payload} ->
         decode(payload)
 
-      {:ok, {_output, 44}} ->
+      :missing ->
         :missing
 
-      {:ok, {output, 46}} ->
-        {:error, {:thread_identity_too_large, String.trim(output)}}
+      {:error, {:artifact_too_large, max_bytes}} ->
+        {:error, {:thread_identity_too_large, Integer.to_string(max_bytes + 1)}}
 
-      {:ok, {output, status}} ->
+      {:error, {:remote_command_failed, status, output}} ->
         {:error, {:thread_identity_read_failed, worker_host, status, output}}
 
       {:error, reason} ->
@@ -137,54 +118,22 @@ defmodule SymphonyElixir.Codex.ThreadIdentity do
   end
 
   defp write_exclusive(workspace, payload, nil) do
-    artifact_path = path(workspace)
-    artifact_dir = Path.dirname(artifact_path)
-    temp_path = artifact_path <> ".tmp-#{System.unique_integer([:positive, :monotonic])}"
-
-    result =
-      with :ok <- File.mkdir_p(artifact_dir),
-           :ok <- File.write(temp_path, payload, [:write, :exclusive]),
-           :ok <- File.chmod(temp_path, 0o600) do
-        case File.ln(temp_path, artifact_path) do
-          :ok -> :ok
-          {:error, :eexist} -> :exists
-          {:error, reason} -> {:error, {:thread_identity_write_failed, reason}}
-        end
-      else
-        {:error, reason} -> {:error, {:thread_identity_write_failed, reason}}
-      end
-
-    File.rm(temp_path)
-    result
-  end
-
-  defp write_exclusive(workspace, payload, worker_host) when is_binary(worker_host) do
-    artifact_path = path(workspace)
-    artifact_dir = Path.dirname(artifact_path)
-
-    command =
-      [
-        "set -eu",
-        "identity=#{shell_escape(artifact_path)}",
-        "identity_dir=#{shell_escape(artifact_dir)}",
-        "mkdir -p \"$identity_dir\"",
-        "tmp=\"$identity.tmp.$$\"",
-        "trap 'rm -f \"$tmp\"' EXIT",
-        "umask 077",
-        "printf '%s' #{shell_escape(payload)} > \"$tmp\"",
-        "if ln \"$tmp\" \"$identity\" 2>/dev/null; then exit 0; else exit 45; fi"
-      ]
-      |> Enum.join("\n")
-
-    case SSH.run(worker_host, command, stderr_to_stdout: true) do
-      {:ok, {_output, 0}} -> :ok
-      {:ok, {_output, 45}} -> :exists
-      {:ok, {output, status}} -> {:error, {:thread_identity_write_failed, worker_host, status, output}}
-      {:error, reason} -> {:error, {:thread_identity_write_failed, worker_host, reason}}
+    case WorkspaceArtifact.create_exclusive(path(workspace), payload) do
+      result when result in [:ok, :exists] -> result
+      {:error, reason} -> {:error, {:thread_identity_write_failed, reason}}
     end
   end
 
-  defp shell_escape(value) when is_binary(value) do
-    "'" <> String.replace(value, "'", "'\"'\"'") <> "'"
+  defp write_exclusive(workspace, payload, worker_host) when is_binary(worker_host) do
+    case WorkspaceArtifact.create_exclusive(path(workspace), payload, worker_host) do
+      result when result in [:ok, :exists] ->
+        result
+
+      {:error, {:remote_command_failed, status, output}} ->
+        {:error, {:thread_identity_write_failed, worker_host, status, output}}
+
+      {:error, reason} ->
+        {:error, {:thread_identity_write_failed, worker_host, reason}}
+    end
   end
 end

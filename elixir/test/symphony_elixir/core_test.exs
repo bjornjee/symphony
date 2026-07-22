@@ -160,7 +160,7 @@ defmodule SymphonyElixir.CoreTest do
     assert Config.workflow_prompt() == prompt
   end
 
-  test "agent-dashboard workflow is valid and documents the dispatch contract" do
+  test "root workflow is valid and documents native workflow routing" do
     previous_linear_api_key = System.get_env("LINEAR_API_KEY")
     original_workflow_path = Workflow.workflow_file_path()
 
@@ -189,7 +189,9 @@ defmodule SymphonyElixir.CoreTest do
     prompt = Config.workflow_prompt()
 
     assert prompt =~ "Codex Agent Task"
-    assert prompt =~ "agent-dashboard:feature"
+    assert prompt =~ "Workflow: feature|fix|refactor|chore|pr"
+    refute prompt =~ "$agent-dashboard"
+    refute prompt =~ "agent-dashboard plugin"
     assert prompt =~ "codex-decompose"
     assert prompt =~ "Human Review"
     assert prompt =~ "codex-ready"
@@ -1299,7 +1301,7 @@ defmodule SymphonyElixir.CoreTest do
     assert prompt =~ "attempt=3"
   end
 
-  test "prompt builder invokes requested agent-dashboard workflow from issue notes" do
+  test "prompt builder does not interpret unavailable plugin directives" do
     write_workflow_file!(Workflow.workflow_file_path(), prompt: "Ticket {{ issue.identifier }}")
 
     issue = %Issue{
@@ -1311,30 +1313,23 @@ defmodule SymphonyElixir.CoreTest do
       labels: ["docs"]
     }
 
-    assert PromptBuilder.build_prompt(issue) == "$agent-dashboard:chore\n\nTicket S-2"
+    assert PromptBuilder.build_prompt(issue) == "Ticket S-2"
   end
 
-  test "prompt builder converts feature workflow request to unattended feature contract" do
+  test "prompt builder appends the trusted Symphony workflow profile" do
     write_workflow_file!(Workflow.workflow_file_path(), prompt: "Ticket {{ issue.identifier }}")
 
-    issue = %Issue{
-      identifier: "S-4",
-      title: "Add cleanup callbacks",
-      description: "Notes For Agent:\nUse `agent-dashboard:feature`.",
-      state: "Todo",
-      url: "https://example.org/issues/S-4",
-      labels: ["feature"]
-    }
+    issue = TaskContractFixtures.issue(%{identifier: "S-4", title: "feat: add cleanup callbacks"})
+    assert {:ok, contract} = TaskContract.from_issue(issue)
+    assert {:ok, profile} = SymphonyElixir.WorkflowProfile.select(contract)
 
-    prompt = PromptBuilder.build_prompt(issue)
+    prompt = PromptBuilder.build_prompt(issue, workflow_profile: profile)
 
-    refute String.starts_with?(prompt, "$agent-dashboard:feature")
-    assert prompt =~ "Symphony selected `agent-dashboard:feature`"
-    assert prompt =~ "cannot enter Codex Plan Mode"
-    assert prompt =~ "create an isolated git worktree"
-    assert prompt =~ ".symphony/run-audit.md"
-    assert prompt =~ "smallest sufficient proof"
-    assert prompt =~ "open a PR"
+    refute prompt =~ "$agent-dashboard"
+    assert prompt =~ "Trusted Symphony workflow profile"
+    assert prompt =~ "name: `feature`"
+    assert prompt =~ profile.digest
+    assert prompt =~ "never create a nested worktree"
     assert prompt =~ "Ticket S-4"
   end
 
@@ -1544,19 +1539,54 @@ defmodule SymphonyElixir.CoreTest do
     assert_receive {:memory_tracker_state_update, ^issue_id, "Human Review"}
   end
 
-  test "prompt builder does not duplicate an existing agent-dashboard invocation" do
-    write_workflow_file!(Workflow.workflow_file_path(), prompt: "$agent-dashboard:chore\n\nTicket {{ issue.identifier }}")
+  test "prompt builder appends one native profile block" do
+    write_workflow_file!(Workflow.workflow_file_path(), prompt: "Ticket {{ issue.identifier }}")
+    issue = TaskContractFixtures.issue(%{identifier: "S-3", title: "docs: update guide"})
+    assert {:ok, contract} = TaskContract.from_issue(issue)
+    assert {:ok, profile} = SymphonyElixir.WorkflowProfile.select(contract)
 
-    issue = %Issue{
-      identifier: "S-3",
-      title: "Update docs",
-      description: "Use agent-dashboard:chore",
-      state: "Todo",
-      url: "https://example.org/issues/S-3",
-      labels: ["docs"]
+    prompt = PromptBuilder.build_prompt(issue, workflow_profile: profile)
+
+    assert length(String.split(prompt, "Trusted Symphony workflow profile")) == 2
+  end
+
+  test "execution prompt requires exact completion of approved native phases" do
+    issue = TaskContractFixtures.issue(%{identifier: "S-5", title: "fix: enforce phase progress"})
+    assert {:ok, contract} = TaskContract.from_issue(issue)
+    assert {:ok, profile} = SymphonyElixir.WorkflowProfile.select(contract)
+
+    execution_plan = %{
+      "plan_digest" => String.duplicate("a", 64),
+      "workflow" => profile.name,
+      "profile_digest" => profile.digest,
+      "candidate" => %{
+        "ordered_steps" => [
+          %{
+            "id" => "prove",
+            "step" => "Prove the correction",
+            "status" => "pending",
+            "affected_paths" => ["lib/example.ex"],
+            "depends_on" => [],
+            "verification_profile" => "Targeted",
+            "proof_commands" => ["mix test test/example_test.exs"],
+            "invariants" => ["valid behavior remains stable"],
+            "stop_conditions" => ["stop if the contract changes"],
+            "evidence_requirements" => ["GREEN event"]
+          }
+        ]
+      }
     }
 
-    assert PromptBuilder.build_prompt(issue) == "$agent-dashboard:chore\n\nTicket S-3"
+    prompt =
+      PromptBuilder.build_execution_prompt(issue,
+        execution_plan: execution_plan,
+        workflow_profile: profile,
+        task_contract: contract
+      )
+
+    assert prompt =~ "keep exactly one phase in progress"
+    assert prompt =~ "final native plan exactly matches the approved phases"
+    assert prompt =~ "Prove the correction"
   end
 
   test "prompt builder renders issue datetime fields without crashing" do
@@ -1840,7 +1870,9 @@ defmodule SymphonyElixir.CoreTest do
                AgentRunner.run(issue, nil,
                  issue_state_fetcher: fn [_issue_id] -> {:ok, [issue]} end,
                  completion_evidence_validator: &valid_handoff_evidence/5,
-                 handoff_publisher: &valid_handoff_publisher/4
+                 handoff_publisher: &valid_handoff_publisher/4,
+                 planning_lifecycle_runner: &approve_execution_plan/6,
+                 task_branch_ensurer: &accept_task_branch/5
                )
 
       entries_after = MapSet.new(File.ls!(workspace_root))
@@ -1941,7 +1973,9 @@ defmodule SymphonyElixir.CoreTest do
                  test_pid,
                  issue_state_fetcher: fn [_issue_id] -> {:ok, [issue]} end,
                  completion_evidence_validator: &valid_handoff_evidence/5,
-                 handoff_publisher: &valid_handoff_publisher/4
+                 handoff_publisher: &valid_handoff_publisher/4,
+                 planning_lifecycle_runner: &approve_execution_plan/6,
+                 task_branch_ensurer: &accept_task_branch/5
                )
 
       assert_receive {:codex_worker_update, "issue-live-updates",
@@ -2047,7 +2081,9 @@ defmodule SymphonyElixir.CoreTest do
                  self(),
                  issue_state_fetcher: fn [_issue_id] -> {:ok, [issue]} end,
                  completion_evidence_validator: &valid_handoff_evidence/5,
-                 handoff_publisher: &valid_handoff_publisher/4
+                 handoff_publisher: &valid_handoff_publisher/4,
+                 planning_lifecycle_runner: &approve_execution_plan/6,
+                 task_branch_ensurer: &accept_task_branch/5
                )
 
       assert {:ok, workspace} = SymphonyElixir.PathSafety.canonicalize(Path.join(workspace_root, "MT-AUDIT"))
@@ -2284,7 +2320,9 @@ defmodule SymphonyElixir.CoreTest do
                AgentRunner.run(issue, nil,
                  issue_state_fetcher: state_fetcher,
                  completion_evidence_validator: evidence_validator,
-                 handoff_publisher: &valid_handoff_publisher/4
+                 handoff_publisher: &valid_handoff_publisher/4,
+                 planning_lifecycle_runner: &approve_execution_plan/6,
+                 task_branch_ensurer: &accept_task_branch/5
                )
 
       assert_receive {:issue_state_fetch, 1}
@@ -2317,7 +2355,8 @@ defmodule SymphonyElixir.CoreTest do
         end)
 
       assert length(turn_texts) == 2
-      assert Enum.at(turn_texts, 0) =~ "You are an agent for this repository."
+      assert Enum.at(turn_texts, 0) =~ "preactivation planning gate is complete"
+      assert Enum.at(turn_texts, 0) =~ "Approved plan digest"
       refute Enum.at(turn_texts, 1) =~ "You are an agent for this repository."
       assert Enum.at(turn_texts, 1) =~ "Continuation guidance:"
       assert Enum.at(turn_texts, 1) =~ "continuation turn #2 of 3"
@@ -2437,7 +2476,12 @@ defmodule SymphonyElixir.CoreTest do
         labels: []
       }
 
-      assert :ok = AgentRunner.run(issue, nil, issue_state_fetcher: state_fetcher)
+      assert :ok =
+               AgentRunner.run(issue, nil,
+                 issue_state_fetcher: state_fetcher,
+                 planning_lifecycle_runner: &approve_execution_plan/6,
+                 task_branch_ensurer: &accept_task_branch/5
+               )
 
       trace = File.read!(trace_file)
       assert length(String.split(trace, "RUN", trim: true)) == 1

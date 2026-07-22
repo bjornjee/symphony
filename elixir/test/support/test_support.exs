@@ -23,7 +23,14 @@ defmodule SymphonyElixir.TestSupport do
       alias SymphonyElixir.Workspace
 
       import SymphonyElixir.TestSupport,
-        only: [write_workflow_file!: 1, write_workflow_file!: 2, restore_env: 2, stop_default_http_server: 0]
+        only: [
+          write_workflow_file!: 1,
+          write_workflow_file!: 2,
+          restore_env: 2,
+          stop_default_http_server: 0,
+          approve_execution_plan: 6,
+          accept_task_branch: 5
+        ]
 
       setup do
         workflow_root =
@@ -69,6 +76,34 @@ defmodule SymphonyElixir.TestSupport do
 
   def restore_env(key, nil), do: System.delete_env(key)
   def restore_env(key, value), do: System.put_env(key, value)
+
+  def approve_execution_plan(session, _workspace, issue, contract, profile, _opts) do
+    candidate = %{
+      "repository" => %{"base_sha" => String.duplicate("a", 40)},
+      "evidence_requirements" => []
+    }
+
+    semantic = %{
+      "schema_version" => 1,
+      "issue_id" => issue.id,
+      "issue_identifier" => issue.identifier,
+      "contract_digest" => contract.digest,
+      "workflow" => profile.name,
+      "profile_digest" => profile.digest,
+      "primary_thread_id" => session.thread_id,
+      "revision" => 1,
+      "candidate_digest" => String.duplicate("b", 64),
+      "review_digest" => String.duplicate("c", 64),
+      "candidate" => candidate,
+      "review" => %{"verdict" => "approve"}
+    }
+
+    {:ok, Map.put(semantic, "plan_digest", SymphonyElixir.PlanningArtifact.digest(semantic))}
+  end
+
+  def accept_task_branch(_workspace, issue, workflow, _base_sha, _worker_host) do
+    {:ok, "#{workflow}/#{String.downcase(issue.identifier)}-test"}
+  end
 
   def stop_default_http_server do
     case Enum.find(Supervisor.which_children(SymphonyElixir.Supervisor), fn

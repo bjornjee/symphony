@@ -5,6 +5,7 @@ defmodule SymphonyElixir.ExecutionManifest do
 
   alias SymphonyElixir.Linear.{Issue, TaskContract}
   alias SymphonyElixir.SSH
+  alias SymphonyElixir.WorkspaceArtifact
 
   @schema_version 1
   @manifest_dir ".symphony"
@@ -99,51 +100,34 @@ defmodule SymphonyElixir.ExecutionManifest do
 
     payload = Jason.encode!(manifest, pretty: true) <> "\n"
 
-    with :ok <- write_atomic(workspace, payload, worker_host),
-         {:ok, persisted} <- read(workspace, worker_host) do
-      validate_existing(persisted, issue, contract)
+    case write_exclusive(workspace, payload, worker_host) do
+      result when result in [:ok, :exists] ->
+        with {:ok, persisted} <- read(workspace, worker_host) do
+          validate_existing(persisted, issue, contract)
+        end
+
+      {:error, _reason} = error ->
+        error
     end
   end
 
-  defp write_atomic(workspace, payload, nil) do
-    manifest_path = path(workspace)
-    manifest_dir = Path.dirname(manifest_path)
-    temp_path = manifest_path <> ".tmp-#{System.unique_integer([:positive, :monotonic])}"
+  defp write_exclusive(workspace, payload, nil) do
+    case WorkspaceArtifact.create_exclusive(path(workspace), payload) do
+      result when result in [:ok, :exists] -> result
+      {:error, reason} -> {:error, {:execution_manifest_write_failed, reason}}
+    end
+  end
 
-    with :ok <- File.mkdir_p(manifest_dir),
-         :ok <- File.write(temp_path, payload, [:write, :exclusive]),
-         :ok <- File.rename(temp_path, manifest_path) do
-      :ok
-    else
+  defp write_exclusive(workspace, payload, worker_host) when is_binary(worker_host) do
+    case WorkspaceArtifact.create_exclusive(path(workspace), payload, worker_host) do
+      result when result in [:ok, :exists] ->
+        result
+
+      {:error, {:remote_command_failed, status, output}} ->
+        {:error, {:execution_manifest_write_failed, worker_host, status, output}}
+
       {:error, reason} ->
-        File.rm(temp_path)
-        {:error, {:execution_manifest_write_failed, reason}}
-    end
-  end
-
-  defp write_atomic(workspace, payload, worker_host) when is_binary(worker_host) do
-    manifest_path = path(workspace)
-    manifest_dir = Path.dirname(manifest_path)
-
-    command =
-      [
-        "set -eu",
-        "manifest=#{shell_escape(manifest_path)}",
-        "manifest_dir=#{shell_escape(manifest_dir)}",
-        "mkdir -p \"$manifest_dir\"",
-        "tmp=\"$manifest.tmp.$$\"",
-        "trap 'rm -f \"$tmp\"' EXIT",
-        "umask 077",
-        "printf '%s' #{shell_escape(payload)} > \"$tmp\"",
-        "mv \"$tmp\" \"$manifest\"",
-        "trap - EXIT"
-      ]
-      |> Enum.join("\n")
-
-    case SSH.run(worker_host, command, stderr_to_stdout: true) do
-      {:ok, {_output, 0}} -> :ok
-      {:ok, {output, status}} -> {:error, {:execution_manifest_write_failed, worker_host, status, output}}
-      {:error, reason} -> {:error, {:execution_manifest_write_failed, worker_host, reason}}
+        {:error, {:execution_manifest_write_failed, worker_host, reason}}
     end
   end
 

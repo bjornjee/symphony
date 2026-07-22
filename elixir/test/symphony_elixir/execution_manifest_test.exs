@@ -156,6 +156,55 @@ defmodule SymphonyElixir.ExecutionManifestTest do
     assert second["issue_identifier"] == "PIN-'14"
   end
 
+  test "does not overwrite a revision pinned between the remote read and write", %{workspace: workspace} do
+    original_path = System.get_env("PATH")
+    original_competing_manifest = System.get_env("COMPETING_MANIFEST")
+    original_target_manifest = System.get_env("TARGET_MANIFEST")
+    fake_bin = Path.join(workspace, "fake-bin")
+    fake_ssh = Path.join(fake_bin, "ssh")
+    competing_workspace = Path.join(workspace, "competing")
+    File.mkdir_p!(fake_bin)
+    File.mkdir_p!(competing_workspace)
+
+    task = issue()
+    assert {:ok, contract} = TaskContract.from_issue(task)
+    changed_task = %{task | title: "Competing approved revision"}
+    assert {:ok, changed_contract} = TaskContract.from_issue(changed_task)
+    assert {:ok, _manifest} = ExecutionManifest.pin(competing_workspace, changed_task, changed_contract)
+
+    File.write!(fake_ssh, """
+    #!/bin/sh
+    for arg in "$@"; do remote_command="$arg"; done
+    case "$remote_command" in
+      *"tmp="*)
+        mkdir -p "$(dirname "$TARGET_MANIFEST")"
+        cp "$COMPETING_MANIFEST" "$TARGET_MANIFEST"
+        ;;
+    esac
+    eval "$remote_command"
+    """)
+
+    File.chmod!(fake_ssh, 0o755)
+    System.put_env("PATH", fake_bin <> ":" <> (original_path || ""))
+    System.put_env("COMPETING_MANIFEST", ExecutionManifest.path(competing_workspace))
+    System.put_env("TARGET_MANIFEST", ExecutionManifest.path(workspace))
+
+    on_exit(fn ->
+      restore_env("PATH", original_path)
+      restore_env("COMPETING_MANIFEST", original_competing_manifest)
+      restore_env("TARGET_MANIFEST", original_target_manifest)
+    end)
+
+    assert {:error, {:plan_drift, expected, actual}} =
+             ExecutionManifest.pin(workspace, task, contract, "worker-a")
+
+    assert expected == changed_contract.digest
+    assert actual == contract.digest
+  end
+
   defp restore_path(nil), do: System.delete_env("PATH")
   defp restore_path(path), do: System.put_env("PATH", path)
+
+  defp restore_env(name, nil), do: System.delete_env(name)
+  defp restore_env(name, value), do: System.put_env(name, value)
 end

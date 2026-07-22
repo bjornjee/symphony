@@ -53,7 +53,8 @@ defmodule SymphonyElixir.Codex.AppServer do
                port,
                expanded_workspace,
                session_policies,
-               Keyword.get(opts, :thread_id)
+               Keyword.get(opts, :thread_id),
+               Keyword.get(opts, :dynamic_tools, DynamicTool.tool_specs())
              ) do
         {:ok,
          %{
@@ -91,13 +92,26 @@ defmodule SymphonyElixir.Codex.AppServer do
         opts \\ []
       ) do
     on_message = Keyword.get(opts, :on_message, &default_on_message/1)
+    approval_policy = Keyword.get(opts, :approval_policy, approval_policy)
+    turn_sandbox_policy = Keyword.get(opts, :sandbox_policy, turn_sandbox_policy)
+    auto_approve_requests = Keyword.get(opts, :auto_approve_requests, auto_approve_requests)
+    effort = Keyword.get(opts, :effort)
 
     tool_executor =
       Keyword.get(opts, :tool_executor, fn tool, arguments ->
         DynamicTool.execute(tool, arguments)
       end)
 
-    case start_turn(port, thread_id, prompt, issue, workspace, approval_policy, turn_sandbox_policy) do
+    case start_turn(
+           port,
+           thread_id,
+           prompt,
+           issue,
+           workspace,
+           approval_policy,
+           turn_sandbox_policy,
+           effort
+         ) do
       {:ok, turn_id} ->
         session_id = "#{thread_id}-#{turn_id}"
         Logger.info("Codex session started for #{issue_context(issue)} session_id=#{session_id}")
@@ -336,10 +350,10 @@ defmodule SymphonyElixir.Codex.AppServer do
     Config.codex_runtime_settings(workspace, remote: true)
   end
 
-  defp do_start_session(port, workspace, session_policies, thread_id) do
+  defp do_start_session(port, workspace, session_policies, thread_id, dynamic_tools) do
     case send_initialize(port) do
       :ok when is_binary(thread_id) -> resume_thread(port, workspace, session_policies, thread_id)
-      :ok -> start_thread(port, workspace, session_policies)
+      :ok -> start_thread(port, workspace, session_policies, dynamic_tools)
       {:error, reason} -> {:error, reason}
     end
   end
@@ -376,7 +390,12 @@ defmodule SymphonyElixir.Codex.AppServer do
     end
   end
 
-  defp start_thread(port, workspace, %{approval_policy: approval_policy, thread_sandbox: thread_sandbox}) do
+  defp start_thread(
+         port,
+         workspace,
+         %{approval_policy: approval_policy, thread_sandbox: thread_sandbox},
+         dynamic_tools
+       ) do
     send_message(port, %{
       "method" => "thread/start",
       "id" => @thread_start_id,
@@ -384,7 +403,7 @@ defmodule SymphonyElixir.Codex.AppServer do
         "approvalPolicy" => approval_policy,
         "sandbox" => thread_sandbox,
         "cwd" => workspace,
-        "dynamicTools" => DynamicTool.tool_specs()
+        "dynamicTools" => dynamic_tools
       }
     })
 
@@ -400,11 +419,18 @@ defmodule SymphonyElixir.Codex.AppServer do
     end
   end
 
-  defp start_turn(port, thread_id, prompt, issue, workspace, approval_policy, turn_sandbox_policy) do
-    send_message(port, %{
-      "method" => "turn/start",
-      "id" => @turn_start_id,
-      "params" => %{
+  defp start_turn(
+         port,
+         thread_id,
+         prompt,
+         issue,
+         workspace,
+         approval_policy,
+         turn_sandbox_policy,
+         effort
+       ) do
+    params =
+      %{
         "threadId" => thread_id,
         "input" => [
           %{
@@ -417,6 +443,12 @@ defmodule SymphonyElixir.Codex.AppServer do
         "approvalPolicy" => approval_policy,
         "sandboxPolicy" => turn_sandbox_policy
       }
+      |> maybe_put_effort(effort)
+
+    send_message(port, %{
+      "method" => "turn/start",
+      "id" => @turn_start_id,
+      "params" => params
     })
 
     case await_response(port, @turn_start_id) do
@@ -424,6 +456,11 @@ defmodule SymphonyElixir.Codex.AppServer do
       other -> other
     end
   end
+
+  defp maybe_put_effort(params, effort) when effort in ~w(low medium high xhigh),
+    do: Map.put(params, "effort", effort)
+
+  defp maybe_put_effort(params, _effort), do: params
 
   defp await_turn_completion(port, on_message, tool_executor, auto_approve_requests) do
     receive_loop(

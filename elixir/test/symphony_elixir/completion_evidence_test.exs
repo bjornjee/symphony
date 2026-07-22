@@ -7,6 +7,9 @@ defmodule SymphonyElixir.CompletionEvidenceTest do
 
   @origin_url "git@github.com:bjornjee/symphony.git"
   @pr_url "https://github.com/bjornjee/symphony/pull/42"
+  @head_sha String.duplicate("a", 40)
+  @execution_plan_digest String.duplicate("e", 64)
+  @profile_digest String.duplicate("f", 64)
 
   setup do
     workspace =
@@ -72,9 +75,15 @@ defmodule SymphonyElixir.CompletionEvidenceTest do
       end)
 
     retried_observed =
-      Map.new(1..length(retried_criteria), &{"retry-proof-#{&1}", %{exit_code: 0}})
+      Map.new(1..length(retried_criteria), fn index ->
+        {"retry-proof-#{index}", %{exit_code: 0, sequence: index, head_sha: @head_sha}}
+      end)
 
-    write_evidence(context, %{evidence | "criteria" => retried_criteria})
+    write_evidence(context, %{
+      evidence
+      | "criteria" => retried_criteria,
+        "workflow_proof" => %{"final_proof_event_id" => "retry-proof-1"}
+    })
 
     assert {:ok, %{artifact_digest: ^first_digest}} =
              CompletionEvidence.validate(
@@ -152,6 +161,22 @@ defmodule SymphonyElixir.CompletionEvidenceTest do
              )
   end
 
+  test "rejects a symlinked completion envelope", context do
+    target = Path.join(context.workspace, "agent-evidence.json")
+    File.write!(target, "{}")
+    File.mkdir_p!(Path.dirname(CompletionEvidence.path(context.workspace)))
+    File.ln_s!(target, CompletionEvidence.path(context.workspace))
+
+    assert {:error, {:completion_evidence_read_failed, {:invalid_artifact_type, :symlink}}} =
+             CompletionEvidence.validate(
+               context.workspace,
+               context.task,
+               context.contract,
+               %{},
+               validation_opts()
+             )
+  end
+
   test "rejects evidence for a stale plan digest", context do
     observed = observed_proofs(context.contract)
     write_evidence(context, %{valid_evidence(context, observed) | "plan_digest" => String.duplicate("0", 64)})
@@ -169,9 +194,9 @@ defmodule SymphonyElixir.CompletionEvidenceTest do
   test "rejects unsupported schema and malformed criterion entries", context do
     observed = observed_proofs(context.contract)
     evidence = valid_evidence(context, observed)
-    write_evidence(context, %{evidence | "schema_version" => 2})
+    write_evidence(context, %{evidence | "schema_version" => 3})
 
-    assert {:error, {:unsupported_completion_evidence_version, 2}} =
+    assert {:error, {:unsupported_completion_evidence_version, 3}} =
              CompletionEvidence.validate(
                context.workspace,
                context.task,
@@ -258,7 +283,7 @@ defmodule SymphonyElixir.CompletionEvidenceTest do
                context.workspace,
                context.task,
                context.contract,
-               Map.put(observed, "proof-extra", %{exit_code: 0}),
+               Map.put(observed, "proof-extra", %{exit_code: 0, sequence: 99, head_sha: @head_sha}),
                validation_opts()
              )
   end
@@ -401,7 +426,7 @@ defmodule SymphonyElixir.CompletionEvidenceTest do
     case "$remote_command" in
       *"gh pr view"*)
         if [ "${FAKE_GH_FAIL:-}" = "1" ]; then echo failed; exit 7; fi
-        echo "#{@pr_url}"
+        echo '{"url":"#{@pr_url}","headRefOid":"#{@head_sha}"}'
         ;;
       *"remote get-url origin"*)
         if [ "${FAKE_ORIGIN_FAIL:-}" = "1" ]; then echo missing; exit 2; fi
@@ -441,7 +466,12 @@ defmodule SymphonyElixir.CompletionEvidenceTest do
     observed = observed_proofs(context.contract)
     evidence = valid_evidence(context, observed)
     write_evidence(context, evidence)
-    opts = [worker_host: "worker-a"]
+
+    opts = [
+      worker_host: "worker-a",
+      execution_plan: execution_plan(),
+      repository_head_sha: @head_sha
+    ]
 
     assert {:ok, %{pull_request_url: @pr_url}} =
              CompletionEvidence.validate(
@@ -505,7 +535,7 @@ defmodule SymphonyElixir.CompletionEvidenceTest do
 
     mismatch_opts =
       Keyword.put(validation_opts(), :pull_request_verifier, fn _, _, _ ->
-        {:ok, "https://github.com/bjornjee/symphony/pull/43"}
+        {:ok, %{url: "https://github.com/bjornjee/symphony/pull/43", head_sha: @head_sha}}
       end)
 
     assert {:error, {:pull_request_url_mismatch, _details}} =
@@ -611,10 +641,255 @@ defmodule SymphonyElixir.CompletionEvidenceTest do
              )
   end
 
+  test "requires a prior failing RED event for fix workflow evidence", context do
+    observed = observed_proofs(context.contract)
+    evidence = valid_evidence(context, observed)
+
+    fix_plan = %{execution_plan() | "workflow" => "fix"}
+
+    write_evidence(context, %{
+      evidence
+      | "workflow" => "fix",
+        "workflow_proof" => %{"green_event_id" => "proof-1"}
+    })
+
+    assert {:error, :malformed_fix_workflow_proof} =
+             CompletionEvidence.validate(
+               context.workspace,
+               context.task,
+               context.contract,
+               observed,
+               Keyword.put(validation_opts(), :execution_plan, fix_plan)
+             )
+
+    observed =
+      Map.put(observed, "red-proof", %{
+        exit_code: 1,
+        sequence: 0,
+        head_sha: String.duplicate("b", 40)
+      })
+
+    write_evidence(context, %{
+      evidence
+      | "workflow" => "fix",
+        "workflow_proof" => %{
+          "red_event_id" => "red-proof",
+          "green_event_id" => "proof-1"
+        }
+    })
+
+    assert {:ok, %{workflow: "fix"}} =
+             CompletionEvidence.validate(
+               context.workspace,
+               context.task,
+               context.contract,
+               observed,
+               Keyword.put(validation_opts(), :execution_plan, fix_plan)
+             )
+  end
+
+  test "rejects proof captured before the final repository head", context do
+    observed =
+      context.contract
+      |> observed_proofs()
+      |> Map.update!("proof-1", &Map.put(&1, :head_sha, String.duplicate("b", 40)))
+
+    write_evidence(context, valid_evidence(context, observed))
+
+    assert {:error, {:stale_criterion_proof, _criterion, "proof-1", _old, @head_sha}} =
+             CompletionEvidence.validate(
+               context.workspace,
+               context.task,
+               context.contract,
+               observed,
+               validation_opts()
+             )
+  end
+
+  test "rejects a PR whose head differs from the reviewed repository head", context do
+    observed = observed_proofs(context.contract)
+    write_evidence(context, valid_evidence(context, observed))
+
+    opts =
+      Keyword.put(validation_opts(), :pull_request_verifier, fn url, _, _ ->
+        {:ok, %{url: url, head_sha: String.duplicate("b", 40)}}
+      end)
+
+    assert {:error, {:pull_request_head_mismatch, @head_sha, _actual}} =
+             CompletionEvidence.validate(
+               context.workspace,
+               context.task,
+               context.contract,
+               observed,
+               opts
+             )
+  end
+
+  test "accepts refactor baseline/final and chore validator workflow proofs", context do
+    observed = observed_proofs(context.contract)
+
+    refactor_observed =
+      Map.put(observed, "baseline", %{
+        exit_code: 0,
+        sequence: 0,
+        head_sha: String.duplicate("b", 40)
+      })
+
+    refactor_plan = %{execution_plan() | "workflow" => "refactor"}
+    evidence = valid_evidence(context, observed)
+
+    write_evidence(context, %{
+      evidence
+      | "workflow" => "refactor",
+        "workflow_proof" => %{
+          "baseline_event_id" => "baseline",
+          "final_proof_event_id" => "proof-1"
+        }
+    })
+
+    assert {:ok, %{workflow: "refactor"}} =
+             CompletionEvidence.validate(
+               context.workspace,
+               context.task,
+               context.contract,
+               refactor_observed,
+               Keyword.put(validation_opts(), :execution_plan, refactor_plan)
+             )
+
+    chore_plan = %{execution_plan() | "workflow" => "chore"}
+
+    write_evidence(context, %{
+      evidence
+      | "workflow" => "chore",
+        "workflow_proof" => %{"validator_event_id" => "proof-1"}
+    })
+
+    assert {:ok, %{workflow: "chore"}} =
+             CompletionEvidence.validate(
+               context.workspace,
+               context.task,
+               context.contract,
+               observed,
+               Keyword.put(validation_opts(), :execution_plan, chore_plan)
+             )
+
+    write_evidence(context, %{
+      evidence
+      | "workflow" => "chore",
+        "workflow_proof" => %{
+          "surgical_review" => %{
+            "reviewed_head_sha" => @head_sha,
+            "record" => "Reviewed the final non-code diff."
+          }
+        }
+    })
+
+    assert {:ok, %{workflow: "chore"}} =
+             CompletionEvidence.validate(
+               context.workspace,
+               context.task,
+               context.contract,
+               observed,
+               Keyword.put(validation_opts(), :execution_plan, chore_plan)
+             )
+  end
+
+  test "requires and accepts RED when a feature plan declares it", context do
+    observed = observed_proofs(context.contract)
+    red_plan = put_in(execution_plan(), ["candidate", "evidence_requirements"], ["Capture RED before GREEN"])
+    evidence = valid_evidence(context, observed)
+    write_evidence(context, evidence)
+
+    assert {:error, :feature_red_evidence_missing} =
+             CompletionEvidence.validate(
+               context.workspace,
+               context.task,
+               context.contract,
+               observed,
+               Keyword.put(validation_opts(), :execution_plan, red_plan)
+             )
+
+    observed = Map.put(observed, "feature-red", %{exit_code: 1, sequence: 0, head_sha: "old"})
+
+    write_evidence(context, %{
+      evidence
+      | "workflow_proof" => %{
+          "final_proof_event_id" => "proof-1",
+          "red_event_id" => "feature-red"
+        }
+    })
+
+    assert {:ok, %{workflow: "feature"}} =
+             CompletionEvidence.validate(
+               context.workspace,
+               context.task,
+               context.contract,
+               observed,
+               Keyword.put(validation_opts(), :execution_plan, red_plan)
+             )
+  end
+
+  test "rejects execution-plan, workflow, and profile drift in the envelope", context do
+    observed = observed_proofs(context.contract)
+    evidence = valid_evidence(context, observed)
+
+    for {field, expected_reason} <- [
+          {"execution_plan_digest", :completion_evidence_execution_plan_mismatch},
+          {"workflow", :completion_evidence_workflow_mismatch},
+          {"profile_digest", :completion_evidence_profile_mismatch}
+        ] do
+      write_evidence(context, Map.put(evidence, field, "drift"))
+
+      assert {:error, {^expected_reason, _actual, _expected}} =
+               CompletionEvidence.validate(
+                 context.workspace,
+                 context.task,
+                 context.contract,
+                 observed,
+                 validation_opts()
+               )
+    end
+  end
+
+  test "resolves the PR URL and head through the real gh command boundary", context do
+    observed = observed_proofs(context.contract)
+    write_evidence(context, valid_evidence(context, observed))
+
+    fake_bin = Path.join(context.workspace, "fake-bin-gh")
+    fake_gh = Path.join(fake_bin, "gh")
+    previous_path = System.get_env("PATH")
+    File.mkdir_p!(fake_bin)
+
+    File.write!(fake_gh, """
+    #!/bin/sh
+    printf '%s\n' '{"url":"#{@pr_url}","headRefOid":"#{@head_sha}"}'
+    """)
+
+    File.chmod!(fake_gh, 0o755)
+    System.put_env("PATH", fake_bin <> ":" <> (previous_path || ""))
+
+    on_exit(fn ->
+      if previous_path, do: System.put_env("PATH", previous_path), else: System.delete_env("PATH")
+    end)
+
+    opts = Keyword.delete(validation_opts(), :pull_request_verifier)
+
+    assert {:ok, %{pull_request_url: @pr_url}} =
+             CompletionEvidence.validate(
+               context.workspace,
+               context.task,
+               context.contract,
+               observed,
+               opts
+             )
+  end
+
   defp observed_proofs(contract) do
     contract.acceptance_criteria
     |> Enum.with_index(1)
-    |> Map.new(fn {_criterion, index} -> {"proof-#{index}", %{exit_code: 0}} end)
+    |> Map.new(fn {_criterion, index} ->
+      {"proof-#{index}", %{exit_code: 0, sequence: index, head_sha: @head_sha}}
+    end)
   end
 
   defp valid_evidence(context, observed) do
@@ -631,12 +906,18 @@ defmodule SymphonyElixir.CompletionEvidenceTest do
       end)
 
     %{
-      "schema_version" => 1,
+      "schema_version" => 2,
       "issue_id" => context.task.id,
       "issue_identifier" => context.task.identifier,
       "plan_digest" => context.contract.digest,
+      "execution_plan_digest" => @execution_plan_digest,
+      "workflow" => "feature",
+      "profile_digest" => @profile_digest,
       "criteria" => criteria,
-      "pull_request_url" => @pr_url
+      "workflow_proof" => %{"final_proof_event_id" => hd(proof_ids)},
+      "pull_request_url" => @pr_url,
+      "pr_head_sha" => @head_sha,
+      "repository_head_sha" => @head_sha
     }
   end
 
@@ -649,8 +930,21 @@ defmodule SymphonyElixir.CompletionEvidenceTest do
   defp validation_opts do
     [
       origin_url: @origin_url,
-      pull_request_verifier: fn url, _workspace, _worker_host -> {:ok, url} end
+      execution_plan: execution_plan(),
+      repository_head_sha: @head_sha,
+      pull_request_verifier: fn url, _workspace, _worker_host ->
+        {:ok, %{url: url, head_sha: @head_sha}}
+      end
     ]
+  end
+
+  defp execution_plan do
+    %{
+      "plan_digest" => @execution_plan_digest,
+      "workflow" => "feature",
+      "profile_digest" => @profile_digest,
+      "candidate" => %{"evidence_requirements" => []}
+    }
   end
 
   defp restore_env(name, nil), do: System.delete_env(name)
