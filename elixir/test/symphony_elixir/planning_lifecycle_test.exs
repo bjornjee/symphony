@@ -33,8 +33,14 @@ defmodule SymphonyElixir.PlanningLifecycleTest do
     parent = self()
     candidate = candidate(ctx)
 
-    run_turn = fn session, _prompt, _issue, opts ->
-      send(parent, {:turn, session.role, Keyword.take(opts, [:sandbox_policy, :approval_policy, :effort])})
+    run_turn = fn session, prompt, _issue, opts ->
+      send(parent, {:prompt, session.role, prompt})
+
+      send(parent, {
+        :turn,
+        session.role,
+        Keyword.take(opts, [:sandbox_policy, :approval_policy, :auto_approve_requests, :effort])
+      })
 
       case session.role do
         :primary ->
@@ -71,6 +77,10 @@ defmodule SymphonyElixir.PlanningLifecycleTest do
         send(parent, {:reviewer_started, reviewer_opts})
         {:ok, %{role: :reviewer, thread_id: "review-thread"}}
       end,
+      pin_primary_thread: fn ->
+        send(parent, :primary_thread_pinned)
+        :ok
+      end,
       stop_session: fn _session -> :ok end
     ]
 
@@ -87,15 +97,27 @@ defmodule SymphonyElixir.PlanningLifecycleTest do
     assert byte_size(plan["plan_digest"]) == 64
 
     assert_receive {:turn, :primary, primary_opts}
+    assert_receive {:prompt, :primary, _planning_prompt}
     assert primary_opts[:sandbox_policy] == %{"type" => "readOnly", "networkAccess" => false}
+    assert primary_opts[:approval_policy] == "never"
+    assert primary_opts[:auto_approve_requests] == false
     refute Keyword.has_key?(primary_opts, :effort)
+    assert_receive :primary_thread_pinned
 
     assert_receive {:reviewer_started, reviewer_opts}
     assert reviewer_opts[:dynamic_tools] == SymphonyElixir.PlanningArtifact.review_tool_specs()
 
     assert_receive {:turn, :reviewer, reviewer_turn_opts}
+    assert_receive {:prompt, :reviewer, reviewer_prompt}
+    assert reviewer_prompt =~ "Verify every repository path named in a proof command"
+    assert reviewer_prompt =~ "unless that phase or an earlier phase"
+    assert reviewer_prompt =~ "do not demand duplicate typed proofs"
+    assert reviewer_prompt =~ "do not invent an exactly-once mapping rule"
+    assert reviewer_prompt =~ "focused static contract tests may be sufficient behavioral proof"
     assert reviewer_turn_opts[:effort] == "medium"
     assert reviewer_turn_opts[:sandbox_policy] == %{"type" => "readOnly", "networkAccess" => false}
+    assert reviewer_turn_opts[:approval_policy] == "never"
+    assert reviewer_turn_opts[:auto_approve_requests] == false
 
     assert {:ok, ^plan} =
              PlanningLifecycle.run(

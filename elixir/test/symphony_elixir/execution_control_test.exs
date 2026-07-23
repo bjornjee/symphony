@@ -173,6 +173,49 @@ defmodule SymphonyElixir.ExecutionControlTest do
              ExecutionControl.run_plan_proof(plan, ctx.key, ctx.workspace, "fix", "green")
   end
 
+  test "feature RED permits planned test changes at the pinned head", ctx do
+    plan = ctx.plan |> Map.put("workflow", "feature") |> put_in(["candidate", "red_policy"], "required")
+    File.write!(Path.join(ctx.workspace, "README.md"), "failing behavior contract\n")
+
+    assert {:ok, %{"passed" => true, "before_state_digest" => digest, "after_state_digest" => digest}} =
+             ExecutionControl.run_plan_proof(plan, ctx.key, ctx.workspace, "reproduce", "red")
+
+    assert {:ok, _receipt} =
+             ExecutionControl.complete_execution_phase(
+               plan,
+               ctx.key,
+               ctx.workspace,
+               "reproduce"
+             )
+  end
+
+  test "feature behavior baseline runs before required RED", ctx do
+    plan = %{
+      ctx.plan
+      | "workflow" => "feature",
+        "candidate" =>
+          ctx.plan["candidate"]
+          |> Map.put("red_policy", "required")
+          |> Map.put("proofs", [
+            proof("baseline", "reproduce", "baseline", "success", "test -f README.md"),
+            proof("red", "fix", "red", "failure", "exit 2"),
+            proof("green", "fix", "green", "success", "test -f README.md")
+          ])
+    }
+
+    assert {:ok, %{"passed" => true}} =
+             ExecutionControl.run_plan_proof(
+               plan,
+               ctx.key,
+               ctx.workspace,
+               "reproduce",
+               "baseline"
+             )
+
+    assert {:error, {:red_proof_required, "red"}} =
+             ExecutionControl.run_plan_proof(plan, ctx.key, ctx.workspace, "fix", "green")
+  end
+
   test "refactor transformation proof requires a clean green baseline", ctx do
     plan = %{
       ctx.plan

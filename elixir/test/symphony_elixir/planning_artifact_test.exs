@@ -86,6 +86,25 @@ defmodule SymphonyElixir.PlanningArtifactTest do
              PlanningArtifact.persist_candidate(workspace, 1, changed, context, native_plan)
   end
 
+  test "allows a read-only phase with no affected paths", %{
+    workspace: workspace,
+    context: context,
+    candidate: candidate
+  } do
+    candidate = put_in(candidate, ["ordered_steps", Access.at(0), "affected_paths"], [])
+
+    assert {:ok, persisted} =
+             PlanningArtifact.persist_candidate(
+               workspace,
+               1,
+               candidate,
+               context,
+               candidate["ordered_steps"]
+             )
+
+    assert get_in(persisted, ["ordered_steps", Access.at(0), "affected_paths"]) == []
+  end
+
   test "rejects a candidate whose ordered steps differ from the final native plan", %{
     workspace: workspace,
     context: context,

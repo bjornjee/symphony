@@ -1600,6 +1600,69 @@ defmodule SymphonyElixir.CoreTest do
     assert prompt =~ "keep exactly one phase in progress"
     assert prompt =~ "final native plan exactly matches the approved phases"
     assert prompt =~ "Prove the correction"
+    assert prompt =~ "A failed proof receipt is evidence, not a permanent blocker"
+  end
+
+  test "implementation sandbox explicitly permits approved repository-local Codex skill paths" do
+    workspace = Path.join(System.tmp_dir!(), "PIN-25")
+
+    execution_plan = %{
+      "candidate" => %{
+        "affected_paths" => [
+          ".codex/skills/create-linear-issue/SKILL.md",
+          ".codex/skills/create-linear-issue/agents/openai.yaml",
+          ".codex/skills/linear/SKILL.md",
+          "docs/codex-agent-task-contract.md"
+        ]
+      }
+    }
+
+    assert AgentRunner.implementation_sandbox_policy_for_test(workspace, execution_plan) == %{
+             "type" => "workspaceWrite",
+             "writableRoots" => [
+               workspace,
+               Path.join(workspace, ".codex/skills/create-linear-issue"),
+               Path.join(workspace, ".codex/skills/create-linear-issue/agents"),
+               Path.join(workspace, ".codex/skills/linear")
+             ],
+             "networkAccess" => false
+           }
+  end
+
+  test "implementation command approval permits only one conventional local commit without extra permissions" do
+    workspace = Path.join(System.tmp_dir!(), "PIN-25")
+
+    safe_payload = %{
+      "params" => %{
+        "command" => ~s(git commit -m "feat: add Linear issue-creation skill"),
+        "cwd" => workspace,
+        "additionalPermissions" => nil,
+        "networkApprovalContext" => nil,
+        "proposedNetworkPolicyAmendments" => []
+      }
+    }
+
+    assert AgentRunner.implementation_command_approval_for_test(workspace, safe_payload)
+
+    refute AgentRunner.implementation_command_approval_for_test(
+             workspace,
+             put_in(safe_payload, ["params", "command"], "git push origin HEAD")
+           )
+
+    refute AgentRunner.implementation_command_approval_for_test(
+             workspace,
+             put_in(safe_payload, ["params", "command"], ~s(git commit -m "feat: safe" && git push))
+           )
+
+    refute AgentRunner.implementation_command_approval_for_test(
+             workspace,
+             put_in(safe_payload, ["params", "cwd"], System.tmp_dir!())
+           )
+
+    refute AgentRunner.implementation_command_approval_for_test(
+             workspace,
+             put_in(safe_payload, ["params", "additionalPermissions"], %{"network" => %{"enabled" => true}})
+           )
   end
 
   test "simple execution prompt skips native planning and preserves direct bounds" do
@@ -2425,6 +2488,8 @@ defmodule SymphonyElixir.CoreTest do
       assert Enum.at(turn_texts, 1) =~ "resume the earliest incomplete approved phase"
       assert Enum.at(turn_texts, 1) =~ "Symphony owns those external writes after validation"
       assert Enum.at(turn_texts, 1) =~ "If a PR, commit, or proof result already exists"
+      assert Enum.at(turn_texts, 1) =~ "A failed proof receipt is not a valid proof receipt"
+      assert Enum.at(turn_texts, 1) =~ "observe the current engine behavior"
       assert Enum.at(turn_texts, 1) =~ "Record the reason for the extra turn in `.symphony/run-audit.md`"
 
       assert {:ok, workspace} = SymphonyElixir.PathSafety.canonicalize(Path.join(workspace_root, "MT-247"))

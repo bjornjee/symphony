@@ -261,10 +261,10 @@ defmodule SymphonyElixir.ExtensionsTest do
       {:ok,
        %{
          "data" => %{
-           "issue" => %{
-             "comments" => %{
-               "nodes" => [%{"id" => "comment-1", "body" => "handoff"}]
-             }
+           "comment" => %{
+             "id" => "comment-1",
+             "body" => "handoff",
+             "issue" => %{"id" => "issue-1"}
            }
          }
        }}
@@ -273,11 +273,11 @@ defmodule SymphonyElixir.ExtensionsTest do
     assert {:ok, %{id: "comment-1", body: "handoff"}} =
              Adapter.fetch_comment("issue-1", "comment-1")
 
-    assert_receive {:graphql_called, comment_read_query, %{commentId: "comment-1", issueId: "issue-1", first: 1}}
+    assert_receive {:graphql_called, comment_read_query, %{commentId: "comment-1"}}
 
-    assert comment_read_query =~ "$commentId: ID!"
-    assert comment_read_query =~ "comments(first: $first"
-    assert comment_read_query =~ "id: {eq: $commentId}"
+    assert comment_read_query =~ "$commentId: String!"
+    assert comment_read_query =~ "comment(id: $commentId)"
+    assert comment_read_query =~ "issue {"
 
     Process.put(
       {FakeLinearClient, :graphql_result},
@@ -420,7 +420,7 @@ defmodule SymphonyElixir.ExtensionsTest do
 
     Process.put(
       {FakeLinearClient, :graphql_result},
-      {:ok, %{"data" => %{"issue" => %{"comments" => %{"nodes" => []}}}}}
+      {:ok, %{"data" => %{"comment" => nil}}}
     )
 
     assert {:ok, nil} = Adapter.fetch_comment("issue-1", "comment-1")
@@ -430,7 +430,16 @@ defmodule SymphonyElixir.ExtensionsTest do
 
     Process.put(
       {FakeLinearClient, :graphql_result},
-      {:ok, %{"data" => %{"issue" => %{"comments" => %{"nodes" => [%{"id" => "other"}]}}}}}
+      {:ok,
+       %{
+         "data" => %{
+           "comment" => %{
+             "id" => "comment-1",
+             "body" => "handoff",
+             "issue" => %{"id" => "other-issue"}
+           }
+         }
+       }}
     )
 
     assert {:error, :comment_read_failed} = Adapter.fetch_comment("issue-1", "comment-1")

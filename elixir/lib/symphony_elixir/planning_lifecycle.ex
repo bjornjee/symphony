@@ -9,7 +9,7 @@ defmodule SymphonyElixir.PlanningLifecycle do
 
   @max_revisions 3
   @read_only_policy %{"type" => "readOnly", "networkAccess" => false}
-  @deny_approvals %{reject: %{sandbox_approval: true, rules: true, mcp_elicitations: true}}
+  @deny_approvals "never"
 
   @spec run(map(), Path.t(), Issue.t(), TaskContract.t(), WorkflowProfile.t(), keyword()) ::
           {:ok, map()} | {:error, term()}
@@ -112,9 +112,17 @@ defmodule SymphonyElixir.PlanningLifecycle do
              context,
              revision,
              opts
-           ) do
+           ),
+         :ok <- pin_primary_thread(opts) do
       authority = %{issue: issue, contract: contract, profile: profile, context: context}
       review_candidate(primary_session, workspace, authority, candidate, revision, opts)
+    end
+  end
+
+  defp pin_primary_thread(opts) do
+    case Keyword.get(opts, :pin_primary_thread) do
+      nil -> :ok
+      callback when is_function(callback, 0) -> callback.()
     end
   end
 
@@ -674,6 +682,10 @@ defmodule SymphonyElixir.PlanningLifecycle do
     You are Symphony's isolated automated execution-plan reviewer. Review only; do not edit files, request approval, ask the operator, or call external mutation APIs.
     Check contract and acceptance-criteria alignment, bounded scope, execution context, scale safety, workflow gates, typed proof sufficiency and safety, unsupported assumptions, rollback, and risky-work invariants.
     Reject phases that are not independently verifiable, depend on later work, omit meaningful stop conditions, hide scope in a broad path, or cannot map their objective to the final native plan.
+    Verify every repository path named in a proof command exists at the pinned base unless that phase or an earlier phase explicitly creates that exact affected path. Reject stale or misspelled paths, and reject baseline or pre-change proofs that reference future files.
+    Review only obligations owned by the approved plan. Symphony separately enforces branch/base identity, cumulative changed-path scope, conventional commits, clean final-head proof freshness, implementation review, and publication; do not demand duplicate typed proofs for those engine-owned gates unless the Linear contract explicitly requires them.
+    Criterion IDs may be present on multiple diagnostic proofs. Require every criterion to be covered by at least one successful final or validator proof; do not invent an exactly-once mapping rule, and do not treat an expected failing RED proof as acceptance evidence.
+    For repository-local instructional artifacts such as skills or prompts, focused static contract tests may be sufficient behavioral proof. Do not require executing an LLM, building a fake agent runtime, or performing a live external mutation unless the Linear contract explicitly requires that boundary proof.
     Call `submit_plan_review` exactly once with verdict `approve` or `revise`. An approval must have no blocking findings; a revision must have at least one concrete blocking finding.
 
     Linear issue: #{issue.identifier} — #{issue.title}

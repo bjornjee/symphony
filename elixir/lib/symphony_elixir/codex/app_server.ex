@@ -103,6 +103,15 @@ defmodule SymphonyElixir.Codex.AppServer do
     approval_policy = Keyword.get(opts, :approval_policy, approval_policy)
     turn_sandbox_policy = Keyword.get(opts, :sandbox_policy, turn_sandbox_policy)
     auto_approve_requests = Keyword.get(opts, :auto_approve_requests, auto_approve_requests)
+    command_approval_authorizer = Keyword.get(opts, :command_approval_authorizer)
+
+    approval_mode =
+      if is_function(command_approval_authorizer, 1) do
+        {:command_only, command_approval_authorizer}
+      else
+        auto_approve_requests
+      end
+
     effort = Keyword.get(opts, :effort)
 
     tool_executor =
@@ -135,7 +144,7 @@ defmodule SymphonyElixir.Codex.AppServer do
           metadata
         )
 
-        case await_turn_completion(port, on_message, tool_executor, auto_approve_requests) do
+        case await_turn_completion(port, on_message, tool_executor, approval_mode) do
           {:ok, result} ->
             Logger.info("Codex session completed for #{issue_context(issue)} session_id=#{session_id}")
 
@@ -182,15 +191,15 @@ defmodule SymphonyElixir.Codex.AppServer do
         "method" => "command/exec",
         "id" => @command_exec_id,
         "params" => %{
-          "command" => ["sh", "-lc", command],
+          "command" => ["sh", "-c", command],
           "cwd" => command_directory,
           "timeoutMs" => timeout_ms,
           "outputBytesCap" => output_bytes_cap,
-          "env" => Map.new(@proof_secret_env, &{&1, nil}),
+          "env" => Map.put(Map.new(@proof_secret_env, &{&1, nil}), "PATH", System.get_env("PATH")),
           "sandboxPolicy" => %{
             "type" => "workspaceWrite",
             "writableRoots" => [workspace],
-            "networkAccess" => false,
+            "networkAccess" => true,
             "excludeSlashTmp" => false,
             "excludeTmpdirEnvVar" => false
           }
@@ -753,17 +762,23 @@ defmodule SymphonyElixir.Codex.AppServer do
          on_message,
          metadata,
          _tool_executor,
-         auto_approve_requests
+         approval_mode
        ) do
+    authorized =
+      case approval_mode do
+        {:command_only, authorizer} when is_function(authorizer, 1) -> authorizer.(payload)
+        other -> other
+      end
+
     approve_or_require(
       port,
       id,
-      "acceptForSession",
+      if(match?({:command_only, _authorizer}, approval_mode), do: "accept", else: "acceptForSession"),
       payload,
       payload_string,
       on_message,
       metadata,
-      auto_approve_requests
+      authorized
     )
   end
 
@@ -971,7 +986,7 @@ defmodule SymphonyElixir.Codex.AppServer do
          _payload_string,
          _on_message,
          _metadata,
-         false
+         _not_authorized
        ) do
     :approval_required
   end

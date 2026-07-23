@@ -74,6 +74,7 @@ defmodule SymphonyElixir.PromptBuilder do
     Execute only the approved execution plan below. It is the implementation authority for Linear #{issue.identifier}; do not reinterpret the raw Linear description as permission to expand scope.
     Preserve the native plan created during preactivation. Execute its typed phases in order, keep exactly one phase in progress, and mark a phase completed only after its proof and evidence requirements pass.
     Do not add, remove, rename, reorder, or skip approved phases. Symphony rejects handoff unless the final native plan exactly matches the approved phases and every phase is completed.
+    A failed proof receipt is evidence, not a permanent blocker. If that proof is still the earliest incomplete gate and attempts remain, call `run_plan_proof` again to observe the current engine behavior; a restarted Symphony runtime may contain the correction for the prior failure.
     Create or resume the single task branch from the pinned base SHA before the first source edit. Reuse this issue workspace and never create a nested worktree.
     Call `run_plan_proof` for each approved proof ID and `complete_execution_phase` after its dependencies and proofs pass. For fixes, call `submit_fix_diagnosis` after RED and before GREEN.
     After all phases, commit the final tree and rerun the final proof against the clean commit. Then call `request_implementation_review`; address a revise verdict and rerun stale final proof before requesting review again. Once approved, call `publish_pull_request`.

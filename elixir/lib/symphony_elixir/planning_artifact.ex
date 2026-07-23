@@ -427,7 +427,7 @@ defmodule SymphonyElixir.PlanningArtifact do
              {:error, {:duplicate_phase_id, step["id"]}},
          :ok <- nonempty_string(step["step"], "ordered_steps.step"),
          true <- step["status"] in ~w(pending in_progress completed) || {:error, {:invalid_field, "ordered_steps.status"}},
-         :ok <- string_list(step["affected_paths"], "ordered_steps.affected_paths", false),
+         :ok <- string_list(step["affected_paths"], "ordered_steps.affected_paths", true),
          :ok <- phase_dependencies(step["depends_on"], prior_ids),
          :ok <- verification_profile(step["verification_profile"]),
          :ok <- string_list(step["proof_ids"], "ordered_steps.proof_ids", false),

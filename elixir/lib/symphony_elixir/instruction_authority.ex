@@ -9,9 +9,10 @@ defmodule SymphonyElixir.InstructionAuthority do
   @max_source_bytes 1_048_576
   @max_total_bytes 4_194_304
 
+  @type source :: Path.t() | map()
   @type t :: %{paths: [Path.t()], digest: String.t(), worker_host: String.t() | nil}
 
-  @spec capture([map()], String.t() | nil) :: {:ok, t()} | {:error, term()}
+  @spec capture([source()], String.t() | nil) :: {:ok, t()} | {:error, term()}
   def capture(sources, worker_host \\ nil) when is_list(sources) do
     with {:ok, paths} <- paths(sources),
          {:ok, entries} <- read_all(paths, worker_host),
@@ -27,7 +28,7 @@ defmodule SymphonyElixir.InstructionAuthority do
 
   @spec revalidate(t()) :: :ok | {:error, term()}
   def revalidate(%{paths: paths, digest: digest, worker_host: worker_host}) do
-    case capture(Enum.map(paths, &%{"path" => &1}), worker_host) do
+    case capture(paths, worker_host) do
       {:ok, %{digest: ^digest}} -> :ok
       {:ok, _changed} -> {:error, :instruction_drift}
       {:error, reason} -> {:error, {:instruction_revalidation_failed, reason}}
@@ -46,6 +47,7 @@ defmodule SymphonyElixir.InstructionAuthority do
     end
   end
 
+  defp source_path(path) when is_binary(path) and byte_size(path) in 1..4096, do: path
   defp source_path(%{"path" => path}) when is_binary(path) and byte_size(path) in 1..4096, do: path
   defp source_path(%{path: path}) when is_binary(path) and byte_size(path) in 1..4096, do: path
   defp source_path(_source), do: nil

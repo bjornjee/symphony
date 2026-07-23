@@ -21,6 +21,17 @@ defmodule SymphonyElixir.InstructionAuthorityTest do
     assert {:error, :instruction_drift} = InstructionAuthority.revalidate(authority)
   end
 
+  test "accepts path strings returned by current Codex app-server" do
+    root = Path.join(System.tmp_dir!(), "instruction-authority-string-#{System.unique_integer([:positive])}")
+    instruction = Path.join(root, "AGENTS.md")
+    File.mkdir_p!(root)
+    File.write!(instruction, "global doctrine\n")
+
+    assert {:ok, authority} = InstructionAuthority.capture([instruction])
+    assert authority.paths == [instruction]
+    assert :ok = InstructionAuthority.revalidate(authority)
+  end
+
   test "rejects missing, duplicate, and excessive instruction sources" do
     assert {:error, {:instruction_source_missing, "/missing"}} =
              InstructionAuthority.capture([%{"path" => "/missing"}])

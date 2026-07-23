@@ -212,7 +212,7 @@ defmodule SymphonyElixir.ExecutionControl do
   end
 
   defp workflow_preconditions(%{"workflow" => "feature"} = plan, ledger_key, %{"role" => role}, _state)
-       when role not in ~w(red) do
+       when role not in ~w(red baseline) do
     if get_in(plan, ["candidate", "red_policy"]) == "required", do: require_role(plan, ledger_key, "red"), else: :ok
   end
 
@@ -398,11 +398,16 @@ defmodule SymphonyElixir.ExecutionControl do
 
   defp execution_base(plan), do: get_in(plan, ["candidate", "repository", "base_sha"]) || get_in(plan, ["repository", "base_sha"])
 
-  defp proof_freshness_error(%{"role" => role}, before, after_state, base_sha)
-       when role in ~w(red baseline) do
+  defp proof_freshness_error(%{"role" => "baseline"}, before, after_state, base_sha) do
     if before.clean and after_state.clean and before.digest == after_state.digest and before.base_sha == base_sha,
       do: nil,
       else: "preimplementation_proof_requires_clean_stable_base"
+  end
+
+  defp proof_freshness_error(%{"role" => "red"}, before, after_state, base_sha) do
+    if before.digest == after_state.digest and before.base_sha == base_sha,
+      do: nil,
+      else: "red_proof_requires_stable_pinned_head"
   end
 
   defp proof_freshness_error(%{"role" => "final"}, before, after_state, _base_sha) do
