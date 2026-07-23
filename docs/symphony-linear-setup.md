@@ -15,27 +15,54 @@ Use the canonical issue shape and native workflow routing described in
 project specificity lives in the Linear project, issue content, repository URL,
 and workspace root configured in `workflow-manifest.yml`.
 
+## Prerequisites
+
+Install the Elixir dependencies as described in `elixir/README.md`, then create
+an untracked repo-root `.env` containing `LINEAR_API_KEY`. The default macOS
+setup also requires the CA bundle at `/etc/ssl/cert.pem`.
+
 ## Bootstrap
 
-Regenerate and check the workflow output after changing `workflow-manifest.yml`:
+From the repository root, regenerate and check the workflow output after
+changing `workflow-manifest.yml`:
 
 ```bash
-cd /Users/bjornjee/Code/bjornjee/symphony/elixir
-mise exec -- mix workflow.bootstrap --manifest ../workflow-manifest.yml
-mise exec -- mix workflow.bootstrap --manifest ../workflow-manifest.yml --check
+make symphony-workflow
+make symphony-workflow-check
 ```
 
 ## Run
 
-Start Symphony against the generated dogfood workflow:
+Start Symphony in the foreground against the generated dogfood workflow:
 
 ```bash
-cd /Users/bjornjee/Code/bjornjee/symphony/elixir
-export LINEAR_API_KEY=...
-mise exec -- ./bin/symphony \
-  --i-understand-that-this-will-be-running-without-the-usual-guardrails \
-  --port 4000 \
-  /Users/bjornjee/Code/bjornjee/symphony/workflows/symphony/workflow.md
+make symphony-run
+```
+
+The dashboard is available at `http://127.0.0.1:4000`. Stop the runner with
+Ctrl-C. Override the port or CA bundle without editing the Makefile:
+
+```bash
+make symphony-run PORT=4001 CA_BUNDLE=/path/to/cert.pem
+```
+
+The target loads `.env` without printing its contents and passes the CA bundle
+to Erlang through `ERL_AFLAGS`. If startup still reports a CA trust-store
+failure, this is the core expanded launch command for troubleshooting:
+
+```bash
+(
+  unset LINEAR_API_KEY
+  set -a
+  . ./.env
+  set +a
+  cd elixir
+  ERL_AFLAGS="${ERL_AFLAGS:+${ERL_AFLAGS} }-eval 'public_key:cacerts_load(\"/etc/ssl/cert.pem\").'" \
+    exec mise exec -- ./bin/symphony \
+      --i-understand-that-this-will-be-running-without-the-usual-guardrails \
+      --port 4000 \
+      ../workflows/symphony/workflow.md
+)
 ```
 
 Only add `codex-ready` when an issue is safe to dispatch. Use `Todo` for queued
