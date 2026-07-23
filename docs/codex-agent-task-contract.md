@@ -54,6 +54,28 @@ placeholder, or malformed sections block dispatch with an actionable log. The
 issue must be corrected and approved again; an agent is never started to repair
 its own execution contract.
 
+## Issue Creation
+
+Repository tooling that creates this issue shape must validate the rendered
+contract and resolve one compatible Linear team, project, workflow state, and
+label set before mutation. An explicit create request authorizes one resulting
+issue; it does not authorize destination-object creation, general lifecycle
+management, or dispatch. Ask for input only when a required field remains
+materially ambiguous after bounded read-only resolution.
+
+Create through supported Linear tooling and treat top-level API errors or an
+unsuccessful mutation payload as failure. When a transport or incomplete
+response leaves the outcome uncertain, reconcile the requested issue by bounded
+read-only lookup before any retry so one invocation cannot blindly create
+duplicates.
+
+After creation or reconciliation, read the issue back and compare its title,
+canonical description, team, project, state, and complete labels with the
+validated request. Do not report success on a partial or mismatched readback.
+Adding `codex-ready` is a separate authority decision: exclude it from creation
+and add it only after explicit dispatch was requested and the contract and first
+readback both validate.
+
 For every valid dispatch, Symphony computes a versioned SHA-256 digest from the
 canonical title and description. Line-ending and trailing-whitespace differences
 are normalized; `updatedAt` is provenance only. The first attempt atomically

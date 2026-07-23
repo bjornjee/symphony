@@ -2,7 +2,7 @@
 name: linear
 description: |
   Use Symphony's `linear_graphql` client tool for raw Linear GraphQL
-  operations such as comment editing and upload flows.
+  operations such as issue creation, comment editing, and upload flows.
 ---
 
 # Linear GraphQL
@@ -70,6 +70,185 @@ query CommentCreateInputShape {
 ```
 
 ## Common workflows
+
+### Create and verify an issue
+
+Keep policy and sequencing in the calling skill. Use these operations for the
+raw GraphQL mechanics of resolving a destination, creating one issue,
+reconciling an uncertain response, reading it back, and updating labels.
+
+Resolve a team by an exact key or name using a bounded query. Require one match
+before using its id:
+
+```graphql
+query ResolveIssueCreationTeam($term: String!) {
+  teams(
+    filter: {
+      or: [
+        { key: { eqIgnoreCase: $term } }
+        { name: { eqIgnoreCase: $term } }
+      ]
+    }
+    first: 2
+  ) {
+    nodes {
+      id
+      key
+      name
+    }
+  }
+}
+```
+
+After resolving the team id, fetch its compatible states, projects, and labels.
+Keep `first` bounds explicit and reject a requested target that is absent or
+ambiguous. For a team with more than the selected bound, use an exact filtered
+query or pagination instead of assuming the first page is complete.
+
+```graphql
+query ResolveIssueCreationTargets($teamId: String!) {
+  team(id: $teamId) {
+    id
+    key
+    name
+    states {
+      nodes {
+        id
+        name
+        type
+      }
+    }
+    projects(first: 50) {
+      nodes {
+        id
+        name
+      }
+    }
+    labels(first: 100) {
+      nodes {
+        id
+        name
+      }
+    }
+  }
+}
+```
+
+Create the issue with already-resolved ids. Supply `labelIds` without any
+dispatch-only label:
+
+```graphql
+mutation CreateIssue($input: IssueCreateInput!) {
+  issueCreate(input: $input) {
+    success
+    issue {
+      id
+      identifier
+      url
+    }
+  }
+}
+```
+
+When a create response is ambiguous, reconcile with a bounded exact-title/team
+query before considering a retry. Compare description, project, state, and
+labels client-side to identify a full match; do not treat title alone as proof:
+
+```graphql
+query ReconcileIssueCreate($teamId: ID!, $title: String!) {
+  issues(
+    filter: {
+      team: { id: { eq: $teamId } }
+      title: { eq: $title }
+    }
+    first: 2
+  ) {
+    nodes {
+      id
+      identifier
+      title
+      description
+      createdAt
+      team {
+        id
+        key
+        name
+      }
+      project {
+        id
+        name
+      }
+      state {
+        id
+        name
+      }
+      labels {
+        nodes {
+          id
+          name
+        }
+      }
+    }
+  }
+}
+```
+
+Read back every field that the creation workflow must verify:
+
+```graphql
+query IssueCreationReadback($id: String!) {
+  issue(id: $id) {
+    id
+    identifier
+    url
+    title
+    description
+    team {
+      id
+      key
+      name
+    }
+    project {
+      id
+      name
+    }
+    state {
+      id
+      name
+      type
+    }
+    labels {
+      nodes {
+        id
+        name
+      }
+    }
+  }
+}
+```
+
+`issueUpdate.labelIds` replaces the issue's label set. Preserve the verified
+existing ids and pass their full union with any newly authorized label:
+
+```graphql
+mutation AddIssueLabels($id: String!, $labelIds: [String!]!) {
+  issueUpdate(id: $id, input: { labelIds: $labelIds }) {
+    success
+    issue {
+      id
+      labels {
+        nodes {
+          id
+          name
+        }
+      }
+    }
+  }
+}
+```
+
+Treat a top-level `errors` array as failure for every operation. Also require
+mutation `success: true` and all requested response fields.
 
 ### Query an issue by key, identifier, or id
 
@@ -376,7 +555,9 @@ mutation FileUpload(
 ## Usage rules
 
 - Use `linear_graphql` for comment edits, uploads, and ad-hoc Linear API
-  queries.
+  queries, including issue creation workflows.
+- Resolve issue-creation targets before mutation, keep reconciliation bounded,
+  and read created issues back by internal id.
 - Prefer the narrowest issue lookup that matches what you already know:
   key -> identifier search -> internal id.
 - For state transitions, fetch team states first and use the exact `stateId`
