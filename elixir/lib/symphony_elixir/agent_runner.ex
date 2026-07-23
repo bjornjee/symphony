@@ -234,6 +234,31 @@ defmodule SymphonyElixir.AgentRunner do
 
   defp send_worker_runtime_info(_recipient, _issue, _worker_host, _workspace, _audit_paths), do: :ok
 
+  defp send_worker_capability_info(recipient, %Issue{id: issue_id}, diagnostics)
+       when is_binary(issue_id) and is_pid(recipient) and is_map(diagnostics) do
+    send(recipient, {:worker_runtime_info, issue_id, %{capability_diagnostics: diagnostics}})
+    :ok
+  end
+
+  defp send_worker_capability_info(_recipient, _issue, _diagnostics), do: :ok
+
+  defp record_capability_diagnostics(workspace, issue, diagnostics) do
+    browser_path = diagnostics.browser_path
+
+    RunAudit.append(workspace, issue, :capability_diagnostics_resolved, %{
+      phase: "capability_diagnostics",
+      status: "completed",
+      browser_path: browser_path.selected,
+      browser_provenance: browser_path.provenance,
+      browser_code: browser_path.code,
+      browser_action: browser_path.action,
+      browser_usable: diagnostics.browser.usable,
+      playwright_usable: diagnostics.playwright.usable,
+      computer_use_usable: diagnostics.computer_use.usable,
+      computer_use_app_count: diagnostics.computer_use.app_count
+    })
+  end
+
   defp send_worker_completion_info(recipient, %Issue{id: issue_id}, {:ok, completion_info})
        when is_binary(issue_id) and is_pid(recipient) and is_map(completion_info) do
     send(recipient, {:worker_completion_info, issue_id, completion_info})
@@ -270,7 +295,21 @@ defmodule SymphonyElixir.AgentRunner do
           })
 
           try do
-            runtime = Map.put(runtime, :thread_id, session.thread_id)
+            capability_diagnostics_resolver =
+              Keyword.get(
+                runtime.opts,
+                :capability_diagnostics_resolver,
+                &AppServer.capability_diagnostics/1
+              )
+
+            {:ok, capability_diagnostics} = capability_diagnostics_resolver.(session)
+            record_capability_diagnostics(workspace, issue, capability_diagnostics)
+            send_worker_capability_info(codex_update_recipient, issue, capability_diagnostics)
+
+            runtime =
+              runtime
+              |> Map.put(:thread_id, session.thread_id)
+              |> Map.update!(:opts, &Keyword.put(&1, :capability_diagnostics, capability_diagnostics))
 
             with {:ok, instruction_authority} <-
                    InstructionAuthority.capture(session.instruction_sources, worker_host) do
