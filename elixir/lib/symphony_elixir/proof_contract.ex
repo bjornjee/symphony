@@ -5,7 +5,7 @@ defmodule SymphonyElixir.ProofContract do
   @expected_exits ~w(success failure)
   @max_timeout_ms 1_800_000
   @fields ~w(id phase_id role command working_directory expected_exit timeout_ms criterion_ids)
-  @unsafe ~r/\bgit(?:\s+-C\s+\S+)?\s+(?:add|am|apply|checkout|clean|commit|config|fetch|merge|mv|pull|push|rebase|reset|restore|revert|rm|switch|tag|worktree)\b|\bgh\s+pr\b|\brm\s+(?:-[^\s]*r[^\s]*f|-[^\s]*f[^\s]*r)\b|\b(?:dropdb|mix\s+ecto\.drop|rails\s+db:drop|tmux\s+send-keys|screen\s+-X\s+stuff)\b|\b(?:psql|mysql)\b.*\bDROP\b/i
+  @unsafe ~r/\bgit(?:\s+-C\s+\S+)?\s+(?:add|am|apply|checkout|clean|commit|config|fetch|merge|mv|pull|push|rebase|reset|restore|revert|rm|switch|tag)\b|\bgit(?:\s+-C\s+\S+)?\s+worktree\s+(?:add|lock|move|prune|remove|repair|unlock)\b|\bgh\s+pr\b|\brm\s+(?:-[^\s]*r[^\s]*f|-[^\s]*f[^\s]*r)\b|\b(?:dropdb|mix\s+ecto\.drop|rails\s+db:drop|tmux\s+send-keys|screen\s+-X\s+stuff)\b|\b(?:psql|mysql)\b.*\bDROP\b/i
 
   @spec validate([map()], [map()], [String.t()], [String.t()], keyword()) :: :ok | {:error, term()}
   def validate(proofs, phases, criterion_ids, candidate_paths, opts \\ [])

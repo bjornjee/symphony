@@ -81,6 +81,32 @@ defmodule SymphonyElixir.ProofContractTest do
              ProofContract.validate([%{proof | "command" => "git -C . commit -am unsafe"}], phases, ["criterion-1"], ["lib/example.ex"])
   end
 
+  test "allows read-only worktree identity checks" do
+    phases = [phase("final", [], ["final-proof"])]
+    proof = proof("final-proof", "final", "final", "success", ["criterion-1"])
+
+    assert :ok =
+             ProofContract.validate(
+               [%{proof | "command" => "git worktree list --porcelain"}],
+               phases,
+               ["criterion-1"],
+               ["lib/example.ex"]
+             )
+  end
+
+  test "rejects mutating worktree subcommands" do
+    phases = [phase("final", [], ["final-proof"])]
+    proof = proof("final-proof", "final", "final", "success", ["criterion-1"])
+
+    assert {:error, {:unsafe_proof_command, "final-proof"}} =
+             ProofContract.validate(
+               [%{proof | "command" => "git -C . worktree add ../other main"}],
+               phases,
+               ["criterion-1"],
+               ["lib/example.ex"]
+             )
+  end
+
   test "requires RED for a fix workflow" do
     final_phase = [phase("final", [], ["final-proof"])]
     final = proof("final-proof", "final", "final", "success", ["criterion-1"])

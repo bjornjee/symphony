@@ -9,7 +9,7 @@ defmodule SymphonyElixir.ImplementationReview do
   alias SymphonyElixir.RepositoryReviewSnapshot
 
   @read_only %{"type" => "readOnly", "networkAccess" => false}
-  @deny %{reject: %{sandbox_approval: true, rules: true, mcp_elicitations: true}}
+  @deny "never"
   @fields ~w(verdict blocking_findings advisory_findings)
 
   @spec request_tool_spec() :: map()

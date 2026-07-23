@@ -88,6 +88,8 @@ defmodule SymphonyElixir.ImplementationReviewTest do
     assert_receive {:review_opts, opts}
     assert opts[:effort] == "medium"
     assert opts[:sandbox_policy] == %{"type" => "readOnly", "networkAccess" => false}
+    assert opts[:approval_policy] == "never"
+    assert opts[:auto_approve_requests] == false
   end
 
   test "third revision invokes exhaustion exactly once", ctx do

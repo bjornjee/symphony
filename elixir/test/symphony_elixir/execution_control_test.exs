@@ -28,6 +28,9 @@ defmodule SymphonyElixir.ExecutionControlTest do
     defdelegate delivery_state(plan, key, workspace),
       to: SymphonyElixir.ExecutionControl
 
+    defdelegate exhausted_proof(plan, key),
+      to: SymphonyElixir.ExecutionControl
+
     defp execute(_directory, "sleep 1", opts) do
       if Keyword.fetch!(opts, :timeout_ms) < 1_000,
         do: {:error, :timeout},
@@ -107,10 +110,48 @@ defmodule SymphonyElixir.ExecutionControlTest do
   end
 
   test "limits every proof to three attempts", ctx do
-    assert {:ok, _} = ExecutionControl.run_plan_proof(ctx.plan, ctx.key, ctx.workspace, "reproduce", "red")
-    assert {:ok, _} = ExecutionControl.run_plan_proof(ctx.plan, ctx.key, ctx.workspace, "reproduce", "red")
-    assert {:ok, _} = ExecutionControl.run_plan_proof(ctx.plan, ctx.key, ctx.workspace, "reproduce", "red")
+    for remaining <- [2, 1, 0] do
+      assert {:ok, %{"attempts_remaining" => ^remaining}} =
+               ExecutionControl.run_plan_proof(
+                 ctx.plan,
+                 ctx.key,
+                 ctx.workspace,
+                 "reproduce",
+                 "red"
+               )
+    end
+
     assert {:error, :proof_attempts_exhausted} = ExecutionControl.run_plan_proof(ctx.plan, ctx.key, ctx.workspace, "reproduce", "red")
+  end
+
+  test "reports a proof as exhausted only after three failed receipts", ctx do
+    proof =
+      ctx.plan
+      |> get_in(["candidate", "proofs"])
+      |> hd()
+      |> Map.put("expected_exit", "success")
+
+    plan = put_in(ctx.plan, ["candidate", "proofs"], [proof])
+    key = ctx.key <> "-failed"
+
+    assert :none = ExecutionControl.exhausted_proof(plan, key)
+
+    for _attempt <- 1..3 do
+      assert {:ok, %{"passed" => false}} =
+               ExecutionControl.run_plan_proof(plan, key, ctx.workspace, "reproduce", "red")
+    end
+
+    assert {:ok, %{proof: %{"id" => "red"}, last_receipt: %{"attempt" => 3}}} =
+             ExecutionControl.exhausted_proof(plan, key)
+  end
+
+  test "does not report an exhausted proof when any attempt passed", ctx do
+    for _attempt <- 1..3 do
+      assert {:ok, %{"passed" => true}} =
+               ExecutionControl.run_plan_proof(ctx.plan, ctx.key, ctx.workspace, "reproduce", "red")
+    end
+
+    assert :none = ExecutionControl.exhausted_proof(ctx.plan, ctx.key)
   end
 
   test "rejects an unsupported execution tool", ctx do
@@ -170,6 +211,49 @@ defmodule SymphonyElixir.ExecutionControlTest do
              ExecutionControl.run_plan_proof(plan, ctx.key, ctx.workspace, "reproduce", "red")
 
     assert {:ok, %{"passed" => true}} =
+             ExecutionControl.run_plan_proof(plan, ctx.key, ctx.workspace, "fix", "green")
+  end
+
+  test "feature RED permits planned test changes at the pinned head", ctx do
+    plan = ctx.plan |> Map.put("workflow", "feature") |> put_in(["candidate", "red_policy"], "required")
+    File.write!(Path.join(ctx.workspace, "README.md"), "failing behavior contract\n")
+
+    assert {:ok, %{"passed" => true, "before_state_digest" => digest, "after_state_digest" => digest}} =
+             ExecutionControl.run_plan_proof(plan, ctx.key, ctx.workspace, "reproduce", "red")
+
+    assert {:ok, _receipt} =
+             ExecutionControl.complete_execution_phase(
+               plan,
+               ctx.key,
+               ctx.workspace,
+               "reproduce"
+             )
+  end
+
+  test "feature behavior baseline runs before required RED", ctx do
+    plan = %{
+      ctx.plan
+      | "workflow" => "feature",
+        "candidate" =>
+          ctx.plan["candidate"]
+          |> Map.put("red_policy", "required")
+          |> Map.put("proofs", [
+            proof("baseline", "reproduce", "baseline", "success", "test -f README.md"),
+            proof("red", "fix", "red", "failure", "exit 2"),
+            proof("green", "fix", "green", "success", "test -f README.md")
+          ])
+    }
+
+    assert {:ok, %{"passed" => true}} =
+             ExecutionControl.run_plan_proof(
+               plan,
+               ctx.key,
+               ctx.workspace,
+               "reproduce",
+               "baseline"
+             )
+
+    assert {:error, {:red_proof_required, "red"}} =
              ExecutionControl.run_plan_proof(plan, ctx.key, ctx.workspace, "fix", "green")
   end
 

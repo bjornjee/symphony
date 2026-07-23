@@ -24,13 +24,12 @@ defmodule SymphonyElixir.Linear.Adapter do
   """
 
   @comment_read_query """
-  query SymphonyReadIssueComment($issueId: String!, $commentId: ID!, $first: Int!) {
-    issue(id: $issueId) {
-      comments(first: $first, filter: {id: {eq: $commentId}}) {
-        nodes {
-          id
-          body
-        }
+  query SymphonyReadIssueComment($commentId: String!) {
+    comment(id: $commentId) {
+      id
+      body
+      issue {
+        id
       }
     }
   }
@@ -110,12 +109,10 @@ defmodule SymphonyElixir.Linear.Adapter do
   def fetch_comment(issue_id, comment_id) when is_binary(issue_id) and is_binary(comment_id) do
     with {:ok, response} <-
            client_module().graphql(@comment_read_query, %{
-             issueId: issue_id,
-             commentId: comment_id,
-             first: 1
+             commentId: comment_id
            }),
-         nodes when is_list(nodes) <- get_in(response, ["data", "issue", "comments", "nodes"]) do
-      decode_comment(nodes, comment_id)
+         comment <- get_in(response, ["data", "comment"]) do
+      decode_comment(comment, issue_id, comment_id)
     else
       {:error, reason} -> {:error, reason}
       _ -> {:error, :comment_read_failed}
@@ -151,14 +148,18 @@ defmodule SymphonyElixir.Linear.Adapter do
     Application.get_env(:symphony_elixir, :linear_client_module, Client)
   end
 
-  defp decode_comment([], _comment_id), do: {:ok, nil}
+  defp decode_comment(nil, _issue_id, _comment_id), do: {:ok, nil}
 
-  defp decode_comment([%{"id" => comment_id, "body" => body}], comment_id)
+  defp decode_comment(
+         %{"id" => comment_id, "body" => body, "issue" => %{"id" => issue_id}},
+         issue_id,
+         comment_id
+       )
        when is_binary(body) do
     {:ok, %{id: comment_id, body: body}}
   end
 
-  defp decode_comment(_nodes, _comment_id), do: {:error, :comment_read_failed}
+  defp decode_comment(_comment, _issue_id, _comment_id), do: {:error, :comment_read_failed}
 
   defp attached_cleanup_labels(issue, label_names) do
     label_names

@@ -1150,13 +1150,15 @@ defmodule SymphonyElixir.StatusDashboard do
   defp humanize_codex_event(:turn_failed, _message, payload), do: humanize_codex_method("turn/failed", payload)
   defp humanize_codex_event(:turn_cancelled, _message, _payload), do: "turn cancelled"
 
-  defp humanize_codex_event(:workflow_phase, message, _payload) do
+  defp humanize_codex_event(:workflow_phase, %{} = message, _payload) do
     phase = Map.get(message, :phase, "workflow")
     status = Map.get(message, :status, "updated")
     revision = Map.get(message, :revision)
     suffix = if is_integer(revision), do: " (candidate #{revision})", else: ""
     "#{phase}: #{status}#{suffix}"
   end
+
+  defp humanize_codex_event(:workflow_phase, _message, _payload), do: "workflow: updated"
 
   defp humanize_codex_event(:malformed, _message, _payload), do: "malformed JSON event from codex"
   defp humanize_codex_event(_event, _message, _payload), do: nil

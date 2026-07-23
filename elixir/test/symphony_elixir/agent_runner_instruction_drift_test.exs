@@ -33,10 +33,10 @@ defmodule SymphonyElixir.AgentRunnerInstructionDriftTest do
             printf '%s\n' '{"id":1,"result":{}}'
             ;;
           *'"method":"thread/start"'*)
-            printf '%s\n' '{"id":2,"result":{"thread":{"id":"thread-drift"},"instructionSources":[{"path":"#{instruction}"}]}}'
+            printf '%s\n' '{"id":2,"result":{"thread":{"id":"thread-drift"},"instructionSources":["#{instruction}"]}}'
             ;;
           *'"method":"thread/resume"'*)
-            printf '%s\n' '{"id":5,"result":{"thread":{"id":"thread-drift"},"instructionSources":[{"path":"#{instruction}"}]}}'
+            printf '%s\n' '{"id":5,"result":{"thread":{"id":"thread-drift"},"instructionSources":["#{instruction}"]}}'
             ;;
           *'"method":"thread/goal/set"'*)
             printf '%s\n' '{"id":4,"result":{"goal":{"status":"active"}}}'

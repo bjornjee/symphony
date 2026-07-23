@@ -6,6 +6,30 @@ defmodule SymphonyElixir.WorkflowProfile do
   alias SymphonyElixir.Linear.TaskContract
 
   @names ~w(feature fix refactor chore pr)
+  @profile_dir Path.expand("../../priv/workflow_profiles", __DIR__)
+  @common_path Path.join(@profile_dir, "common.md")
+  @feature_path Path.join(@profile_dir, "feature.md")
+  @fix_path Path.join(@profile_dir, "fix.md")
+  @refactor_path Path.join(@profile_dir, "refactor.md")
+  @chore_path Path.join(@profile_dir, "chore.md")
+  @pr_path Path.join(@profile_dir, "pr.md")
+
+  @external_resource @common_path
+  @external_resource @feature_path
+  @external_resource @fix_path
+  @external_resource @refactor_path
+  @external_resource @chore_path
+  @external_resource @pr_path
+
+  @profiles %{
+    "common" => File.read!(@common_path),
+    "feature" => File.read!(@feature_path),
+    "fix" => File.read!(@fix_path),
+    "refactor" => File.read!(@refactor_path),
+    "chore" => File.read!(@chore_path),
+    "pr" => File.read!(@pr_path)
+  }
+
   @title_prefixes %{
     "feat" => "feature",
     "fix" => "fix",
@@ -86,10 +110,6 @@ defmodule SymphonyElixir.WorkflowProfile do
   end
 
   defp read_profile!(name) do
-    priv_dir = :symphony_elixir |> :code.priv_dir() |> to_string()
-
-    [priv_dir, "workflow_profiles", "#{name}.md"]
-    |> Path.join()
-    |> File.read!()
+    Map.fetch!(@profiles, name)
   end
 end

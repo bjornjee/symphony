@@ -50,6 +50,18 @@ defmodule SymphonyElixir.AgentRunner do
   end
 
   @doc false
+  @spec implementation_sandbox_policy_for_test(Path.t(), map()) :: map()
+  def implementation_sandbox_policy_for_test(workspace, execution_plan) do
+    implementation_sandbox_policy(workspace, execution_plan)
+  end
+
+  @doc false
+  @spec implementation_command_approval_for_test(Path.t(), map()) :: boolean()
+  def implementation_command_approval_for_test(workspace, payload) do
+    implementation_command_approval?(workspace, payload)
+  end
+
+  @doc false
   @spec validate_handoff_for_test(Path.t(), Issue.t(), TaskContract.t(), map(), keyword()) ::
           {:ok, map()} | {:error, term()}
   def validate_handoff_for_test(workspace, %Issue{} = issue, %TaskContract{} = contract, proofs, opts \\ [])
@@ -278,6 +290,12 @@ defmodule SymphonyElixir.AgentRunner do
                 runtime.opts
                 |> Keyword.put(:worker_host, worker_host)
                 |> Keyword.put(:instruction_authority, instruction_authority)
+                |> Keyword.put(:pin_primary_thread, fn ->
+                  case ThreadIdentity.pin(workspace, session.thread_id, worker_host) do
+                    {:ok, _thread_id} -> :ok
+                    {:error, _reason} = error -> error
+                  end
+                end)
                 |> Keyword.put(
                   :on_message,
                   codex_message_handler(
@@ -308,8 +326,7 @@ defmodule SymphonyElixir.AgentRunner do
               task_branch_ensurer =
                 Keyword.get(runtime.opts, :task_branch_ensurer, &TaskBranch.ensure/5)
 
-              with {:ok, _thread_id} <- ThreadIdentity.pin(workspace, session.thread_id, worker_host),
-                   {:ok, execution_plan} <-
+              with {:ok, execution_plan} <-
                      execution_plan_for_run(
                        planning_runner,
                        session,
@@ -320,6 +337,7 @@ defmodule SymphonyElixir.AgentRunner do
                        instruction_authority,
                        planning_opts
                      ),
+                   :ok <- pin_thread_before_goal(execution_plan, workspace, session, worker_host),
                    ledger_key <- execution_ledger_key(execution_plan, issue),
                    :ok <-
                      persist_execution_authority(
@@ -331,6 +349,7 @@ defmodule SymphonyElixir.AgentRunner do
                      ),
                    :ok <- record_execution_plan_approved(workspace, issue, session, execution_plan),
                    :ok <- set_goal_and_record(workspace, issue, session, task_contract, execution_plan),
+                   {:ok, _thread_id} <- ThreadIdentity.pin(workspace, session.thread_id, worker_host),
                    {:ok, task_branch} <-
                      task_branch_ensurer.(
                        workspace,
@@ -416,6 +435,16 @@ defmodule SymphonyElixir.AgentRunner do
   defp execution_plan_base_sha(execution_plan),
     do: get_in(execution_plan, ["candidate", "repository", "base_sha"])
 
+  defp pin_thread_before_goal(%{"execution_mode" => "simple"}, _workspace, _session, _worker_host),
+    do: :ok
+
+  defp pin_thread_before_goal(_execution_plan, workspace, session, worker_host) do
+    case ThreadIdentity.pin(workspace, session.thread_id, worker_host) do
+      {:ok, _thread_id} -> :ok
+      {:error, _reason} = error -> error
+    end
+  end
+
   defp set_goal_and_record(workspace, issue, session, task_contract, execution_plan) do
     with :ok <- AppServer.set_goal(session, goal_objective(issue, task_contract, execution_plan)) do
       RunAudit.append(workspace, issue, :codex_goal_set, %{
@@ -481,6 +510,7 @@ defmodule SymphonyElixir.AgentRunner do
     end
   end
 
+  defp goal_status_for_result({:ok, %{outcome: :human_review_required}}), do: "blocked"
   defp goal_status_for_result({:ok, %{issue_active: false}}), do: "complete"
   defp goal_status_for_result({:ok, %{issue_routable: false}}), do: "complete"
 
@@ -499,7 +529,13 @@ defmodule SymphonyElixir.AgentRunner do
          runtime,
          {turn_number, max_turns}
        ) do
-    case revalidate_execution_authority(app_session, workspace, issue, task_contract, runtime) do
+    case revalidate_authority_and_proof_budget(
+           app_session,
+           workspace,
+           issue,
+           task_contract,
+           runtime
+         ) do
       :ok ->
         prompt = build_turn_prompt(issue, runtime.opts, turn_number, max_turns)
         RunAudit.append(workspace, issue, :codex_turn_started, %{phase: "codex_turn", status: "started", turn_number: turn_number})
@@ -508,11 +544,13 @@ defmodule SymphonyElixir.AgentRunner do
                app_session,
                prompt,
                issue,
-               sandbox_policy: %{
-                 "type" => "workspaceWrite",
-                 "writableRoots" => [workspace],
-                 "networkAccess" => false
-               },
+               approval_policy: "on-request",
+               command_approval_authorizer: &implementation_command_approval?(workspace, &1),
+               sandbox_policy:
+                 implementation_sandbox_policy(
+                   workspace,
+                   Keyword.fetch!(runtime.opts, :execution_plan)
+                 ),
                tool_executor:
                  execution_tool_executor(
                    app_session,
@@ -535,7 +573,7 @@ defmodule SymphonyElixir.AgentRunner do
             Logger.info("Completed agent run for #{issue_context(issue)} session_id=#{turn_session[:session_id]} workspace=#{workspace} turn=#{turn_number}/#{max_turns}")
             RunAudit.append(workspace, issue, :codex_turn_completed, %{phase: "codex_turn", status: "completed", session_id: turn_session[:session_id], turn_number: turn_number})
 
-            handle_completed_turn(
+            handle_completed_or_exhausted_turn(
               app_session,
               workspace,
               issue,
@@ -547,11 +585,96 @@ defmodule SymphonyElixir.AgentRunner do
 
           {:error, reason} = error ->
             RunAudit.append(workspace, issue, :codex_turn_failed, %{phase: "codex_turn", status: "failed", reason: reason, turn_number: turn_number})
-            error
+
+            handle_failed_or_exhausted_turn(
+              workspace,
+              issue,
+              task_contract,
+              runtime,
+              error
+            )
         end
+
+      {:blocked, completion_info} ->
+        {:ok, completion_info}
 
       {:error, :instruction_drift} ->
         handle_instruction_drift(workspace, issue, task_contract, runtime)
+
+      {:error, _reason} = error ->
+        error
+    end
+  end
+
+  defp revalidate_authority_and_proof_budget(app_session, workspace, issue, contract, runtime) do
+    with :ok <-
+           revalidate_execution_authority(
+             app_session,
+             workspace,
+             issue,
+             contract,
+             runtime
+           ) do
+      block_exhausted_proof(workspace, issue, contract, runtime)
+    end
+  end
+
+  defp handle_completed_or_exhausted_turn(
+         app_session,
+         workspace,
+         issue,
+         task_contract,
+         codex_update_recipient,
+         runtime,
+         turn_numbers
+       ) do
+    case block_exhausted_proof(workspace, issue, task_contract, runtime) do
+      :ok ->
+        handle_completed_turn(
+          app_session,
+          workspace,
+          issue,
+          task_contract,
+          codex_update_recipient,
+          runtime,
+          turn_numbers
+        )
+
+      {:blocked, completion_info} ->
+        {:ok, completion_info}
+
+      {:error, _reason} = error ->
+        error
+    end
+  end
+
+  defp handle_failed_or_exhausted_turn(workspace, issue, contract, runtime, turn_error) do
+    case block_exhausted_proof(workspace, issue, contract, runtime) do
+      :ok -> turn_error
+      {:blocked, completion_info} -> {:ok, completion_info}
+      {:error, _reason} = blocker_error -> blocker_error
+    end
+  end
+
+  defp block_exhausted_proof(workspace, issue, contract, runtime) do
+    plan = Keyword.fetch!(runtime.opts, :execution_plan)
+    key = Keyword.fetch!(runtime.opts, :execution_ledger_key)
+
+    case ExecutionControl.block_on_exhausted_proof(plan, key, issue, contract) do
+      :none ->
+        :ok
+
+      {:ok, completion_info} ->
+        RunAudit.append(workspace, issue, :execution_proof_exhausted, %{
+          phase: "proof",
+          status: "blocked",
+          proof_id: completion_info.blocker_proof_id,
+          receipt_digest: completion_info.blocker_receipt_digest,
+          comment_id: completion_info.blocker_comment_id,
+          issue_state: completion_info.issue_state
+        })
+
+        {:blocked, completion_info}
 
       {:error, _reason} = error ->
         error
@@ -758,6 +881,58 @@ defmodule SymphonyElixir.AgentRunner do
 
   defp execution_plan_origin(%{"candidate" => %{"repository" => %{"origin" => origin}}}), do: origin
   defp execution_plan_origin(%{"repository" => %{"origin" => origin}}), do: origin
+
+  defp implementation_sandbox_policy(workspace, execution_plan) do
+    protected_roots =
+      execution_plan
+      |> execution_plan_affected_paths()
+      |> Enum.filter(&repository_codex_path?/1)
+      |> Enum.map(&Path.dirname/1)
+      |> Enum.map(&Path.join(workspace, &1))
+
+    %{
+      "type" => "workspaceWrite",
+      "writableRoots" => Enum.uniq([workspace | protected_roots]),
+      "networkAccess" => false
+    }
+  end
+
+  defp execution_plan_affected_paths(%{"candidate" => %{"affected_paths" => paths}}) when is_list(paths), do: paths
+  defp execution_plan_affected_paths(%{"affected_paths" => paths}) when is_list(paths), do: paths
+  defp execution_plan_affected_paths(_execution_plan), do: []
+
+  defp repository_codex_path?(path) when is_binary(path),
+    do: path == ".codex" or String.starts_with?(path, ".codex/")
+
+  defp repository_codex_path?(_path), do: false
+
+  defp implementation_command_approval?(workspace, %{
+         "params" =>
+           %{
+             "command" => command,
+             "cwd" => cwd
+           } = params
+       })
+       when is_binary(workspace) and is_binary(command) and is_binary(cwd) do
+    Path.expand(cwd) == Path.expand(workspace) and
+      is_nil(params["additionalPermissions"]) and
+      is_nil(params["networkApprovalContext"]) and
+      empty_approval_amendments?(params["proposedNetworkPolicyAmendments"]) and
+      conventional_commit_command?(command)
+  end
+
+  defp implementation_command_approval?(_workspace, _payload), do: false
+
+  defp empty_approval_amendments?(nil), do: true
+  defp empty_approval_amendments?([]), do: true
+  defp empty_approval_amendments?(_amendments), do: false
+
+  defp conventional_commit_command?(command) do
+    Regex.match?(
+      ~r/\Agit commit -m (?:(?:"(?:feat|fix|refactor|docs|test|chore|perf|ci): [A-Za-z0-9][A-Za-z0-9 ._\/:\-]{0,62}")|(?:'(?:feat|fix|refactor|docs|test|chore|perf|ci): [A-Za-z0-9][A-Za-z0-9 ._\/:\-]{0,62}'))\z/,
+      command
+    )
+  end
 
   defp execution_tool_executor(app_session, runtime, workspace, issue, contract) do
     plan = Keyword.fetch!(runtime.opts, :execution_plan)
@@ -972,6 +1147,7 @@ defmodule SymphonyElixir.AgentRunner do
     - Inspect the native plan and resume the earliest incomplete approved phase. Do not add, remove, rename, reorder, or skip phases.
     - The original task instructions and prior turn context are already present in this thread, so do not restate them before acting.
     - Inspect engine receipts and resume the earliest incomplete approved phase; do not rerun valid proof or phase receipts.
+    - A failed proof receipt is not a valid proof receipt. When its phase is still incomplete and attempts remain, call `run_plan_proof` once to observe the current engine behavior; do not assume a prior engine failure still applies after Symphony resumed the run.
     - If a PR, commit, or proof result already exists, verify only the missing handoff facts instead of rerunning broad setup, research, or full test gates.
     - After the final commit, rerun final proof, request implementation review when required, and call `publish_pull_request`; Symphony generates completion evidence.
     - Do not create the completed-work Linear handoff comment or move the issue to the configured handoff state; Symphony owns those external writes after validation.

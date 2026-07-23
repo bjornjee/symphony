@@ -166,6 +166,24 @@ defmodule SymphonyElixir.StatusDashboardSnapshotTest do
     refute backoff_line =~ "\\n"
   end
 
+  test "renders a workflow phase event without a message" do
+    snapshot_data =
+      {:ok,
+       %{
+         running: [
+           running_entry(%{
+             last_codex_event: :workflow_phase,
+             last_codex_message: %{event: :workflow_phase, message: nil}
+           })
+         ],
+         retrying: [],
+         codex_totals: %{input_tokens: 0, output_tokens: 0, total_tokens: 0, seconds_running: 0},
+         rate_limits: nil
+       }}
+
+    assert render_snapshot(snapshot_data, 0.0) =~ "workflow: updated"
+  end
+
   test "snapshot fixture: unlimited credits variant" do
     snapshot_data =
       {:ok,

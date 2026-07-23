@@ -2,12 +2,16 @@ defmodule SymphonyElixir.ExecutionControl do
   @moduledoc "Engine-owned proof execution and workflow evidence gates."
 
   alias SymphonyElixir.{
+    Config,
     EngineCommand,
     ExecutionLedger,
+    HumanReviewBlocker,
     PlanningArtifact,
     ProofWorkingDirectory,
     RepositoryFingerprint
   }
+
+  alias SymphonyElixir.Linear.{Issue, TaskContract}
 
   @diagnosis_fields ~w(claim path line_start line_end evidence_summary red_proof_id)
 
@@ -81,6 +85,7 @@ defmodule SymphonyElixir.ExecutionControl do
         "role" => proof["role"],
         "criterion_ids" => proof["criterion_ids"],
         "attempt" => attempt,
+        "attempts_remaining" => 3 - attempt,
         "expected_exit" => proof["expected_exit"],
         "exit_status" => result.exit_status,
         "passed" => passed,
@@ -100,6 +105,52 @@ defmodule SymphonyElixir.ExecutionControl do
         :exists -> {:error, :proof_attempt_collision}
         {:error, reason} -> {:error, {:proof_receipt_failed, reason}}
       end
+    end
+  end
+
+  @spec exhausted_proof(map(), String.t()) ::
+          :none | {:ok, %{proof: map(), last_receipt: map()}} | {:error, term()}
+  def exhausted_proof(plan, ledger_key) do
+    proofs = get_in(plan, ["candidate", "proofs"]) || plan["proofs"] || []
+
+    Enum.reduce_while(proofs, :none, fn proof, _none ->
+      receipts =
+        1..3
+        |> Enum.map(&ExecutionLedger.read(ledger_key, "proof", "#{proof["id"]}-#{&1}"))
+        |> Enum.flat_map(fn
+          {:ok, receipt} -> [receipt]
+          :missing -> []
+          {:error, reason} -> [{:error, reason}]
+        end)
+
+      cond do
+        Enum.any?(receipts, &match?({:error, _reason}, &1)) ->
+          {:halt, {:error, :proof_receipt_invalid}}
+
+        Enum.any?(receipts, &(not receipt_matches_proof?(&1, proof))) ->
+          {:halt, {:error, :proof_receipt_drift}}
+
+        length(receipts) == 3 and Enum.all?(receipts, &(not &1["passed"])) ->
+          {:halt, {:ok, %{proof: proof, last_receipt: List.last(receipts)}}}
+
+        true ->
+          {:cont, :none}
+      end
+    end)
+  end
+
+  @spec block_on_exhausted_proof(map(), String.t(), Issue.t(), TaskContract.t(), keyword()) ::
+          :none | {:ok, map()} | {:error, term()}
+  def block_on_exhausted_proof(plan, ledger_key, issue, contract, opts \\ []) do
+    case exhausted_proof(plan, ledger_key) do
+      :none ->
+        :none
+
+      {:ok, %{proof: proof, last_receipt: receipt}} ->
+        publish_proof_exhaustion(issue, contract, plan, proof, receipt, opts)
+
+      {:error, _reason} = error ->
+        error
     end
   end
 
@@ -212,7 +263,7 @@ defmodule SymphonyElixir.ExecutionControl do
   end
 
   defp workflow_preconditions(%{"workflow" => "feature"} = plan, ledger_key, %{"role" => role}, _state)
-       when role not in ~w(red) do
+       when role not in ~w(red baseline) do
     if get_in(plan, ["candidate", "red_policy"]) == "required", do: require_role(plan, ledger_key, "red"), else: :ok
   end
 
@@ -241,6 +292,58 @@ defmodule SymphonyElixir.ExecutionControl do
     |> case do
       nil -> {:error, :passed_proof_required}
       receipt -> {:ok, receipt}
+    end
+  end
+
+  defp receipt_matches_proof?(receipt, proof) when is_map(receipt) and is_map(proof) do
+    receipt["proof_id"] == proof["id"] and
+      receipt["proof_digest"] == PlanningArtifact.digest(proof)
+  end
+
+  defp receipt_matches_proof?(_receipt, _proof), do: false
+
+  defp publish_proof_exhaustion(issue, contract, plan, proof, receipt, opts) do
+    detail =
+      receipt["runner_error"] ||
+        receipt["freshness_error"] ||
+        "exit status #{receipt["exit_status"]} did not match #{receipt["expected_exit"]}"
+
+    body =
+      """
+      ## Agent Blocked
+
+      Engine proof `#{proof["id"]}` failed all three approved attempts. Symphony stopped automatic execution to prevent a retry loop.
+
+      Last failure: #{detail}.
+
+      Review the repository-owned verification command or its execution environment, then explicitly redispatch the issue after correcting the contract or implementation.
+
+      <!-- symphony-proof-exhausted:v1 plan=#{plan["plan_digest"]} proof=#{proof["id"]} -->
+      """
+      |> String.trim()
+
+    case HumanReviewBlocker.publish(
+           issue,
+           [contract.digest, plan["plan_digest"], proof["id"], "proof-exhausted"],
+           body,
+           opts
+         ) do
+      {:ok, comment_id} ->
+        {:ok,
+         %{
+           continuation: :done,
+           outcome: :human_review_required,
+           blocker_comment_id: comment_id,
+           blocker_proof_id: proof["id"],
+           blocker_receipt_digest: receipt["receipt_digest"],
+           issue_state: Keyword.get_lazy(opts, :handoff_state, fn -> Config.settings!().tracker.handoff_state end),
+           issue_active: false,
+           issue_routable: false,
+           issue_labels: issue.labels
+         }}
+
+      {:error, reason} ->
+        {:error, reason}
     end
   end
 
@@ -398,11 +501,16 @@ defmodule SymphonyElixir.ExecutionControl do
 
   defp execution_base(plan), do: get_in(plan, ["candidate", "repository", "base_sha"]) || get_in(plan, ["repository", "base_sha"])
 
-  defp proof_freshness_error(%{"role" => role}, before, after_state, base_sha)
-       when role in ~w(red baseline) do
+  defp proof_freshness_error(%{"role" => "baseline"}, before, after_state, base_sha) do
     if before.clean and after_state.clean and before.digest == after_state.digest and before.base_sha == base_sha,
       do: nil,
       else: "preimplementation_proof_requires_clean_stable_base"
+  end
+
+  defp proof_freshness_error(%{"role" => "red"}, before, after_state, base_sha) do
+    if before.digest == after_state.digest and before.base_sha == base_sha,
+      do: nil,
+      else: "red_proof_requires_stable_pinned_head"
   end
 
   defp proof_freshness_error(%{"role" => "final"}, before, after_state, _base_sha) do
