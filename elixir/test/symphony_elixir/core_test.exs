@@ -1726,6 +1726,57 @@ defmodule SymphonyElixir.CoreTest do
     refute prompt =~ "final native plan exactly matches"
   end
 
+  test "execution prompt reports the selected browser verification path" do
+    issue = %Issue{
+      id: "issue-browser-capability",
+      identifier: "PIN-29",
+      title: "Report browser capability",
+      description: "Use the supported visual verification backend",
+      state: "In Progress",
+      url: "https://example.org/issues/PIN-29"
+    }
+
+    execution_plan = %{
+      "execution_mode" => "simple",
+      "plan_digest" => String.duplicate("a", 64)
+    }
+
+    prompt =
+      PromptBuilder.build_execution_prompt(issue,
+        execution_plan: execution_plan,
+        capability_diagnostics: %{
+          browser: %{
+            configured: true,
+            usable: false,
+            code: "session_backend_unavailable"
+          },
+          computer_use: %{
+            configured: true,
+            usable: true,
+            code: "ready"
+          },
+          playwright: %{
+            configured: true,
+            usable: true,
+            code: "ready"
+          },
+          browser_path: %{
+            selected: "playwright_headless",
+            provenance: "codex_global_mcp",
+            code: "browser_session_backend_unavailable",
+            message: "Browser has no backend bound to this standalone app-server session.",
+            action: "Use the inherited Playwright MCP for automated UI verification."
+          }
+        }
+      )
+
+    assert prompt =~ "Runtime capability diagnostics"
+    assert prompt =~ "selected browser path: `playwright_headless`"
+    assert prompt =~ "provenance: `codex_global_mcp`"
+    assert prompt =~ "Use the inherited Playwright MCP"
+    assert prompt =~ "Computer Use: configured=true, usable=true"
+  end
+
   test "prompt builder renders issue datetime fields without crashing" do
     workflow_prompt = "Ticket {{ issue.identifier }} created={{ issue.created_at }} updated={{ issue.updated_at }}"
 
@@ -2009,7 +2060,8 @@ defmodule SymphonyElixir.CoreTest do
                  completion_evidence_validator: &valid_handoff_evidence/5,
                  handoff_publisher: &valid_handoff_publisher/4,
                  planning_lifecycle_runner: &approve_execution_plan/6,
-                 task_branch_ensurer: &accept_task_branch/5
+                 task_branch_ensurer: &accept_task_branch/5,
+                 capability_diagnostics_resolver: &test_capability_diagnostics/1
                )
 
       entries_after = MapSet.new(File.ls!(workspace_root))
@@ -2112,7 +2164,8 @@ defmodule SymphonyElixir.CoreTest do
                  completion_evidence_validator: &valid_handoff_evidence/5,
                  handoff_publisher: &valid_handoff_publisher/4,
                  planning_lifecycle_runner: &approve_execution_plan/6,
-                 task_branch_ensurer: &accept_task_branch/5
+                 task_branch_ensurer: &accept_task_branch/5,
+                 capability_diagnostics_resolver: &test_capability_diagnostics/1
                )
 
       assert_receive {:codex_worker_update, "issue-live-updates",
@@ -2220,7 +2273,8 @@ defmodule SymphonyElixir.CoreTest do
                  completion_evidence_validator: &valid_handoff_evidence/5,
                  handoff_publisher: &valid_handoff_publisher/4,
                  planning_lifecycle_runner: &approve_execution_plan/6,
-                 task_branch_ensurer: &accept_task_branch/5
+                 task_branch_ensurer: &accept_task_branch/5,
+                 capability_diagnostics_resolver: &test_capability_diagnostics/1
                )
 
       assert {:ok, workspace} = SymphonyElixir.PathSafety.canonicalize(Path.join(workspace_root, "MT-AUDIT"))
@@ -2459,7 +2513,8 @@ defmodule SymphonyElixir.CoreTest do
                  completion_evidence_validator: evidence_validator,
                  handoff_publisher: &valid_handoff_publisher/4,
                  planning_lifecycle_runner: &approve_execution_plan/6,
-                 task_branch_ensurer: &accept_task_branch/5
+                 task_branch_ensurer: &accept_task_branch/5,
+                 capability_diagnostics_resolver: &test_capability_diagnostics/1
                )
 
       assert_receive {:issue_state_fetch, 1}
@@ -2619,7 +2674,8 @@ defmodule SymphonyElixir.CoreTest do
                AgentRunner.run(issue, nil,
                  issue_state_fetcher: state_fetcher,
                  planning_lifecycle_runner: &approve_execution_plan/6,
-                 task_branch_ensurer: &accept_task_branch/5
+                 task_branch_ensurer: &accept_task_branch/5,
+                 capability_diagnostics_resolver: &test_capability_diagnostics/1
                )
 
       trace = File.read!(trace_file)

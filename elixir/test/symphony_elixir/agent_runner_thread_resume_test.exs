@@ -125,7 +125,8 @@ defmodule SymphonyElixir.AgentRunnerThreadResumeTest do
             opts
           )
         end,
-        task_branch_ensurer: &accept_task_branch/5
+        task_branch_ensurer: &accept_task_branch/5,
+        capability_diagnostics_resolver: &test_capability_diagnostics/1
       ]
 
       assert :ok = AgentRunner.run(issue, nil, run_opts)

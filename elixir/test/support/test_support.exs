@@ -1,5 +1,6 @@
 defmodule SymphonyElixir.TestSupport do
   @workflow_prompt "You are an agent for this repository."
+  alias SymphonyElixir.Codex.CapabilityDiagnostics
 
   defmacro __using__(_opts) do
     quote do
@@ -29,7 +30,8 @@ defmodule SymphonyElixir.TestSupport do
           restore_env: 2,
           stop_default_http_server: 0,
           approve_execution_plan: 6,
-          accept_task_branch: 5
+          accept_task_branch: 5,
+          test_capability_diagnostics: 1
         ]
 
       setup do
@@ -140,6 +142,18 @@ defmodule SymphonyElixir.TestSupport do
 
   def accept_task_branch(workspace, issue, workflow, base_sha, worker_host) do
     SymphonyElixir.TaskBranch.ensure(workspace, issue, workflow, base_sha, worker_host)
+  end
+
+  def test_capability_diagnostics(_session) do
+    {:ok,
+     CapabilityDiagnostics.resolve(
+       %{
+         browser: %{installed: false, enabled: false},
+         computer_use: %{installed: false, enabled: false}
+       },
+       %{},
+       :not_configured
+     )}
   end
 
   def stop_default_http_server do

@@ -153,6 +153,7 @@ defmodule SymphonyElixir.Orchestrator do
           |> maybe_put_runtime_value(:workspace_path, runtime_info[:workspace_path])
           |> maybe_put_runtime_value(:audit_path, runtime_info[:audit_path])
           |> maybe_put_runtime_value(:audit_events_path, runtime_info[:audit_events_path])
+          |> maybe_put_runtime_value(:capability_diagnostics, runtime_info[:capability_diagnostics])
 
         notify_dashboard()
         {:noreply, %{state | running: Map.put(running, issue_id, updated_running_entry)}}
@@ -253,7 +254,8 @@ defmodule SymphonyElixir.Orchestrator do
         worker_host: Map.get(running_entry, :worker_host),
         workspace_path: Map.get(running_entry, :workspace_path),
         audit_path: Map.get(running_entry, :audit_path),
-        audit_events_path: Map.get(running_entry, :audit_events_path)
+        audit_events_path: Map.get(running_entry, :audit_events_path),
+        capability_diagnostics: Map.get(running_entry, :capability_diagnostics)
       })
     else
       Logger.info("Agent reported completed continuation for issue_id=#{issue_id}; skipping active-state continuation retry")
@@ -292,7 +294,8 @@ defmodule SymphonyElixir.Orchestrator do
       worker_host: Map.get(running_entry, :worker_host),
       workspace_path: Map.get(running_entry, :workspace_path),
       audit_path: Map.get(running_entry, :audit_path),
-      audit_events_path: Map.get(running_entry, :audit_events_path)
+      audit_events_path: Map.get(running_entry, :audit_events_path),
+      capability_diagnostics: Map.get(running_entry, :capability_diagnostics)
     })
   end
 
@@ -711,7 +714,8 @@ defmodule SymphonyElixir.Orchestrator do
           worker_host: Map.get(running_entry, :worker_host),
           workspace_path: Map.get(running_entry, :workspace_path),
           audit_path: Map.get(running_entry, :audit_path),
-          audit_events_path: Map.get(running_entry, :audit_events_path)
+          audit_events_path: Map.get(running_entry, :audit_events_path),
+          capability_diagnostics: Map.get(running_entry, :capability_diagnostics)
         })
       end
     else
@@ -853,6 +857,7 @@ defmodule SymphonyElixir.Orchestrator do
       workspace_path: Map.get(running_entry, :workspace_path),
       audit_path: Map.get(running_entry, :audit_path),
       audit_events_path: Map.get(running_entry, :audit_events_path),
+      capability_diagnostics: Map.get(running_entry, :capability_diagnostics),
       session_id: running_entry_session_id(running_entry),
       error: error,
       blocked_at: DateTime.utc_now(),
@@ -1237,6 +1242,7 @@ defmodule SymphonyElixir.Orchestrator do
     workspace_path = pick_retry_workspace_path(previous_retry, metadata)
     audit_path = pick_retry_audit_path(previous_retry, metadata)
     audit_events_path = pick_retry_audit_events_path(previous_retry, metadata)
+    capability_diagnostics = pick_retry_capability_diagnostics(previous_retry, metadata)
 
     if is_reference(old_timer) do
       Process.cancel_timer(old_timer)
@@ -1262,7 +1268,8 @@ defmodule SymphonyElixir.Orchestrator do
             worker_host: worker_host,
             workspace_path: workspace_path,
             audit_path: audit_path,
-            audit_events_path: audit_events_path
+            audit_events_path: audit_events_path,
+            capability_diagnostics: capability_diagnostics
           })
     }
   end
@@ -1277,7 +1284,8 @@ defmodule SymphonyElixir.Orchestrator do
           worker_host: Map.get(retry_entry, :worker_host),
           workspace_path: Map.get(retry_entry, :workspace_path),
           audit_path: Map.get(retry_entry, :audit_path),
-          audit_events_path: Map.get(retry_entry, :audit_events_path)
+          audit_events_path: Map.get(retry_entry, :audit_events_path),
+          capability_diagnostics: Map.get(retry_entry, :capability_diagnostics)
         }
 
         {:ok, attempt, metadata, %{state | retry_attempts: Map.delete(state.retry_attempts, issue_id)}}
@@ -1528,6 +1536,10 @@ defmodule SymphonyElixir.Orchestrator do
     metadata[:audit_events_path] || Map.get(previous_retry, :audit_events_path)
   end
 
+  defp pick_retry_capability_diagnostics(previous_retry, metadata) do
+    metadata[:capability_diagnostics] || Map.get(previous_retry, :capability_diagnostics)
+  end
+
   defp maybe_put_runtime_value(running_entry, _key, nil), do: running_entry
 
   defp maybe_put_runtime_value(running_entry, key, value) when is_map(running_entry) do
@@ -1679,6 +1691,7 @@ defmodule SymphonyElixir.Orchestrator do
           workspace_path: Map.get(metadata, :workspace_path),
           audit_path: Map.get(metadata, :audit_path),
           audit_events_path: Map.get(metadata, :audit_events_path),
+          capability_diagnostics: Map.get(metadata, :capability_diagnostics),
           session_id: metadata.session_id,
           codex_app_server_pid: metadata.codex_app_server_pid,
           codex_input_tokens: metadata.codex_input_tokens,
@@ -1706,7 +1719,8 @@ defmodule SymphonyElixir.Orchestrator do
           worker_host: Map.get(retry, :worker_host),
           workspace_path: Map.get(retry, :workspace_path),
           audit_path: Map.get(retry, :audit_path),
-          audit_events_path: Map.get(retry, :audit_events_path)
+          audit_events_path: Map.get(retry, :audit_events_path),
+          capability_diagnostics: Map.get(retry, :capability_diagnostics)
         }
       end)
 
@@ -1722,6 +1736,7 @@ defmodule SymphonyElixir.Orchestrator do
           workspace_path: Map.get(metadata, :workspace_path),
           audit_path: Map.get(metadata, :audit_path),
           audit_events_path: Map.get(metadata, :audit_events_path),
+          capability_diagnostics: Map.get(metadata, :capability_diagnostics),
           session_id: Map.get(metadata, :session_id),
           error: Map.get(metadata, :error),
           blocked_at: Map.get(metadata, :blocked_at),

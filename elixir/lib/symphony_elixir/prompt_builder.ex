@@ -25,11 +25,12 @@ defmodule SymphonyElixir.PromptBuilder do
       |> IO.iodata_to_binary()
       |> maybe_append_workflow_profile(Keyword.get(opts, :workflow_profile))
 
-    maybe_append_completion_evidence_contract(
-      prompt,
+    prompt
+    |> maybe_append_completion_evidence_contract(
       Keyword.get(opts, :task_contract),
       Keyword.get(opts, :execution_plan)
     )
+    |> maybe_append_capability_diagnostics(Keyword.get(opts, :capability_diagnostics))
   end
 
   @spec build_execution_prompt(SymphonyElixir.Linear.Issue.t(), keyword()) :: String.t()
@@ -40,11 +41,12 @@ defmodule SymphonyElixir.PromptBuilder do
       execution_prompt(issue, execution_plan)
       |> maybe_append_workflow_profile(Keyword.get(opts, :workflow_profile))
 
-    maybe_append_completion_evidence_contract(
-      prompt,
+    prompt
+    |> maybe_append_completion_evidence_contract(
       Keyword.get(opts, :task_contract),
       execution_plan
     )
+    |> maybe_append_capability_diagnostics(Keyword.get(opts, :capability_diagnostics))
   end
 
   defp execution_prompt(issue, %{"execution_mode" => "simple"} = execution_plan) do
@@ -146,6 +148,31 @@ defmodule SymphonyElixir.PromptBuilder do
   end
 
   defp maybe_append_workflow_profile(prompt, _profile), do: prompt
+
+  defp maybe_append_capability_diagnostics(
+         prompt,
+         %{browser_path: path, browser: browser, computer_use: computer_use, playwright: playwright}
+       ) do
+    """
+    #{prompt}
+
+    Runtime capability diagnostics:
+
+    - selected browser path: `#{path.selected}`
+    - provenance: `#{path.provenance || "none"}`
+    - selection code: `#{path.code}`
+    - Browser: configured=#{browser.configured}, usable=#{browser.usable}, code=`#{browser.code}`
+    - Playwright: configured=#{playwright.configured}, usable=#{playwright.usable}, code=`#{playwright.code}`
+    - Computer Use: configured=#{computer_use.configured}, usable=#{computer_use.usable}, code=`#{computer_use.code}`
+    - #{path.message}
+    - Action: #{path.action}
+
+    Browser plugin enablement is configuration only. Use the selected path for browser and UI verification, and do not claim visual verification unless that runtime backend renders and inspects the target UI.
+    """
+    |> String.trim()
+  end
+
+  defp maybe_append_capability_diagnostics(prompt, _diagnostics), do: prompt
 
   defp prompt_template!({:ok, %{prompt_template: prompt}}), do: default_prompt(prompt)
 

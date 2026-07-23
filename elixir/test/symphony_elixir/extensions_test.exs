@@ -521,6 +521,7 @@ defmodule SymphonyElixir.ExtensionsTest do
                  "workspace_path" => "/workspaces/MT-HTTP",
                  "audit_path" => "/workspaces/MT-HTTP/.symphony/run-audit.md",
                  "audit_events_path" => "/workspaces/MT-HTTP/.symphony/run-audit.jsonl",
+                 "capability_diagnostics" => capability_diagnostics_json(),
                  "session_id" => "thread-http",
                  "turn_count" => 7,
                  "last_event" => "notification",
@@ -541,7 +542,8 @@ defmodule SymphonyElixir.ExtensionsTest do
                  "worker_host" => nil,
                  "workspace_path" => nil,
                  "audit_path" => nil,
-                 "audit_events_path" => nil
+                 "audit_events_path" => nil,
+                 "capability_diagnostics" => nil
                }
              ],
              "blocked" => [
@@ -555,6 +557,7 @@ defmodule SymphonyElixir.ExtensionsTest do
                  "workspace_path" => "/workspaces/MT-BLOCKED",
                  "audit_path" => "/workspaces/MT-BLOCKED/.symphony/run-audit.md",
                  "audit_events_path" => "/workspaces/MT-BLOCKED/.symphony/run-audit.jsonl",
+                 "capability_diagnostics" => nil,
                  "session_id" => "thread-blocked",
                  "blocked_at" => state_payload["blocked"] |> List.first() |> Map.fetch!("blocked_at"),
                  "last_event" => "turn_input_required",
@@ -590,6 +593,7 @@ defmodule SymphonyElixir.ExtensionsTest do
                "workspace_path" => "/workspaces/MT-HTTP",
                "audit_path" => "/workspaces/MT-HTTP/.symphony/run-audit.md",
                "audit_events_path" => "/workspaces/MT-HTTP/.symphony/run-audit.jsonl",
+               "capability_diagnostics" => capability_diagnostics_json(),
                "session_id" => "thread-http",
                "turn_count" => 7,
                "state" => "In Progress",
@@ -772,6 +776,10 @@ defmodule SymphonyElixir.ExtensionsTest do
     assert html =~ "Offline"
     assert html =~ "Copy ID"
     assert html =~ "Codex update"
+    assert html =~ "Browser verification:"
+    assert html =~ "playwright_headless"
+    assert html =~ "codex_global_mcp"
+    assert html =~ "browser_session_backend_unavailable"
     assert html =~ "Audit"
     assert html =~ "Copy audit"
     assert html =~ "/workspaces/MT-HTTP/.symphony/run-audit.md"
@@ -812,6 +820,7 @@ defmodule SymphonyElixir.ExtensionsTest do
           workspace_path: "/workspaces/MT-HTTP",
           audit_path: "/workspaces/MT-HTTP/.symphony/run-audit.md",
           audit_events_path: "/workspaces/MT-HTTP/.symphony/run-audit.jsonl",
+          capability_diagnostics: capability_diagnostics_fixture(),
           started_at: DateTime.utc_now()
         }
       ])
@@ -936,6 +945,7 @@ defmodule SymphonyElixir.ExtensionsTest do
           codex_total_tokens: 12,
           audit_path: "/workspaces/MT-HTTP/.symphony/run-audit.md",
           audit_events_path: "/workspaces/MT-HTTP/.symphony/run-audit.jsonl",
+          capability_diagnostics: capability_diagnostics_fixture(),
           started_at: DateTime.utc_now()
         }
       ],
@@ -974,6 +984,49 @@ defmodule SymphonyElixir.ExtensionsTest do
       codex_totals: %{input_tokens: 4, output_tokens: 8, total_tokens: 12, seconds_running: 42.5},
       rate_limits: %{"primary" => %{"remaining" => 11}}
     }
+  end
+
+  defp capability_diagnostics_fixture do
+    %{
+      browser: %{
+        configured: true,
+        usable: false,
+        code: "session_backend_unavailable",
+        message: "Codex Browser is enabled, but no backend is bound to this standalone app-server session.",
+        action: "Use headless Playwright for automated UI verification.",
+        provenance: "codex_global_browser_plugin"
+      },
+      computer_use: %{
+        configured: true,
+        usable: true,
+        code: "ready",
+        message: "Computer Use responded to runtime discovery.",
+        action: nil,
+        provenance: "codex_global_computer_use_plugin",
+        app_count: 24
+      },
+      playwright: %{
+        configured: true,
+        usable: true,
+        code: "ready",
+        message: "The inherited headless Playwright MCP has a responsive browser backend.",
+        action: nil,
+        provenance: "codex_global_mcp"
+      },
+      browser_path: %{
+        selected: "playwright_headless",
+        provenance: "codex_global_mcp",
+        code: "browser_session_backend_unavailable",
+        message: "Use deterministic headless Playwright.",
+        action: "Use the inherited Playwright MCP for automated UI rendering and inspection."
+      }
+    }
+  end
+
+  defp capability_diagnostics_json do
+    capability_diagnostics_fixture()
+    |> Jason.encode!()
+    |> Jason.decode!()
   end
 
   defp wait_for_bound_port do

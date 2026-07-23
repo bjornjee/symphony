@@ -199,6 +199,18 @@ defmodule SymphonyElixirWeb.DashboardLive do
                             · <span class="mono numeric"><%= entry.last_event_at %></span>
                           <% end %>
                         </span>
+                        <%= if browser_path(entry.capability_diagnostics) do %>
+                          <span
+                            class="capability-path"
+                            title={browser_action(entry.capability_diagnostics)}
+                          >
+                            Browser verification: <strong><%= browser_path(entry.capability_diagnostics) %></strong>
+                          </span>
+                          <span class="muted event-meta">
+                            <%= browser_provenance(entry.capability_diagnostics) %>
+                            · <%= browser_code(entry.capability_diagnostics) %>
+                          </span>
+                        <% end %>
                       </div>
                     </td>
                     <td>
@@ -442,6 +454,20 @@ defmodule SymphonyElixirWeb.DashboardLive do
   end
 
   defp format_int(_value), do: "n/a"
+
+  defp browser_path(%{browser_path: %{selected: selected}}) when is_binary(selected), do: selected
+  defp browser_path(_diagnostics), do: nil
+
+  defp browser_provenance(%{browser_path: %{provenance: provenance}}) when is_binary(provenance),
+    do: provenance
+
+  defp browser_provenance(_diagnostics), do: "unknown provenance"
+
+  defp browser_code(%{browser_path: %{code: code}}) when is_binary(code), do: code
+  defp browser_code(_diagnostics), do: "unknown"
+
+  defp browser_action(%{browser_path: %{action: action}}) when is_binary(action), do: action
+  defp browser_action(_diagnostics), do: nil
 
   defp state_badge_class(state) do
     base = "state-badge"

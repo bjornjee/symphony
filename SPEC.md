@@ -1082,6 +1082,17 @@ client to:
 - Include issue-identifying metadata, such as `<issue.identifier>: <issue.title>`, when the targeted
   protocol supports turn or session titles.
 - Advertise implemented client-side tools using the targeted protocol.
+- Resolve effective runtime capabilities before the first planning or execution turn:
+  - distinguish globally configured plugins and MCP servers from backends that respond in this
+    standalone app-server session
+  - verify Computer Use independently from browser automation
+  - prefer a runtime-bound Codex Browser backend when available
+  - otherwise select a responsive inherited headless Playwright MCP for automated rendering,
+    inspection, screenshots, and behavior checks
+  - report an actionable unavailable state when neither browser path responds
+- Browser plugin enablement MUST NOT be treated as evidence that a Browser backend is bound to the
+  app-server session. Implementations MUST NOT attach to undocumented Desktop transports or copy
+  Desktop browser/session state.
 
 Session identifiers:
 
@@ -1475,6 +1486,8 @@ SHOULD return:
 - each running row SHOULD include `turn_count`
 - `retrying` (list of retry queue rows)
 - session and retry rows SHOULD include the tracker-provided issue URL when available
+- session, retry, and blocked rows SHOULD preserve capability diagnostics when available, including
+  the selected browser path, provenance, stable diagnostic code, and actionable failure details
 - `codex_totals`
   - `input_tokens`
   - `output_tokens`
@@ -1569,6 +1582,8 @@ Enablement (extension):
 - Host a human-readable dashboard at `/`.
 - The returned document SHOULD depict the current state of the system (for example active sessions,
   retry delays, token consumption, runtime totals, recent events, and health/error indicators).
+- Active-session status SHOULD show the selected browser verification path and provenance when
+  capability diagnostics are available.
 - It is up to the implementation whether this is server-generated HTML or a client-side app that
   consumes the JSON API below.
 

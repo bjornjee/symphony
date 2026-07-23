@@ -4,7 +4,7 @@ defmodule SymphonyElixir.Codex.AppServer do
   """
 
   require Logger
-  alias SymphonyElixir.{Codex.DynamicTool, Config, PathSafety, SSH}
+  alias SymphonyElixir.{Codex.CapabilityDiagnostics, Codex.DynamicTool, Config, PathSafety, SSH}
 
   @initialize_id 1
   @thread_start_id 2
@@ -12,6 +12,17 @@ defmodule SymphonyElixir.Codex.AppServer do
   @thread_goal_set_id 4
   @thread_resume_id 5
   @command_exec_id 6
+  @plugin_list_id 7
+  @mcp_status_id 8
+  @capability_runtime_probe_id 9
+  @playwright_runtime_probe_id 10
+  @capability_probe_timeout_ms 30_000
+  @required_playwright_tools ~w(
+    browser_navigate
+    browser_snapshot
+    browser_tabs
+    browser_take_screenshot
+  )
   @goal_statuses ~w(active blocked complete)
   @port_line_bytes 1_048_576
   @max_stream_log_bytes 1_000
@@ -274,6 +285,244 @@ defmodule SymphonyElixir.Codex.AppServer do
   @spec stop_session(session()) :: :ok
   def stop_session(%{port: port}) when is_port(port) do
     stop_port(port)
+  end
+
+  @spec capability_diagnostics(session()) :: {:ok, map()}
+  def capability_diagnostics(%{port: port, thread_id: thread_id, workspace: workspace})
+      when is_port(port) and is_binary(thread_id) and is_binary(workspace) do
+    plugin_inventory = plugin_inventory(port, workspace)
+    mcp_inventory = mcp_inventory(port, thread_id)
+
+    runtime_probe =
+      capability_runtime_probe(
+        port,
+        thread_id,
+        plugin_inventory,
+        mcp_server_usable?(mcp_inventory, "node_repl", ["js"])
+      )
+
+    playwright_probe =
+      playwright_runtime_probe(
+        port,
+        thread_id,
+        mcp_server_usable?(mcp_inventory, "playwright", @required_playwright_tools)
+      )
+
+    {:ok, CapabilityDiagnostics.resolve(public_plugin_inventory(plugin_inventory), runtime_probe, playwright_probe)}
+  end
+
+  defp plugin_inventory(port, workspace) do
+    send_message(port, %{
+      "method" => "plugin/list",
+      "id" => @plugin_list_id,
+      "params" => %{"cwds" => [workspace]}
+    })
+
+    case await_response(port, @plugin_list_id, @capability_probe_timeout_ms) do
+      {:ok, %{"marketplaces" => marketplaces}} when is_list(marketplaces) ->
+        plugins = Enum.flat_map(marketplaces, &Map.get(&1, "plugins", []))
+
+        %{
+          browser: plugin_state(plugins, "browser@openai-bundled"),
+          computer_use: plugin_state(plugins, "computer-use@openai-bundled")
+        }
+
+      _other ->
+        unknown_plugin_inventory()
+    end
+  end
+
+  defp plugin_state(plugins, plugin_id) do
+    case Enum.find(plugins, &(Map.get(&1, "id") == plugin_id)) do
+      %{} = plugin ->
+        %{
+          installed: Map.get(plugin, "installed"),
+          enabled: Map.get(plugin, "enabled"),
+          path: get_in(plugin, ["source", "path"])
+        }
+
+      nil ->
+        %{installed: false, enabled: false, path: nil}
+    end
+  end
+
+  defp unknown_plugin_inventory do
+    unknown = %{installed: nil, enabled: nil, path: nil}
+    %{browser: unknown, computer_use: unknown}
+  end
+
+  defp public_plugin_inventory(inventory) do
+    Map.new(inventory, fn {name, state} ->
+      {name, Map.take(state, [:installed, :enabled])}
+    end)
+  end
+
+  defp mcp_inventory(port, thread_id) do
+    send_message(port, %{
+      "method" => "mcpServerStatus/list",
+      "id" => @mcp_status_id,
+      "params" => %{
+        "threadId" => thread_id,
+        "detail" => "toolsAndAuthOnly",
+        "limit" => 100
+      }
+    })
+
+    case await_response(port, @mcp_status_id, @capability_probe_timeout_ms) do
+      {:ok, %{"data" => servers}} when is_list(servers) -> servers
+      _other -> []
+    end
+  end
+
+  defp mcp_server_usable?(servers, name, required_tools) do
+    case Enum.find(servers, &(Map.get(&1, "name") == name)) do
+      %{"tools" => tools} when is_map(tools) ->
+        Enum.all?(required_tools, &Map.has_key?(tools, &1))
+
+      _other ->
+        false
+    end
+  end
+
+  defp capability_runtime_probe(_port, _thread_id, _plugin_inventory, false),
+    do: empty_runtime_probe()
+
+  defp capability_runtime_probe(port, thread_id, plugin_inventory, true) do
+    probe = do_capability_runtime_probe(port, thread_id, plugin_inventory)
+
+    if runtime_probe_complete?(plugin_inventory, probe) do
+      probe
+    else
+      do_capability_runtime_probe(port, thread_id, plugin_inventory)
+    end
+  end
+
+  defp do_capability_runtime_probe(port, thread_id, plugin_inventory) do
+    send_message(port, %{
+      "method" => "mcpServer/tool/call",
+      "id" => @capability_runtime_probe_id,
+      "params" => %{
+        "server" => "node_repl",
+        "threadId" => thread_id,
+        "tool" => "js",
+        "_meta" => %{
+          "x-codex-turn-metadata" => %{
+            "session_id" => thread_id,
+            "thread_id" => thread_id,
+            "thread_source" => "vscode",
+            "turn_id" => "symphony-capability-diagnostics"
+          }
+        },
+        "arguments" => %{
+          "code" => capability_probe_code(plugin_inventory),
+          "title" => "Resolve runtime capabilities"
+        }
+      }
+    })
+
+    case await_response(port, @capability_runtime_probe_id, @capability_probe_timeout_ms) do
+      {:ok, %{"isError" => false, "content" => content}} when is_list(content) ->
+        decode_runtime_probe(content)
+
+      _other ->
+        empty_runtime_probe()
+    end
+  end
+
+  defp runtime_probe_complete?(plugin_inventory, probe) do
+    plugin_runtime_ready?(plugin_inventory.browser, probe.browser_loaded) and
+      plugin_runtime_ready?(plugin_inventory.computer_use, probe.computer_use_initialized)
+  end
+
+  defp plugin_runtime_ready?(%{installed: true, enabled: true}, ready), do: ready == true
+  defp plugin_runtime_ready?(_plugin, _ready), do: true
+
+  defp capability_probe_code(plugin_inventory) do
+    browser_path = plugin_client_path(plugin_inventory.browser, "browser-client.mjs")
+    computer_use_path = plugin_client_path(plugin_inventory.computer_use, "computer-use-client.mjs")
+
+    """
+    var symphonyCapabilityProbe = {
+      browser_loaded: false,
+      browser_backend_count: 0,
+      computer_use_initialized: false,
+      computer_use_app_count: 0
+    };
+    var symphonyBrowserClientPath = #{Jason.encode!(browser_path)};
+    var symphonyComputerUseClientPath = #{Jason.encode!(computer_use_path)};
+    if (symphonyBrowserClientPath) {
+      try {
+        var symphonyBrowserModule = await import(symphonyBrowserClientPath);
+        await symphonyBrowserModule.setupBrowserRuntime({ globals: globalThis });
+        symphonyCapabilityProbe.browser_loaded = true;
+        symphonyCapabilityProbe.browser_backend_count = (await agent.browsers.list()).length;
+      } catch (_error) {
+        symphonyCapabilityProbe.browser_loaded = false;
+      }
+    }
+    if (symphonyComputerUseClientPath) {
+      try {
+        var symphonyComputerUseModule = await import(symphonyComputerUseClientPath);
+        await symphonyComputerUseModule.setupComputerUseRuntime({ globals: globalThis });
+        symphonyCapabilityProbe.computer_use_initialized = Boolean(globalThis.sky);
+        symphonyCapabilityProbe.computer_use_app_count = (await sky.list_apps()).length;
+      } catch (_error) {
+        symphonyCapabilityProbe.computer_use_initialized = false;
+      }
+    }
+    nodeRepl.write(JSON.stringify(symphonyCapabilityProbe));
+    """
+  end
+
+  defp plugin_client_path(%{installed: true, enabled: true, path: path}, filename)
+       when is_binary(path) do
+    Path.join([path, "scripts", filename])
+  end
+
+  defp plugin_client_path(_plugin, _filename), do: nil
+
+  defp decode_runtime_probe(content) do
+    with %{"text" => text} when is_binary(text) <- Enum.find(content, &(Map.get(&1, "type") == "text")),
+         {:ok, decoded} when is_map(decoded) <- Jason.decode(text) do
+      %{
+        browser_loaded: Map.get(decoded, "browser_loaded", false),
+        browser_backend_count: Map.get(decoded, "browser_backend_count", 0),
+        computer_use_initialized: Map.get(decoded, "computer_use_initialized", false),
+        computer_use_app_count: Map.get(decoded, "computer_use_app_count", 0)
+      }
+    else
+      _other -> empty_runtime_probe()
+    end
+  end
+
+  defp empty_runtime_probe do
+    %{
+      browser_loaded: false,
+      browser_backend_count: 0,
+      computer_use_initialized: false,
+      computer_use_app_count: 0
+    }
+  end
+
+  defp playwright_runtime_probe(_port, _thread_id, false), do: :not_configured
+
+  defp playwright_runtime_probe(port, thread_id, true) do
+    send_message(port, %{
+      "method" => "mcpServer/tool/call",
+      "id" => @playwright_runtime_probe_id,
+      "params" => %{
+        "server" => "playwright",
+        "threadId" => thread_id,
+        "tool" => "browser_tabs",
+        "arguments" => %{"action" => "list"}
+      }
+    })
+
+    case await_response(port, @playwright_runtime_probe_id, @capability_probe_timeout_ms) do
+      {:ok, %{"isError" => true}} -> {:error, :backend_start_failed}
+      {:ok, %{"content" => content}} when is_list(content) -> :ready
+      _other -> {:error, :backend_start_failed}
+    end
   end
 
   defp maybe_put_token_budget(params, token_budget) when is_integer(token_budget) and token_budget > 0 do

@@ -29,6 +29,15 @@ This directory contains the current Elixir/OTP implementation of Symphony, based
 During app-server sessions, Symphony also serves a client-side `linear_graphql` tool so that repo
 skills can make raw Linear GraphQL calls.
 
+Before the first agent turn, Symphony resolves runtime capabilities separately from global
+configuration. Computer Use is probed independently and remains usable when its inherited plugin
+responds. Codex Browser is only marked usable when a backend is actually bound to the standalone
+app-server session. If Browser is enabled without a bound backend, Symphony selects the inherited
+headless Playwright MCP for deterministic automated rendering, inspection, screenshots, and
+behavior checks. The selected path, provenance, diagnostic code, and action are included in the
+agent prompt, run audit, runtime API, and dashboard. Attaching a Desktop-bound Browser backend
+remains dependent on a supported Codex app-server delegation API.
+
 The app-server goal is the durable run objective. The workflow prompt remains the detailed task
 packet: repository conventions, issue context, worktree/env expectations, verification profile, and
 handoff rules. This keeps unattended runs goal-driven without sending slash-command text such as
@@ -214,6 +223,8 @@ The observability UI now runs on a minimal Phoenix stack:
 - Bandit as the HTTP server
 - Phoenix dependency static assets for the LiveView client bootstrap
 - Tracker issue identifiers link to the tracker-provided URL when it uses `http` or `https`
+- Running sessions show the selected browser verification path, provenance, and diagnostic code
+  when startup capability diagnostics are available
 
 ## Project Layout
 

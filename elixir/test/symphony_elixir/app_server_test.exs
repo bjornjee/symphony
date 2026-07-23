@@ -25,6 +25,72 @@ defmodule SymphonyElixir.AppServerTest do
     assert :ok = AppServer.stop_session(session)
   end
 
+  test "app server distinguishes configured capabilities from runtime-usable browser paths" do
+    test_root = test_root("capability-diagnostics")
+    workspace_root = Path.join(test_root, "workspaces")
+    workspace = Path.join(workspace_root, "PIN-29")
+    codex_binary = Path.join(test_root, "fake-codex")
+    trace_file = Path.join(test_root, "capability-diagnostics.trace")
+    File.mkdir_p!(workspace)
+
+    File.write!(codex_binary, """
+    #!/bin/sh
+    count=0
+    while IFS= read -r line; do
+      count=$((count + 1))
+      printf '%s\\n' "$line" >> "#{trace_file}"
+      case "$count" in
+        1) printf '%s\\n' '{"id":1,"result":{}}' ;;
+        3) printf '%s\\n' '{"id":2,"result":{"thread":{"id":"thread-capabilities"},"instructionSources":[]}}' ;;
+        4) printf '%s\\n' '{"id":7,"result":{"marketplaces":[{"name":"openai-bundled","plugins":[{"id":"browser@openai-bundled","name":"browser","installed":true,"enabled":true},{"id":"computer-use@openai-bundled","name":"computer-use","installed":true,"enabled":true}]}]}}' ;;
+        5) printf '%s\\n' '{"id":8,"result":{"data":[{"name":"node_repl","authStatus":"unsupported","tools":{"js":{"name":"js","inputSchema":{}}},"resources":[],"resourceTemplates":[]},{"name":"playwright","authStatus":"unsupported","tools":{"browser_tabs":{"name":"browser_tabs","inputSchema":{}},"browser_navigate":{"name":"browser_navigate","inputSchema":{}},"browser_snapshot":{"name":"browser_snapshot","inputSchema":{}},"browser_take_screenshot":{"name":"browser_take_screenshot","inputSchema":{}}},"resources":[],"resourceTemplates":[]}],"nextCursor":null}}' ;;
+        6) printf '%s\\n' '{"id":9,"result":{"content":[{"type":"text","text":"{\\"browser_loaded\\":false,\\"browser_backend_count\\":0,\\"computer_use_initialized\\":false,\\"computer_use_app_count\\":0}"}],"isError":false}}' ;;
+        7) printf '%s\\n' '{"id":9,"result":{"content":[{"type":"text","text":"{\\"browser_loaded\\":true,\\"browser_backend_count\\":0,\\"computer_use_initialized\\":true,\\"computer_use_app_count\\":24}"}],"isError":false}}' ;;
+        8) printf '%s\\n' '{"id":10,"result":{"content":[{"type":"text","text":"### Result\\n- 0: (current) [](about:blank)"}],"isError":false}}' ;;
+      esac
+    done
+    """)
+
+    File.chmod!(codex_binary, 0o755)
+
+    write_workflow_file!(Workflow.workflow_file_path(),
+      workspace_root: workspace_root,
+      codex_command: "#{codex_binary} app-server"
+    )
+
+    on_exit(fn -> File.rm_rf(test_root) end)
+
+    assert {:ok, session} = AppServer.start_session(workspace)
+    assert {:ok, report} = AppServer.capability_diagnostics(session)
+    assert report.computer_use.usable
+    assert report.computer_use.app_count == 24
+    assert report.browser.code == "session_backend_unavailable"
+    assert report.browser_path.selected == "playwright_headless"
+    refute inspect(report) =~ "thread-capabilities"
+
+    assert :ok = AppServer.stop_session(session)
+
+    requests =
+      trace_file
+      |> File.read!()
+      |> String.split("\n", trim: true)
+      |> Enum.map(&Jason.decode!/1)
+
+    assert Enum.find(requests, &(&1["method"] == "plugin/list"))
+    assert Enum.find(requests, &(&1["method"] == "mcpServerStatus/list"))
+
+    node_probe = Enum.find(requests, &(get_in(&1, ["params", "server"]) == "node_repl"))
+    assert get_in(node_probe, ["params", "_meta", "x-codex-turn-metadata", "session_id"]) == "thread-capabilities"
+
+    assert playwright_probe =
+             Enum.find(requests, fn request ->
+               get_in(request, ["params", "server"]) == "playwright" and
+                 get_in(request, ["params", "tool"]) == "browser_tabs"
+             end)
+
+    assert get_in(playwright_probe, ["params", "arguments"]) == %{"action" => "list"}
+  end
+
   test "app server executes proof commands through a bounded workspace sandbox" do
     test_root = test_root("command-exec")
     workspace_root = Path.join(test_root, "workspaces")

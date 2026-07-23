@@ -74,7 +74,16 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
          worker_host: nil,
          workspace_path: "/workspaces/MT-188",
          audit_path: "/workspaces/MT-188/.symphony/run-audit.md",
-         audit_events_path: "/workspaces/MT-188/.symphony/run-audit.jsonl"
+         audit_events_path: "/workspaces/MT-188/.symphony/run-audit.jsonl",
+         capability_diagnostics: %{
+           browser_path: %{
+             selected: "playwright_headless",
+             provenance: "codex_global_mcp",
+             code: "browser_session_backend_unavailable",
+             message: "Browser is unavailable in this app-server session.",
+             action: "Use Playwright."
+           }
+         }
        }}
     )
 
@@ -105,6 +114,7 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
     assert snapshot_entry.workspace_path == "/workspaces/MT-188"
     assert snapshot_entry.audit_path == "/workspaces/MT-188/.symphony/run-audit.md"
     assert snapshot_entry.audit_events_path == "/workspaces/MT-188/.symphony/run-audit.jsonl"
+    assert snapshot_entry.capability_diagnostics.browser_path.selected == "playwright_headless"
     assert snapshot_entry.session_id == "thread-live-turn-live"
     assert snapshot_entry.turn_count == 1
     assert snapshot_entry.last_codex_timestamp == now
