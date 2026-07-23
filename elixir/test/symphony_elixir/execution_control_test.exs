@@ -31,6 +31,9 @@ defmodule SymphonyElixir.ExecutionControlTest do
     defdelegate exhausted_proof(plan, key),
       to: SymphonyElixir.ExecutionControl
 
+    defdelegate resume_exhausted_proof(plan, key, workspace),
+      to: SymphonyElixir.ExecutionControl
+
     defp execute(_directory, "sleep 1", opts) do
       if Keyword.fetch!(opts, :timeout_ms) < 1_000,
         do: {:error, :timeout},
@@ -143,6 +146,57 @@ defmodule SymphonyElixir.ExecutionControlTest do
 
     assert {:ok, %{proof: %{"id" => "red"}, last_receipt: %{"attempt" => 3}}} =
              ExecutionControl.exhausted_proof(plan, key)
+  end
+
+  test "keeps an exhausted proof blocked when the repository is unchanged", ctx do
+    {plan, key} = corrected_repository_plan(ctx)
+
+    for _attempt <- 1..3 do
+      assert {:ok, %{"passed" => false}} =
+               ExecutionControl.run_plan_proof(plan, key, ctx.workspace, "uiux", "browser")
+    end
+
+    assert :none = ExecutionControl.resume_exhausted_proof(plan, key, ctx.workspace)
+
+    assert {:error, :proof_attempts_exhausted} =
+             ExecutionControl.run_plan_proof(plan, key, ctx.workspace, "uiux", "browser")
+  end
+
+  test "opens a fresh bounded proof generation after a corrected repository is redispatched", ctx do
+    {plan, key} = corrected_repository_plan(ctx)
+
+    for _attempt <- 1..3 do
+      assert {:ok, %{"passed" => false}} =
+               ExecutionControl.run_plan_proof(plan, key, ctx.workspace, "uiux", "browser")
+    end
+
+    File.write!(Path.join(ctx.workspace, "README.md"), "corrected\n")
+
+    assert {:ok, %{"generation" => 2, "proof_id" => "browser"}} =
+             ExecutionControl.resume_exhausted_proof(plan, key, ctx.workspace)
+
+    assert {:ok, %{"attempt" => 1, "generation" => 2, "passed" => true}} =
+             ExecutionControl.run_plan_proof(plan, key, ctx.workspace, "uiux", "browser")
+  end
+
+  test "fails closed when a proof generation receipt is structurally invalid", ctx do
+    {plan, key} = corrected_repository_plan(ctx)
+
+    for _attempt <- 1..3 do
+      assert {:ok, %{"passed" => false}} =
+               ExecutionControl.run_plan_proof(plan, key, ctx.workspace, "uiux", "browser")
+    end
+
+    assert {:ok, _receipt} =
+             ExecutionLedger.create(key, "proof-generation", "browser-corrupt", %{
+               "proof_id" => "browser",
+               "generation" => "two"
+             })
+
+    File.write!(Path.join(ctx.workspace, "README.md"), "corrected\n")
+
+    assert {:error, :proof_generation_receipt_invalid} =
+             ExecutionControl.resume_exhausted_proof(plan, key, ctx.workspace)
   end
 
   test "does not report an exhausted proof when any attempt passed", ctx do
@@ -465,5 +519,23 @@ defmodule SymphonyElixir.ExecutionControlTest do
 
   defp proof(id, phase_id, role, expected_exit, command) do
     %{"id" => id, "phase_id" => phase_id, "role" => role, "command" => command, "working_directory" => ".", "expected_exit" => expected_exit, "timeout_ms" => 1_000, "criterion_ids" => ["criterion-1"]}
+  end
+
+  defp corrected_repository_plan(ctx) do
+    browser_proof =
+      proof(
+        "browser",
+        "uiux",
+        "phase",
+        "success",
+        "test \"$(cat README.md)\" = corrected"
+      )
+
+    plan =
+      ctx.plan
+      |> Map.put("workflow", "feature")
+      |> put_in(["candidate", "proofs"], [browser_proof])
+
+    {plan, ctx.key <> "-redispatch"}
   end
 end
