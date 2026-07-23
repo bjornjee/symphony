@@ -56,7 +56,7 @@ defmodule SymphonyElixir.ExecutionControl do
           {:ok, map()} | {:error, term()}
   def run_plan_proof(plan, ledger_key, workspace, phase_id, proof_id, opts \\ []) do
     with {:ok, proof} <- find_proof(plan, phase_id, proof_id),
-         {:ok, attempt} <- next_attempt(ledger_key, proof_id),
+         {:ok, generation, attempt} <- next_attempt(ledger_key, proof_id),
          {:ok, proof_directory} <-
            ProofWorkingDirectory.resolve(
              workspace,
@@ -84,6 +84,7 @@ defmodule SymphonyElixir.ExecutionControl do
         "phase_id" => phase_id,
         "role" => proof["role"],
         "criterion_ids" => proof["criterion_ids"],
+        "generation" => generation,
         "attempt" => attempt,
         "attempts_remaining" => 3 - attempt,
         "expected_exit" => proof["expected_exit"],
@@ -100,7 +101,12 @@ defmodule SymphonyElixir.ExecutionControl do
         "recorded_at" => DateTime.utc_now() |> DateTime.to_iso8601()
       }
 
-      case ExecutionLedger.create(ledger_key, "proof", "#{proof_id}-#{attempt}", receipt) do
+      case ExecutionLedger.create(
+             ledger_key,
+             "proof",
+             proof_receipt_id(proof_id, generation, attempt),
+             receipt
+           ) do
         {:ok, persisted} -> {:ok, persisted}
         :exists -> {:error, :proof_attempt_collision}
         {:error, reason} -> {:error, {:proof_receipt_failed, reason}}
@@ -114,29 +120,31 @@ defmodule SymphonyElixir.ExecutionControl do
     proofs = get_in(plan, ["candidate", "proofs"]) || plan["proofs"] || []
 
     Enum.reduce_while(proofs, :none, fn proof, _none ->
-      receipts =
-        1..3
-        |> Enum.map(&ExecutionLedger.read(ledger_key, "proof", "#{proof["id"]}-#{&1}"))
-        |> Enum.flat_map(fn
-          {:ok, receipt} -> [receipt]
-          :missing -> []
-          {:error, reason} -> [{:error, reason}]
-        end)
-
-      cond do
-        Enum.any?(receipts, &match?({:error, _reason}, &1)) ->
-          {:halt, {:error, :proof_receipt_invalid}}
-
-        Enum.any?(receipts, &(not receipt_matches_proof?(&1, proof))) ->
-          {:halt, {:error, :proof_receipt_drift}}
-
-        length(receipts) == 3 and Enum.all?(receipts, &(not &1["passed"])) ->
-          {:halt, {:ok, %{proof: proof, last_receipt: List.last(receipts)}}}
-
-        true ->
-          {:cont, :none}
-      end
+      ledger_key
+      |> proof_receipts(proof["id"])
+      |> reduce_exhausted_proof(proof)
     end)
+  end
+
+  @spec resume_exhausted_proof(map(), String.t(), Path.t(), keyword()) ::
+          :none | {:ok, map()} | {:error, term()}
+  def resume_exhausted_proof(plan, ledger_key, workspace, opts \\ []) do
+    case exhausted_proof(plan, ledger_key) do
+      :none ->
+        :none
+
+      {:ok, %{proof: proof, last_receipt: last_receipt}} ->
+        resume_proof_generation(
+          ledger_key,
+          proof,
+          last_receipt,
+          workspace,
+          Keyword.get(opts, :worker_host)
+        )
+
+      {:error, _reason} = error ->
+        error
+    end
   end
 
   @spec block_on_exhausted_proof(map(), String.t(), Issue.t(), TaskContract.t(), keyword()) ::
@@ -274,26 +282,178 @@ defmodule SymphonyElixir.ExecutionControl do
   defp workflow_preconditions(_plan, _ledger_key, _proof, _state), do: :ok
 
   defp next_attempt(key, proof_id) do
-    case Enum.find(1..3, &(ExecutionLedger.read(key, "proof", "#{proof_id}-#{&1}") == :missing)) do
-      nil -> {:error, :proof_attempts_exhausted}
-      attempt -> {:ok, attempt}
+    with {:ok, generation} <- proof_generation(key, proof_id) do
+      case Enum.find(
+             1..3,
+             &(ExecutionLedger.read(
+                 key,
+                 "proof",
+                 proof_receipt_id(proof_id, generation, &1)
+               ) == :missing)
+           ) do
+        nil -> {:error, :proof_attempts_exhausted}
+        attempt -> {:ok, generation, attempt}
+      end
     end
   end
 
   defp latest_passed(key, proof_id) do
-    1..3
-    |> Enum.map(&ExecutionLedger.read(key, "proof", "#{proof_id}-#{&1}"))
-    |> Enum.flat_map(fn
-      {:ok, receipt} -> [receipt]
-      _ -> []
-    end)
-    |> Enum.reverse()
-    |> Enum.find(& &1["passed"])
-    |> case do
-      nil -> {:error, :passed_proof_required}
-      receipt -> {:ok, receipt}
+    with {:ok, receipts} <- proof_receipts(key, proof_id) do
+      receipts
+      |> Enum.reverse()
+      |> Enum.find(& &1["passed"])
+      |> case do
+        nil -> {:error, :passed_proof_required}
+        receipt -> {:ok, receipt}
+      end
     end
   end
+
+  defp open_proof_generation(key, proof_id, last_receipt, repository) do
+    with {:ok, current_generation} <- proof_generation(key, proof_id) do
+      generation = current_generation + 1
+
+      receipt = %{
+        "proof_id" => proof_id,
+        "generation" => generation,
+        "previous_generation" => current_generation,
+        "previous_receipt_digest" => last_receipt["receipt_digest"],
+        "repository_state_digest" => repository.digest,
+        "head_sha" => repository.base_sha
+      }
+
+      case ExecutionLedger.create(
+             key,
+             "proof-generation",
+             "#{proof_id}-#{generation}",
+             receipt
+           ) do
+        {:ok, persisted} ->
+          {:ok, persisted}
+
+        :exists ->
+          validate_existing_generation(key, proof_id, generation, receipt)
+
+        {:error, reason} ->
+          {:error, {:proof_generation_receipt_failed, reason}}
+      end
+    end
+  end
+
+  defp validate_existing_generation(key, proof_id, generation, receipt) do
+    case ExecutionLedger.read(
+           key,
+           "proof-generation",
+           "#{proof_id}-#{generation}"
+         ) do
+      {:ok, existing} ->
+        if Map.drop(existing, ["receipt_digest"]) == receipt,
+          do: {:ok, existing},
+          else: {:error, :proof_generation_collision}
+
+      other ->
+        {:error, {:proof_generation_receipt_invalid, other}}
+    end
+  end
+
+  defp proof_generation(key, proof_id) do
+    case ExecutionLedger.list(key, "proof-generation") do
+      {:ok, receipts} ->
+        validate_proof_generations(receipts, proof_id)
+
+      {:error, reason} ->
+        {:error, {:proof_generation_receipt_invalid, reason}}
+    end
+  end
+
+  defp validate_proof_generations(receipts, proof_id) do
+    generations =
+      receipts
+      |> Enum.filter(&(&1["proof_id"] == proof_id))
+      |> Enum.map(& &1["generation"])
+      |> Enum.sort()
+
+    if Enum.all?(receipts, &valid_proof_generation_receipt?/1) and
+         contiguous_proof_generations?(generations),
+       do: {:ok, List.last(generations) || 1},
+       else: {:error, :proof_generation_receipt_invalid}
+  end
+
+  defp valid_proof_generation_receipt?(receipt) when is_map(receipt) do
+    generation = receipt["generation"]
+
+    is_binary(receipt["proof_id"]) and
+      is_integer(generation) and
+      generation >= 2 and
+      receipt["previous_generation"] == generation - 1 and
+      is_binary(receipt["previous_receipt_digest"]) and
+      is_binary(receipt["repository_state_digest"]) and
+      is_binary(receipt["head_sha"])
+  end
+
+  defp valid_proof_generation_receipt?(_receipt), do: false
+
+  defp contiguous_proof_generations?([]), do: true
+
+  defp contiguous_proof_generations?(generations),
+    do: generations == Enum.to_list(2..List.last(generations))
+
+  defp proof_receipts(key, proof_id) do
+    with {:ok, generation} <- proof_generation(key, proof_id) do
+      read_proof_receipts(key, proof_id, generation)
+    end
+  end
+
+  defp reduce_exhausted_proof({:ok, receipts}, proof) do
+    cond do
+      Enum.any?(receipts, &(not receipt_matches_proof?(&1, proof))) ->
+        {:halt, {:error, :proof_receipt_drift}}
+
+      length(receipts) == 3 and Enum.all?(receipts, &(not &1["passed"])) ->
+        {:halt, {:ok, %{proof: proof, last_receipt: List.last(receipts)}}}
+
+      true ->
+        {:cont, :none}
+    end
+  end
+
+  defp reduce_exhausted_proof({:error, :proof_generation_receipt_invalid}, _proof),
+    do: {:halt, {:error, :proof_generation_receipt_invalid}}
+
+  defp reduce_exhausted_proof({:error, _reason}, _proof),
+    do: {:halt, {:error, :proof_receipt_invalid}}
+
+  defp resume_proof_generation(ledger_key, proof, last_receipt, workspace, worker_host) do
+    with {:ok, repository} <- RepositoryFingerprint.capture(workspace, worker_host) do
+      maybe_open_proof_generation(ledger_key, proof, last_receipt, repository)
+    end
+  end
+
+  defp maybe_open_proof_generation(ledger_key, proof, last_receipt, repository) do
+    if repository.digest == last_receipt["after_state_digest"],
+      do: :none,
+      else: open_proof_generation(ledger_key, proof["id"], last_receipt, repository)
+  end
+
+  defp read_proof_receipts(key, proof_id, generation) do
+    Enum.reduce_while(1..3, {:ok, []}, fn attempt, {:ok, receipts} ->
+      case ExecutionLedger.read(
+             key,
+             "proof",
+             proof_receipt_id(proof_id, generation, attempt)
+           ) do
+        {:ok, receipt} -> {:cont, {:ok, receipts ++ [receipt]}}
+        :missing -> {:cont, {:ok, receipts}}
+        {:error, reason} -> {:halt, {:error, reason}}
+      end
+    end)
+  end
+
+  defp proof_receipt_id(proof_id, 1, attempt),
+    do: "#{proof_id}-#{attempt}"
+
+  defp proof_receipt_id(proof_id, generation, attempt),
+    do: "#{proof_id}-g#{generation}-#{attempt}"
 
   defp receipt_matches_proof?(receipt, proof) when is_map(receipt) and is_map(proof) do
     receipt["proof_id"] == proof["id"] and

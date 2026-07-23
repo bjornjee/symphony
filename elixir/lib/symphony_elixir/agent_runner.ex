@@ -396,6 +396,14 @@ defmodule SymphonyElixir.AgentRunner do
                        execution_plan["workflow"],
                        execution_plan_base_sha(execution_plan),
                        worker_host
+                     ),
+                   :ok <-
+                     resume_exhausted_proof_budget(
+                       workspace,
+                       issue,
+                       execution_plan,
+                       ledger_key,
+                       worker_host
                      ) do
                 RunAudit.append(workspace, issue, :task_branch_ready, %{
                   phase: "implementation",
@@ -1069,6 +1077,39 @@ defmodule SymphonyElixir.AgentRunner do
         get_in(execution_plan, ["repository", "origin"])
 
     ExecutionLedger.key(origin, issue.id, execution_plan["plan_digest"])
+  end
+
+  defp resume_exhausted_proof_budget(
+         workspace,
+         issue,
+         execution_plan,
+         ledger_key,
+         worker_host
+       ) do
+    case ExecutionControl.resume_exhausted_proof(
+           execution_plan,
+           ledger_key,
+           workspace,
+           worker_host: worker_host
+         ) do
+      :none ->
+        :ok
+
+      {:ok, receipt} ->
+        RunAudit.append(workspace, issue, :execution_proof_redispatched, %{
+          phase: "proof",
+          status: "resumed",
+          proof_id: receipt["proof_id"],
+          generation: receipt["generation"],
+          previous_receipt_digest: receipt["previous_receipt_digest"],
+          repository_state_digest: receipt["repository_state_digest"]
+        })
+
+        :ok
+
+      {:error, _reason} = error ->
+        error
+    end
   end
 
   defp handle_completed_turn(
