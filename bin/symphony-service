@@ -1,0 +1,294 @@
+#!/bin/sh
+set -eu
+
+SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+REPO_ROOT=$(CDPATH= cd -- "$SCRIPT_DIR/.." && pwd)
+
+PORT=${PORT:-4000}
+CA_BUNDLE=${CA_BUNDLE:-/etc/ssl/cert.pem}
+SYMPHONY_WORKFLOW=${SYMPHONY_WORKFLOW:-workflows/symphony/workflow.md}
+SYMPHONY_START_TIMEOUT=${SYMPHONY_START_TIMEOUT:-30}
+
+case "$CA_BUNDLE" in
+  /*) CA_BUNDLE_PATH=$CA_BUNDLE ;;
+  *) CA_BUNDLE_PATH=$REPO_ROOT/$CA_BUNDLE ;;
+esac
+
+case "$SYMPHONY_WORKFLOW" in
+  /*) WORKFLOW_PATH=$SYMPHONY_WORKFLOW ;;
+  *) WORKFLOW_PATH=$REPO_ROOT/$SYMPHONY_WORKFLOW ;;
+esac
+
+GIT_COMMON_DIR=$(git -C "$REPO_ROOT" rev-parse --git-common-dir)
+case "$GIT_COMMON_DIR" in
+  /*) ;;
+  *) GIT_COMMON_DIR=$REPO_ROOT/$GIT_COMMON_DIR ;;
+esac
+
+SERVICE_DIR=${SYMPHONY_SERVICE_DIR:-$GIT_COMMON_DIR/symphony-service}
+PID_FILE=$SERVICE_DIR/pid
+START_FILE=$SERVICE_DIR/process-start
+LOG_FILE=${SYMPHONY_LOG_FILE:-$REPO_ROOT/elixir/log/symphony.log.1}
+API_URL=http://127.0.0.1:$PORT/api/v1/state
+DASHBOARD_URL=http://127.0.0.1:$PORT/
+
+fail() {
+  echo "error: $*" >&2
+  exit 1
+}
+
+resolve_env_file() {
+  if [ -n "${SYMPHONY_ENV_FILE:-}" ]; then
+    test -f "$SYMPHONY_ENV_FILE" ||
+      fail "environment file $SYMPHONY_ENV_FILE is missing"
+    printf '%s\n' "$SYMPHONY_ENV_FILE"
+    return
+  fi
+
+  if [ -f "$REPO_ROOT/.env" ]; then
+    printf '%s\n' "$REPO_ROOT/.env"
+    return
+  fi
+
+  PRIMARY_ROOT=$(
+    git -C "$REPO_ROOT" worktree list --porcelain |
+      sed -n 's/^worktree //p' |
+      sed -n '1p'
+  )
+
+  if [ -n "$PRIMARY_ROOT" ] && [ -f "$PRIMARY_ROOT/.env" ]; then
+    printf '%s\n' "$PRIMARY_ROOT/.env"
+    return
+  fi
+
+  fail "no .env found in this worktree or its primary checkout; set SYMPHONY_ENV_FILE"
+}
+
+preflight() {
+  ENV_FILE=$(resolve_env_file)
+
+  command -v curl >/dev/null 2>&1 || fail "curl is required"
+  command -v git >/dev/null 2>&1 || fail "git is required"
+  command -v jq >/dev/null 2>&1 || fail "jq is required"
+  command -v mise >/dev/null 2>&1 || fail "mise is required"
+  test -f "$CA_BUNDLE_PATH" ||
+    fail "CA bundle $CA_BUNDLE_PATH is missing; set CA_BUNDLE"
+  test -f "$WORKFLOW_PATH" ||
+    fail "workflow $WORKFLOW_PATH is missing; run make symphony-workflow"
+  test -x "$REPO_ROOT/elixir/bin/symphony" ||
+    fail "elixir/bin/symphony is missing or not executable"
+
+  (
+    unset LINEAR_API_KEY
+    set -a
+    . "$ENV_FILE"
+    set +a
+    test -n "${LINEAR_API_KEY:-}"
+  ) || fail "$ENV_FILE must set LINEAR_API_KEY"
+}
+
+api_state() {
+  curl --silent --show-error --fail --max-time 2 "$API_URL"
+}
+
+process_start() {
+  ps -p "$1" -o lstart= 2>/dev/null | sed 's/^[[:space:]]*//'
+}
+
+managed_pid() {
+  test -f "$PID_FILE" || return 1
+  test -f "$START_FILE" || return 1
+
+  PID=$(cat "$PID_FILE")
+  case "$PID" in
+    "" | *[!0-9]*) return 1 ;;
+  esac
+
+  kill -0 "$PID" 2>/dev/null || return 1
+
+  EXPECTED_START=$(cat "$START_FILE")
+  ACTUAL_START=$(process_start "$PID")
+  test -n "$ACTUAL_START" || return 1
+  test "$EXPECTED_START" = "$ACTUAL_START" || return 1
+
+  printf '%s\n' "$PID"
+}
+
+clear_stale_state() {
+  if ! managed_pid >/dev/null 2>&1; then
+    rm -f "$PID_FILE" "$START_FILE"
+  fi
+}
+
+print_running_status() {
+  LABEL=$1
+  PAYLOAD=$2
+  command -v jq >/dev/null 2>&1 || fail "jq is required"
+  RUNNING=$(printf '%s' "$PAYLOAD" | jq -r '.counts.running // (.running | length) // 0')
+  RETRYING=$(printf '%s' "$PAYLOAD" | jq -r '.counts.retrying // (.retrying | length) // 0')
+  BLOCKED=$(printf '%s' "$PAYLOAD" | jq -r '.counts.blocked // (.blocked | length) // 0')
+
+  echo "$LABEL"
+  echo "Agents: $RUNNING running, $RETRYING retrying, $BLOCKED blocked"
+  echo "Dashboard: $DASHBOARD_URL"
+
+  if PID=$(managed_pid 2>/dev/null); then
+    echo "Process: managed (PID $PID)"
+  else
+    echo "Process: external"
+  fi
+}
+
+status() {
+  if PAYLOAD=$(api_state 2>/dev/null); then
+    print_running_status "Symphony running" "$PAYLOAD"
+    return
+  fi
+
+  if PID=$(managed_pid 2>/dev/null); then
+    echo "Symphony starting (PID $PID)"
+    echo "Logs: $LOG_FILE"
+    return
+  fi
+
+  clear_stale_state
+  echo "Symphony stopped"
+  return 1
+}
+
+up() {
+  if PAYLOAD=$(api_state 2>/dev/null); then
+    print_running_status "Symphony already running" "$PAYLOAD"
+    return
+  fi
+
+  if PID=$(managed_pid 2>/dev/null); then
+    echo "Symphony already starting (PID $PID)"
+    echo "Logs: $LOG_FILE"
+    return
+  fi
+
+  preflight
+  clear_stale_state
+  mkdir -p "$SERVICE_DIR"
+  umask 077
+
+  echo "Starting Symphony..."
+  nohup "$0" _serve "$ENV_FILE" "$CA_BUNDLE_PATH" "$WORKFLOW_PATH" "$PORT" \
+    >/dev/null 2>&1 </dev/null &
+  PID=$!
+  PROCESS_START=$(process_start "$PID")
+
+  test -n "$PROCESS_START" || fail "Symphony exited before process tracking initialized"
+  printf '%s\n' "$PID" >"$PID_FILE.tmp"
+  printf '%s\n' "$PROCESS_START" >"$START_FILE.tmp"
+  mv "$PID_FILE.tmp" "$PID_FILE"
+  mv "$START_FILE.tmp" "$START_FILE"
+
+  ELAPSED=0
+  while [ "$ELAPSED" -lt "$SYMPHONY_START_TIMEOUT" ]; do
+    if PAYLOAD=$(api_state 2>/dev/null); then
+      print_running_status "Symphony running" "$PAYLOAD"
+      return
+    fi
+
+    if ! managed_pid >/dev/null 2>&1; then
+      clear_stale_state
+      echo "Symphony failed to start. Recent logs:" >&2
+      tail -n 20 "$LOG_FILE" >&2 || true
+      exit 1
+    fi
+
+    sleep 1
+    ELAPSED=$((ELAPSED + 1))
+  done
+
+  fail "Symphony did not become ready within ${SYMPHONY_START_TIMEOUT}s; inspect $LOG_FILE"
+}
+
+down() {
+  if ! PID=$(managed_pid 2>/dev/null); then
+    clear_stale_state
+
+    if api_state >/dev/null 2>&1; then
+      fail "Symphony is running outside service management; stop its foreground process first"
+    fi
+
+    echo "Symphony already stopped"
+    return
+  fi
+
+  kill "$PID"
+  ELAPSED=0
+
+  while [ "$ELAPSED" -lt 15 ]; do
+    if ! managed_pid >/dev/null 2>&1; then
+      rm -f "$PID_FILE" "$START_FILE"
+      echo "Symphony stopped"
+      return
+    fi
+
+    sleep 1
+    ELAPSED=$((ELAPSED + 1))
+  done
+
+  fail "Symphony did not stop after 15s; inspect $LOG_FILE"
+}
+
+logs() {
+  test -f "$LOG_FILE" || fail "no managed Symphony log exists at $LOG_FILE"
+
+  if [ "${FOLLOW:-1}" = "0" ]; then
+    tail -n "${LINES:-100}" "$LOG_FILE"
+  else
+    tail -n "${LINES:-100}" -f "$LOG_FILE"
+  fi
+}
+
+run() {
+  preflight
+  exec "$0" _serve "$ENV_FILE" "$CA_BUNDLE_PATH" "$WORKFLOW_PATH" "$PORT"
+}
+
+serve() {
+  ENV_FILE=$1
+  SERVE_CA_BUNDLE=$2
+  SERVE_WORKFLOW=$3
+  SERVE_PORT=$4
+
+  unset LINEAR_API_KEY
+  set -a
+  . "$ENV_FILE"
+  set +a
+
+  cd "$REPO_ROOT/elixir"
+  ERL_AFLAGS="${ERL_AFLAGS:+${ERL_AFLAGS} }-eval 'public_key:cacerts_load(\"$SERVE_CA_BUNDLE\").'"
+  export ERL_AFLAGS
+
+  exec mise exec -- ./bin/symphony \
+    --i-understand-that-this-will-be-running-without-the-usual-guardrails \
+    --port "$SERVE_PORT" \
+    "$SERVE_WORKFLOW"
+}
+
+usage() {
+  echo "usage: $0 {up|status|logs|restart|down|run}" >&2
+  exit 2
+}
+
+case "${1:-}" in
+  up) up ;;
+  status) status ;;
+  logs) logs ;;
+  restart)
+    down
+    up
+    ;;
+  down) down ;;
+  run) run ;;
+  _serve)
+    shift
+    serve "$@"
+    ;;
+  *) usage ;;
+esac
