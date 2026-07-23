@@ -1285,7 +1285,9 @@ single-path eligible `feature` or `chore` workflow with one criterion and one ex
     publication and tracker credentials from the command environment, terminates the process with
     its app-server connection, and applies a thirty-minute timeout, one-MiB output ceiling,
     diagnostic tail, exact expected-exit semantics, repository pre/post digests, and at most three
-    attempts. No unsandboxed fallback exists, and agent shell events never satisfy proof contracts.
+    attempts. Three failed receipts publish one deterministic read-back-verified blocker, move the
+    issue to Human Review, mark the goal blocked, and return a terminal non-retryable completion.
+    No unsandboxed fallback exists, and agent shell events never satisfy proof contracts.
 13. For `planned`, preserve native-plan identity for visibility while immutable external proof,
     diagnosis, and phase receipts authoritatively gate ordered progress. Fixes require RED then a
     grounded diagnosis before GREEN; refactors require a clean baseline and preservation proofs.

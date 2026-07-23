@@ -31,6 +31,15 @@ defmodule SymphonyElixir.CoreTest do
 
     assert AgentRunner.goal_status_for_result_for_test({:ok, %{issue_active: true, issue_routable: false}}) == "complete"
 
+    completion = %{
+      outcome: :human_review_required,
+      issue_active: false,
+      issue_routable: false
+    }
+
+    result = AgentRunner.goal_status_for_result_for_test({:ok, completion})
+    assert result == "blocked"
+
     assert AgentRunner.goal_status_for_result_for_test({:error, {:turn_input_required, %{}}}) == "blocked"
 
     assert AgentRunner.goal_status_for_result_for_test({:error, {:approval_required, %{}}}) == "blocked"
@@ -842,6 +851,7 @@ defmodule SymphonyElixir.CoreTest do
       issue: %Issue{id: issue_id, identifier: "MT-559", state: "In Progress"},
       completion_info: %{
         continuation: :done,
+        outcome: :human_review_required,
         issue_state: "Human Review",
         issue_active: false,
         issue_routable: false
@@ -1601,6 +1611,8 @@ defmodule SymphonyElixir.CoreTest do
     assert prompt =~ "final native plan exactly matches the approved phases"
     assert prompt =~ "Prove the correction"
     assert prompt =~ "A failed proof receipt is evidence, not a permanent blocker"
+    assert prompt =~ "zero attempts remaining"
+    assert prompt =~ "do not retry or substitute another command"
   end
 
   test "implementation sandbox explicitly permits approved repository-local Codex skill paths" do

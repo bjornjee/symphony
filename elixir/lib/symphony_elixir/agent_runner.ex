@@ -510,6 +510,7 @@ defmodule SymphonyElixir.AgentRunner do
     end
   end
 
+  defp goal_status_for_result({:ok, %{outcome: :human_review_required}}), do: "blocked"
   defp goal_status_for_result({:ok, %{issue_active: false}}), do: "complete"
   defp goal_status_for_result({:ok, %{issue_routable: false}}), do: "complete"
 
@@ -528,7 +529,13 @@ defmodule SymphonyElixir.AgentRunner do
          runtime,
          {turn_number, max_turns}
        ) do
-    case revalidate_execution_authority(app_session, workspace, issue, task_contract, runtime) do
+    case revalidate_authority_and_proof_budget(
+           app_session,
+           workspace,
+           issue,
+           task_contract,
+           runtime
+         ) do
       :ok ->
         prompt = build_turn_prompt(issue, runtime.opts, turn_number, max_turns)
         RunAudit.append(workspace, issue, :codex_turn_started, %{phase: "codex_turn", status: "started", turn_number: turn_number})
@@ -566,7 +573,7 @@ defmodule SymphonyElixir.AgentRunner do
             Logger.info("Completed agent run for #{issue_context(issue)} session_id=#{turn_session[:session_id]} workspace=#{workspace} turn=#{turn_number}/#{max_turns}")
             RunAudit.append(workspace, issue, :codex_turn_completed, %{phase: "codex_turn", status: "completed", session_id: turn_session[:session_id], turn_number: turn_number})
 
-            handle_completed_turn(
+            handle_completed_or_exhausted_turn(
               app_session,
               workspace,
               issue,
@@ -578,11 +585,96 @@ defmodule SymphonyElixir.AgentRunner do
 
           {:error, reason} = error ->
             RunAudit.append(workspace, issue, :codex_turn_failed, %{phase: "codex_turn", status: "failed", reason: reason, turn_number: turn_number})
-            error
+
+            handle_failed_or_exhausted_turn(
+              workspace,
+              issue,
+              task_contract,
+              runtime,
+              error
+            )
         end
+
+      {:blocked, completion_info} ->
+        {:ok, completion_info}
 
       {:error, :instruction_drift} ->
         handle_instruction_drift(workspace, issue, task_contract, runtime)
+
+      {:error, _reason} = error ->
+        error
+    end
+  end
+
+  defp revalidate_authority_and_proof_budget(app_session, workspace, issue, contract, runtime) do
+    with :ok <-
+           revalidate_execution_authority(
+             app_session,
+             workspace,
+             issue,
+             contract,
+             runtime
+           ) do
+      block_exhausted_proof(workspace, issue, contract, runtime)
+    end
+  end
+
+  defp handle_completed_or_exhausted_turn(
+         app_session,
+         workspace,
+         issue,
+         task_contract,
+         codex_update_recipient,
+         runtime,
+         turn_numbers
+       ) do
+    case block_exhausted_proof(workspace, issue, task_contract, runtime) do
+      :ok ->
+        handle_completed_turn(
+          app_session,
+          workspace,
+          issue,
+          task_contract,
+          codex_update_recipient,
+          runtime,
+          turn_numbers
+        )
+
+      {:blocked, completion_info} ->
+        {:ok, completion_info}
+
+      {:error, _reason} = error ->
+        error
+    end
+  end
+
+  defp handle_failed_or_exhausted_turn(workspace, issue, contract, runtime, turn_error) do
+    case block_exhausted_proof(workspace, issue, contract, runtime) do
+      :ok -> turn_error
+      {:blocked, completion_info} -> {:ok, completion_info}
+      {:error, _reason} = blocker_error -> blocker_error
+    end
+  end
+
+  defp block_exhausted_proof(workspace, issue, contract, runtime) do
+    plan = Keyword.fetch!(runtime.opts, :execution_plan)
+    key = Keyword.fetch!(runtime.opts, :execution_ledger_key)
+
+    case ExecutionControl.block_on_exhausted_proof(plan, key, issue, contract) do
+      :none ->
+        :ok
+
+      {:ok, completion_info} ->
+        RunAudit.append(workspace, issue, :execution_proof_exhausted, %{
+          phase: "proof",
+          status: "blocked",
+          proof_id: completion_info.blocker_proof_id,
+          receipt_digest: completion_info.blocker_receipt_digest,
+          comment_id: completion_info.blocker_comment_id,
+          issue_state: completion_info.issue_state
+        })
+
+        {:blocked, completion_info}
 
       {:error, _reason} = error ->
         error
