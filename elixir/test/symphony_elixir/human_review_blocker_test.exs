@@ -33,6 +33,31 @@ defmodule SymphonyElixir.HumanReviewBlockerTest do
     end
   end
 
+  defmodule ScriptedTracker do
+    def fetch_comment(_issue_id, comment_id) do
+      case Process.get({__MODULE__, :comment}) do
+        nil -> {:ok, nil}
+        body -> {:ok, %{id: comment_id, body: body}}
+      end
+    end
+
+    def create_comment(_issue_id, _comment_id, body) do
+      Process.put({__MODULE__, :comment}, body)
+      :ok
+    end
+
+    def update_issue_state(_issue_id, state) do
+      Process.put({__MODULE__, :updated_state}, state)
+      Process.get({__MODULE__, :update_result}, :ok)
+    end
+
+    def fetch_issue_states_by_ids([_issue_id]) do
+      [response | remaining] = Process.get({__MODULE__, :state_responses})
+      Process.put({__MODULE__, :state_responses}, remaining)
+      response
+    end
+  end
+
   setup do
     root =
       Path.join(
@@ -84,6 +109,65 @@ defmodule SymphonyElixir.HumanReviewBlockerTest do
              )
 
     assert Process.get({FakeTracker, :state}) == "Done"
+  end
+
+  test "fails closed when the issue state changes after blocker publication" do
+    issue = %Issue{id: "issue-1", identifier: "PIN-1", title: "Blocked", state: "In Progress"}
+    opts = [tracker: ScriptedTracker, handoff_state: "Human Review"]
+
+    Process.put(
+      {ScriptedTracker, :state_responses},
+      [
+        issue_state("In Progress"),
+        issue_state("Done")
+      ]
+    )
+
+    assert {:error, {:human_review_state_source_mismatch, "In Progress", "Done", "Human Review"}} =
+             HumanReviewBlocker.publish(issue, ["contract", "plan"], "## Agent Blocked", opts)
+
+    assert Process.get({ScriptedTracker, :comment}) == "## Agent Blocked"
+    refute Process.get({ScriptedTracker, :updated_state})
+  end
+
+  test "preserves an ambiguous update result when state readback fails" do
+    issue = %Issue{id: "issue-1", identifier: "PIN-1", title: "Blocked", state: "In Progress"}
+    opts = [tracker: ScriptedTracker, handoff_state: "Human Review"]
+
+    Process.put(
+      {ScriptedTracker, :state_responses},
+      [
+        issue_state("In Progress"),
+        issue_state("In Progress"),
+        {:error, :timeout}
+      ]
+    )
+
+    Process.put({ScriptedTracker, :update_result}, {:error, :upstream_timeout})
+
+    expected_error =
+      {:human_review_state_readback_failed, {:human_review_state_read_failed, :timeout}, {:error, :upstream_timeout}}
+
+    assert {:error, ^expected_error} =
+             HumanReviewBlocker.publish(issue, ["contract", "plan"], "## Agent Blocked", opts)
+
+    assert Process.get({ScriptedTracker, :updated_state}) == "Human Review"
+  end
+
+  test "rejects missing, failed, and malformed issue-state reads" do
+    issue = %Issue{id: "issue-1", identifier: "PIN-1", title: "Blocked", state: "In Progress"}
+    opts = [tracker: ScriptedTracker, handoff_state: "Human Review"]
+
+    for {response, expected_error} <- [
+          {{:ok, []}, :human_review_issue_missing},
+          {{:error, :timeout}, {:human_review_state_read_failed, :timeout}},
+          {{:ok, [%{}]}, {:human_review_state_read_invalid, {:ok, [%{}]}}}
+        ] do
+      Process.put({ScriptedTracker, :state_responses}, [response])
+
+      assert {:error, ^expected_error} =
+               HumanReviewBlocker.publish(issue, ["contract", "plan"], "## Agent Blocked", opts)
+    end
   end
 
   test "proof exhaustion produces one terminal Human Review completion" do
@@ -153,5 +237,9 @@ defmodule SymphonyElixir.HumanReviewBlockerTest do
              )
 
     assert repeated.blocker_comment_id == completion.blocker_comment_id
+  end
+
+  defp issue_state(state) do
+    {:ok, [%Issue{id: "issue-1", identifier: "PIN-1", title: "Blocked", state: state}]}
   end
 end
