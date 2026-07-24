@@ -397,7 +397,6 @@ a {
 }
 
 .agent-time,
-.timeline-meta,
 .activity-meta {
   margin-top: 0.34rem;
   overflow: hidden;
@@ -625,63 +624,6 @@ a {
   border-radius: 7px;
   color: var(--muted);
   font-size: 0.84rem;
-}
-
-.timeline-section {
-  padding: 0.95rem 0 0.35rem;
-}
-
-.timeline-heading {
-  padding: 0 0 0.7rem;
-  border-bottom: 0;
-}
-
-.timeline {
-  display: grid;
-  gap: 0;
-  max-height: 23rem;
-  margin: 0;
-  padding: 0;
-  overflow-y: auto;
-  overscroll-behavior: contain;
-  list-style: none;
-  scrollbar-gutter: stable;
-}
-
-.timeline li {
-  display: grid;
-  grid-template-columns: 0.7rem minmax(0, 1fr);
-  gap: 0.7rem;
-  padding: 0.72rem 0.2rem;
-  border-top: 1px solid var(--line);
-}
-
-.timeline-mark {
-  width: 0.48rem;
-  height: 0.48rem;
-  margin-top: 0.38rem;
-  border: 2px solid var(--line-strong);
-  border-radius: 50%;
-  background: var(--surface);
-}
-
-.timeline p {
-  margin: 0;
-  overflow-wrap: anywhere;
-  font-size: 0.86rem;
-}
-
-.timeline-meta {
-  display: block;
-  white-space: normal;
-}
-
-.timeline-empty {
-  margin: 0;
-  padding: 1rem 0;
-  border-top: 1px solid var(--line);
-  color: var(--muted);
-  font-size: 0.86rem;
 }
 
 .detail-disclosure {

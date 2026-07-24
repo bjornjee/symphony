@@ -7,7 +7,6 @@ defmodule SymphonyElixirWeb.Presenter do
 
   @audit_tail_bytes 64 * 1_024
   @audit_event_limit 50
-  @timeline_event_limit 8
   @authorization_header ~r/\b(authorization\s*:\s*)(?:(?:bearer|basic)\s+)?[^\s,;]+/i
   @bearer_token ~r/\b(bearer\s+)[A-Za-z0-9._~+\/=-]+/i
   @secret_assignment ~r/\b((?:[A-Za-z0-9_-]*(?:api[_-]?key|token|secret|password|signature)[A-Za-z0-9_-]*)\s*[=:]\s*)(?:"[^"]*"|'[^']*'|[^\s&;,]+)/i
@@ -97,7 +96,7 @@ defmodule SymphonyElixirWeb.Presenter do
   end
 
   @doc """
-  Adds bounded recent activity and log output to one selected dashboard agent.
+  Adds bounded log output to one selected dashboard agent.
   """
   @spec dashboard_detail(map()) :: map()
   def dashboard_detail(agent) when is_map(agent) do
@@ -106,9 +105,7 @@ defmodule SymphonyElixirWeb.Presenter do
       |> Map.get(:audit_events_path)
       |> read_audit_events()
 
-    agent
-    |> Map.put(:timeline, audit_events |> Enum.take(-@timeline_event_limit) |> fallback_timeline(agent))
-    |> Map.put(:log_tail, audit_events)
+    Map.put(agent, :log_tail, audit_events)
   end
 
   defp issue_payload_body(issue_identifier, running, retry, blocked) do
@@ -312,13 +309,6 @@ defmodule SymphonyElixirWeb.Presenter do
   end
 
   defp redact_sensitive(message), do: message
-
-  defp fallback_timeline([], %{activity_at: at, activity: message, status: status})
-       when is_binary(at) and is_binary(message) do
-    [%{at: at, event: status, message: message}]
-  end
-
-  defp fallback_timeline(timeline, _agent), do: timeline
 
   defp issue_id_from_entries(running, retry, blocked),
     do: (running && running.issue_id) || (retry && retry.issue_id) || (blocked && blocked.issue_id)

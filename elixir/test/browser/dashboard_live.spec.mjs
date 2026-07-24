@@ -250,22 +250,26 @@ test("dashboard states and live interactions remain observable", async ({page, r
   await tabTo(page, "agent-issue-running");
   await page.keyboard.press("Enter");
 
-  const timeline = page.locator("#agent-detail-timeline");
   const logTail = page.locator("#agent-detail-log");
   const logFollowState = page.locator("[data-log-follow-state]");
-  await expect(timeline.locator("li")).toHaveCount(8);
   await expect(logTail.locator("li")).toHaveCount(50);
-  await timeline.evaluate((element) => {
-    element.scrollTop = 140;
-  });
   await logTail.evaluate((element) => {
     element.scrollTop = element.scrollHeight;
   });
   await expect(logFollowState).toHaveText("Following");
 
+  const sessionSummary = page.getByText("Session and workspace", {exact: true});
+  const sessionDisclosure = sessionSummary.locator("..");
+  const auditSummary = page.getByText("Audit and diagnostics", {exact: true});
+  const auditDisclosure = auditSummary.locator("..");
+  await sessionSummary.click();
+  await expect(sessionDisclosure).toHaveAttribute("open", "");
+  await expect(auditDisclosure).not.toHaveAttribute("open", "");
+  await sessionSummary.focus();
+  await expect(sessionSummary).toBeFocused();
+
   const beforeUpdate = await page.evaluate(() => ({
     activeElementId: document.activeElement?.id,
-    scrollTop: document.querySelector("#agent-detail-timeline")?.scrollTop,
     logDistanceFromBottom: (() => {
       const log = document.querySelector("#agent-detail-log");
       return log ? log.scrollHeight - log.clientHeight - log.scrollTop : null;
@@ -280,15 +284,17 @@ test("dashboard states and live interactions remain observable", async ({page, r
 
   const afterUpdate = await page.evaluate(() => ({
     activeElementId: document.activeElement?.id,
-    scrollTop: document.querySelector("#agent-detail-timeline")?.scrollTop,
     logDistanceFromBottom: (() => {
       const log = document.querySelector("#agent-detail-log");
       return log ? log.scrollHeight - log.clientHeight - log.scrollTop : null;
     })()
   }));
 
+  await expect(sessionDisclosure).toHaveAttribute("open", "");
+  await expect(auditDisclosure).not.toHaveAttribute("open", "");
+  await expect(sessionSummary).toBeFocused();
+  await expect(page.getByRole("heading", {name: "Recent activity"})).toHaveCount(0);
   expect(afterUpdate.activeElementId).toBe(beforeUpdate.activeElementId);
-  expect(afterUpdate.scrollTop).toBe(beforeUpdate.scrollTop);
   expect(afterUpdate.logDistanceFromBottom).toBeLessThanOrEqual(24);
 
   await logTail.evaluate((element) => {
@@ -309,13 +315,16 @@ test("dashboard states and live interactions remain observable", async ({page, r
   await expect(logTail.locator(".log-line").last()).toBeInViewport();
   await expect(logFollowState).toHaveText("Following");
   await page.locator("#agent-issue-running").click();
+  await expect(sessionDisclosure).not.toHaveAttribute("open", "");
+  await expect(auditDisclosure).not.toHaveAttribute("open", "");
+  const beforeStatusTransition = await page.evaluate(() => document.activeElement?.id);
 
   await setFixtureState(request, "transitioned");
   await expect(page.locator("#agent-detail")).toHaveAttribute("data-agent-status", "retrying");
   await expect(page.locator("#agent-issue-running")).toHaveAttribute("aria-pressed", "true");
 
   const afterStatusTransition = await page.evaluate(() => document.activeElement?.id);
-  expect(afterStatusTransition).toBe(beforeUpdate.activeElementId);
+  expect(afterStatusTransition).toBe(beforeStatusTransition);
 
   await gotoReady(page, request);
   await page.getByText("Session and workspace", {exact: true}).click();
@@ -353,16 +362,17 @@ Preservation gate state: PASS
 
 | Check | Result | Evidence |
 | --- | --- | --- |
-| Desktop render 1440x900 | PASS | All nine named states rendered without horizontal overflow. |
-| Narrow render 390x844 | PASS | All nine named states rendered within the viewport. |
+| Desktop render 1440x900 | PASS | All ten named states rendered without horizontal overflow. |
+| Narrow render 390x844 | PASS | All ten named states rendered within the viewport. |
 | Keyboard-only selection | PASS | Tab reached retrying agent and Enter selected it. |
 | Visible focus | PASS | Computed focus outline was ${focusStyle.width} ${focusStyle.style} ${focusStyle.color}. |
 | Keyboard log reading | PASS | Tab focused the named log region and Page Up scrolled older output. |
 | PubSub selection preservation | PASS | Selected ID remained agent-issue-running. |
 | Focus identity preservation | PASS | activeElement remained ${afterUpdate.activeElementId}. |
+| Disclosure state preservation | PASS | Session and workspace stayed open, Audit and diagnostics stayed closed, and disclosure focus survived a same-agent update. |
+| Cross-agent disclosure reset | PASS | Both disclosures reset closed after selecting another agent. |
 | Status transition preservation | PASS | Selected issue and focus survived running → retrying. |
 | Clipboard outcomes | PASS | Successful and rejected writes produced visible guidance without moving focus. |
-| Reading position preservation | PASS | timeline scrollTop remained ${afterUpdate.scrollTop}. |
 | Live log selection | PASS | Running, retrying, and blocked agents exposed their own bounded audit tail. |
 | Live log following | PASS | A newly appended line appeared without navigation and the tail followed while at the bottom. |
 | Paused log reading | PASS | scrollTop remained ${pausedLogScrollTop} after the operator scrolled up and another line arrived. |

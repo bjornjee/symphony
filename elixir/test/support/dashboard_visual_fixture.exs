@@ -136,7 +136,7 @@ defmodule SymphonyElixir.DashboardVisualFixture.Orchestrator do
         running_entry(state,
           issue_id: "issue-running",
           identifier: "PIN-RUNNING",
-          message: "Implementing the selected-session activity timeline",
+          message: "Implementing the selected-session live log",
           timestamp: now
         )
       ],

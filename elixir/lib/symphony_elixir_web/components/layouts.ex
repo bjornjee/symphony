@@ -100,14 +100,16 @@ defmodule SymphonyElixirWeb.Layouts do
                 this.selectedAgentId = detail ? detail.dataset.selectedAgent : null;
               },
               beforeUpdate: function () {
-                var timeline = this.el.querySelector("#agent-detail-timeline");
                 var log = this.el.querySelector("#agent-detail-log");
                 var detail = this.el.querySelector("#agent-detail");
-                this.timelineScrollTop = timeline ? timeline.scrollTop : null;
                 this.logScrollTop = log ? log.scrollTop : null;
                 this.logShouldFollow = log
                   ? log.scrollHeight - log.clientHeight - log.scrollTop <= 24
                   : false;
+                this.openDisclosureIds = Array.from(
+                  this.el.querySelectorAll(".detail-disclosure[open][id]"),
+                  function (disclosure) { return disclosure.id; }
+                );
                 this.selectedAgentId = detail ? detail.dataset.selectedAgent : null;
                 this.focusedId =
                   this.el.contains(document.activeElement) && document.activeElement.id
@@ -115,33 +117,37 @@ defmodule SymphonyElixirWeb.Layouts do
                     : null;
               },
               updated: function () {
-                var timelineScrollTop = this.timelineScrollTop;
                 var logScrollTop = this.logScrollTop;
                 var logShouldFollow = this.logShouldFollow;
+                var openDisclosureIds = this.openDisclosureIds || [];
                 var focusedId = this.focusedId;
 
                 window.requestAnimationFrame(function () {
-                  var timeline = document.querySelector("#agent-detail-timeline");
-                  if (timeline && timelineScrollTop !== null) {
-                    timeline.scrollTop = timelineScrollTop;
+                  var log = this.el.querySelector("#agent-detail-log");
+                  var detail = this.el.querySelector("#agent-detail");
+                  var selectedAgentId = detail ? detail.dataset.selectedAgent : null;
+                  var sameAgent = selectedAgentId === this.selectedAgentId;
+
+                  if (sameAgent) {
+                    this.el.querySelectorAll(".detail-disclosure[id]").forEach(function (disclosure) {
+                      disclosure.open = openDisclosureIds.includes(disclosure.id);
+                    });
                   }
 
-                  var log = document.querySelector("#agent-detail-log");
-                  var detail = document.querySelector("#agent-detail");
-                  var selectedAgentId = detail ? detail.dataset.selectedAgent : null;
                   if (log && logScrollTop !== null) {
                     log.scrollTop =
-                      logShouldFollow || selectedAgentId !== this.selectedAgentId
+                      logShouldFollow || !sameAgent
                         ? log.scrollHeight
                         : logScrollTop;
                   }
                   this.bindLogScroll();
                   this.updateLogFollowState();
 
-                  var focused = focusedId ? document.getElementById(focusedId) : null;
+                  var focused = sameAgent && focusedId ? document.getElementById(focusedId) : null;
                   if (focused && document.activeElement !== focused) {
                     focused.focus({preventScroll: true});
                   }
+                  this.selectedAgentId = selectedAgentId;
                 }.bind(this));
               },
               destroyed: function () {

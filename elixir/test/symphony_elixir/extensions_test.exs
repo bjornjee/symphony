@@ -695,7 +695,7 @@ defmodule SymphonyElixir.ExtensionsTest do
   end
 
   @tag :dashboard_detail
-  test "dashboard detail keeps a compact newest-event summary in chronological order" do
+  test "dashboard detail does not duplicate the live log as a recent activity projection" do
     audit_events_path = write_dashboard_audit_events!()
 
     detail =
@@ -705,14 +705,7 @@ defmodule SymphonyElixir.ExtensionsTest do
         audit_events_path: audit_events_path
       })
 
-    assert length(detail.timeline) == 8
-    assert hd(detail.timeline).message == "event 49"
-    assert List.last(detail.timeline).message == "event 56"
-
-    timestamps = Enum.map(detail.timeline, & &1.at)
-    assert timestamps == Enum.sort(timestamps)
-    refute inspect(detail.timeline) =~ "discarded-prefix"
-    refute inspect(detail.timeline) =~ "malformed-event"
+    refute Map.has_key?(detail, :timeline)
   end
 
   @tag :dashboard_detail
@@ -901,7 +894,10 @@ defmodule SymphonyElixir.ExtensionsTest do
     assert html =~ ~s(data-selected-agent="issue-blocked")
     assert html =~ ~s(id="agent-issue-blocked")
     assert html =~ ~s(aria-pressed="true")
-    assert html =~ ~s(id="agent-detail-timeline")
+    assert html =~ ~s(id="session-workspace-disclosure")
+    assert html =~ ~s(id="audit-diagnostics-disclosure")
+    refute html =~ ~s(id="agent-detail-timeline")
+    refute html =~ "Recent activity"
     assert html =~ ~s(phx-hook="PreserveDashboardReadingPosition")
 
     updated_snapshot =

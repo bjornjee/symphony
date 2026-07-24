@@ -72,7 +72,7 @@ defmodule SymphonyElixirWeb.DashboardLive do
         <div>
           <p class="eyebrow">Symphony Observability</p>
           <h1>Operations Dashboard</h1>
-          <p class="header-copy">Live agent work, attention states, and recent session activity.</p>
+          <p class="header-copy">Live agent work, attention states, and streaming session output.</p>
         </div>
 
         <div class="connection-status" role="status" aria-live="polite">
@@ -320,34 +320,8 @@ defmodule SymphonyElixirWeb.DashboardLive do
         </div>
       </dl>
 
-      <section class="timeline-section" aria-labelledby="timeline-title">
-        <div class="panel-heading timeline-heading">
-          <div>
-            <p class="panel-kicker">Recent audit events</p>
-            <h3 id="timeline-title">Recent activity</h3>
-          </div>
-          <span class="event-count numeric"><%= length(@agent.timeline) %></span>
-        </div>
-
-        <ol id="agent-detail-timeline" class="timeline" aria-live="polite">
-          <li :for={event <- @agent.timeline}>
-            <span class="timeline-mark" aria-hidden="true"></span>
-            <div>
-              <p><%= event.message %></p>
-              <span class="timeline-meta">
-                <%= event.event %>
-                <%= if event.at do %> · <span class="mono"><%= event.at %></span><% end %>
-              </span>
-            </div>
-          </li>
-        </ol>
-        <p :if={@agent.timeline == []} class="timeline-empty">
-          No recent audit events are available for this session.
-        </p>
-      </section>
-
-      <details class="detail-disclosure">
-        <summary>Session and workspace</summary>
+      <details id="session-workspace-disclosure" class="detail-disclosure">
+        <summary id="session-workspace-summary">Session and workspace</summary>
         <dl class="disclosure-facts">
           <div>
             <dt>Session ID</dt>
@@ -355,6 +329,7 @@ defmodule SymphonyElixirWeb.DashboardLive do
               <span class="mono"><%= @agent.session_id || "n/a" %></span>
               <button
                 :if={@agent.session_id}
+                id="copy-session-id"
                 type="button"
                 class="copy-button"
                 data-copy={@agent.session_id}
@@ -368,8 +343,8 @@ defmodule SymphonyElixirWeb.DashboardLive do
         </dl>
       </details>
 
-      <details class="detail-disclosure">
-        <summary>Audit and diagnostics</summary>
+      <details id="audit-diagnostics-disclosure" class="detail-disclosure">
+        <summary id="audit-diagnostics-summary">Audit and diagnostics</summary>
         <dl class="disclosure-facts">
           <div>
             <dt>Audit</dt>
@@ -377,6 +352,7 @@ defmodule SymphonyElixirWeb.DashboardLive do
               <span class="mono"><%= @agent.audit_path || "n/a" %></span>
               <button
                 :if={@agent.audit_path}
+                id="copy-audit-path"
                 type="button"
                 class="copy-button"
                 data-copy={@agent.audit_path}
