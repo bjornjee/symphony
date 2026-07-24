@@ -16,7 +16,7 @@ defmodule SymphonyElixir.Pin28BenchmarkTest do
 
     assert report.model_configuration == %{
              kind: "deterministic-agent-replay",
-             revision: 5,
+             revision: 6,
              live_model: false
            }
 
@@ -47,6 +47,10 @@ defmodule SymphonyElixir.Pin28BenchmarkTest do
              Enum.all?(sample.baseline.accuracy, fn {_name, passed} -> passed end) and
                Enum.all?(sample.candidate.accuracy, fn {_name, passed} -> passed end) and
                sample.baseline.lifecycle.planning.passed and
+               sample.baseline.lifecycle.planning.execution_mode == "planned" and
+               is_binary(sample.baseline.lifecycle.planning.plan_digest) and
+               sample.candidate.lifecycle.planning.execution_mode == "planned" and
+               is_binary(sample.candidate.lifecycle.planning.plan_digest) and
                sample.baseline.lifecycle.publication.passed and
                Enum.all?(sample.baseline.lifecycle.verification, &is_binary(&1.receipt_digest)) and
                Enum.all?(sample.candidate.lifecycle.verification, &is_binary(&1.receipt_digest)) and
@@ -95,6 +99,42 @@ defmodule SymphonyElixir.Pin28BenchmarkTest do
         observation_delay_ms: 1,
         fixed_overhead_ms: 1,
         artifact_observer: observer
+      )
+
+    assert report.baseline.completion_accuracy == 0.0
+    assert report.candidate.completion_accuracy == 0.0
+    refute report.thresholds_passed
+  end
+
+  test "fails completion accuracy when the production planning lifecycle fails" do
+    planning_runner = fn _session, _workspace, _issue, _contract, _profile, _opts ->
+      {:error, :forced_planning_failure}
+    end
+
+    report =
+      Pin28Benchmark.run(
+        runs: 10,
+        observation_delay_ms: 1,
+        fixed_overhead_ms: 1,
+        planning_lifecycle_runner: planning_runner
+      )
+
+    assert report.baseline.completion_accuracy == 0.0
+    assert report.candidate.completion_accuracy == 0.0
+    refute report.thresholds_passed
+  end
+
+  test "fails completion accuracy when sealed planning evidence is missing" do
+    mutator = fn lifecycle ->
+      update_in(lifecycle, [:planning], &Map.delete(&1, :plan_digest))
+    end
+
+    report =
+      Pin28Benchmark.run(
+        runs: 10,
+        observation_delay_ms: 1,
+        fixed_overhead_ms: 1,
+        lifecycle_mutator: mutator
       )
 
     assert report.baseline.completion_accuracy == 0.0

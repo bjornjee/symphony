@@ -10,6 +10,7 @@ defmodule SymphonyElixir.Pin28Benchmark do
     ExecutionLedger,
     ImplementationReview,
     PlanningArtifact,
+    PlanningLifecycle,
     RepositoryFingerprint,
     TaskBranch,
     WorkflowProfile
@@ -109,6 +110,9 @@ defmodule SymphonyElixir.Pin28Benchmark do
     implementation_mutator = Keyword.get(opts, :implementation_mutator, fn _workspace -> :ok end)
     review_requester = Keyword.get(opts, :review_requester, &request_lifecycle_review/1)
 
+    planning_lifecycle_runner =
+      Keyword.get(opts, :planning_lifecycle_runner, &PlanningLifecycle.run/6)
+
     if runs < 10, do: raise(ArgumentError, "PIN-28 benchmark requires at least 10 controlled runs")
 
     settings = %{
@@ -120,7 +124,8 @@ defmodule SymphonyElixir.Pin28Benchmark do
       lifecycle_mutator: lifecycle_mutator,
       implementation_writer: implementation_writer,
       implementation_mutator: implementation_mutator,
-      review_requester: review_requester
+      review_requester: review_requester,
+      planning_lifecycle_runner: planning_lifecycle_runner
     }
 
     samples =
@@ -155,7 +160,7 @@ defmodule SymphonyElixir.Pin28Benchmark do
       expected_diff: @expected_diff,
       model_configuration: %{
         kind: "deterministic-agent-replay",
-        revision: 5,
+        revision: 6,
         live_model: false
       },
       required_artifacts: Map.take(@task_contract, [:verification, :review_checks, :handoff_fields]),
@@ -236,7 +241,10 @@ defmodule SymphonyElixir.Pin28Benchmark do
     planning_started_ms = context_completed_ms
     pre_edit_ms = div(settings.fixed_overhead_ms * 3, 5)
     Process.sleep(pre_edit_ms)
-    planning = plan_lifecycle()
+
+    {planning, execution_plan} =
+      plan_lifecycle(prepared, settings.planning_lifecycle_runner)
+
     historical_artifacts = settings.artifact_observer.()
     planning_completed_ms = System.monotonic_time(:millisecond)
 
@@ -262,6 +270,7 @@ defmodule SymphonyElixir.Pin28Benchmark do
       prepare_lifecycle(
         implementation,
         prepared,
+        execution_plan,
         settings.command_executor,
         reuse_proofs
       )
@@ -402,7 +411,10 @@ defmodule SymphonyElixir.Pin28Benchmark do
        ) do
     %{
       expected_diff:
-        lifecycle.planning.passed and
+        valid_planning_evidence?(
+          lifecycle.planning,
+          trusted_lifecycle.planning
+        ) and
           valid_fixture_implementation?(lifecycle.implementation),
       verification:
         baseline_snapshot == candidate_snapshot and
@@ -420,6 +432,17 @@ defmodule SymphonyElixir.Pin28Benchmark do
         )
     }
   end
+
+  defp valid_planning_evidence?(planning, trusted)
+       when is_map(planning) and is_map(trusted) do
+    planning[:passed] == true and trusted[:passed] == true and
+      planning[:workflow] == "chore" and trusted[:workflow] == "chore" and
+      planning[:execution_mode] == "planned" and trusted[:execution_mode] == "planned" and
+      valid_digest?(planning[:plan_digest]) and
+      planning[:plan_digest] == trusted[:plan_digest]
+  end
+
+  defp valid_planning_evidence?(_planning, _trusted), do: false
 
   defp valid_verification_evidence?(verification, trusted)
        when is_list(verification) and is_list(trusted) do
@@ -485,33 +508,78 @@ defmodule SymphonyElixir.Pin28Benchmark do
   defp valid_digest?(value),
     do: is_binary(value) and Regex.match?(~r/^[a-f0-9]{64}$/, value)
 
-  defp plan_lifecycle do
-    issue = benchmark_issue("pin-28-benchmark")
-
-    with {:ok, contract} <- TaskContract.from_issue(issue),
-         {:ok, profile} <- WorkflowProfile.select(contract) do
-      %{passed: true, contract_digest: contract.digest, workflow: profile.name}
-    else
-      {:error, reason} -> %{passed: false, error: inspect(reason)}
-    end
-  end
-
-  defp prepare_lifecycle(implementation, prepared, command_executor, reuse_proofs) do
-    if valid_fixture_implementation?(implementation) do
-      prepare_valid_lifecycle(implementation, prepared, command_executor, reuse_proofs)
-    else
-      %{
-        passed: false,
-        reused: false,
-        workspace: prepared.workspace,
-        implementation: implementation,
-        verification: Enum.map(@required_verification, &%{command: &1, passed: false, receipt_digest: nil})
+  defp plan_lifecycle(prepared, planning_lifecycle_runner) do
+    with {:ok, profile} <- WorkflowProfile.select(prepared.contract),
+         {:ok, repository} <- RepositoryFingerprint.capture(prepared.workspace),
+         candidate <- planning_candidate(prepared, profile, repository),
+         {:ok, plan} <-
+           planning_lifecycle_runner.(
+             %{role: :primary, thread_id: "pin-28-primary"},
+             prepared.workspace,
+             prepared.issue,
+             prepared.contract,
+             profile,
+             planning_lifecycle_options(prepared, candidate, repository)
+           ) do
+      {
+        %{
+          passed: true,
+          contract_digest: prepared.contract.digest,
+          workflow: profile.name,
+          plan_digest: plan["plan_digest"],
+          execution_mode: plan["execution_mode"] || "planned"
+        },
+        plan
       }
+    else
+      {:error, reason} -> {%{passed: false, error: inspect(reason)}, nil}
     end
   end
 
-  defp prepare_valid_lifecycle(implementation, prepared, command_executor, reuse_proofs) do
-    {:ok, state} = RepositoryFingerprint.capture(prepared.workspace)
+  defp planning_lifecycle_options(prepared, candidate, repository) do
+    run_turn = fn session, _prompt, _issue, opts ->
+      case session.role do
+        :primary ->
+          opts[:on_message].(%{
+            event: :notification,
+            payload: %{
+              "method" => "turn/plan/updated",
+              "params" => %{"plan" => candidate["ordered_steps"]}
+            }
+          })
+
+          opts[:tool_executor].("submit_execution_plan", candidate)
+
+        :reviewer ->
+          opts[:tool_executor].("submit_plan_review", %{
+            "candidate_digest" => PlanningArtifact.digest(candidate),
+            "verdict" => "approve",
+            "blocking_findings" => [],
+            "advisory_findings" => [],
+            "workflow" => candidate["workflow"],
+            "profile_digest" => candidate["profile_digest"]
+          })
+      end
+
+      {:ok, %{turn_id: "deterministic-#{session.role}"}}
+    end
+
+    [
+      preactivation_repository: repository,
+      repository_capture: fn _workspace, _worker_host ->
+        RepositoryFingerprint.capture(prepared.workspace)
+      end,
+      issue_fetcher: fn [_id] -> {:ok, [prepared.issue]} end,
+      run_turn: run_turn,
+      start_reviewer_session: fn _workspace, _opts ->
+        {:ok, %{role: :reviewer, thread_id: "pin-28-reviewer"}}
+      end,
+      pin_primary_thread: fn -> :ok end,
+      stop_session: fn _session -> :ok end
+    ]
+  end
+
+  defp planning_candidate(prepared, profile, repository) do
     criterion_ids = Enum.map(prepared.contract.acceptance_criteria, & &1.id)
 
     proofs =
@@ -530,29 +598,86 @@ defmodule SymphonyElixir.Pin28Benchmark do
         }
       end)
 
-    semantic = %{
-      "instruction_digest" => digest("pin-28-instructions"),
-      "profile_digest" => digest("pin-28-profile"),
-      "workflow" => "chore",
-      "candidate" => %{
-        "repository" => %{"origin" => state.origin, "base_sha" => prepared.base_sha},
-        "affected_paths" => @expected_diff,
-        "verification_profile" => "Full",
-        "execution_context" => "CI/test-only deterministic lifecycle evaluation",
-        "scale_shape" => "one fixed two-file task",
-        "ordered_steps" => [
-          %{
-            "id" => "deliver",
-            "proof_ids" => Enum.map(proofs, & &1["id"]),
-            "affected_paths" => @expected_diff,
-            "depends_on" => []
-          }
-        ],
-        "proofs" => proofs
+    %{
+      "issue_id" => prepared.issue.id,
+      "issue_identifier" => prepared.issue.identifier,
+      "contract_digest" => prepared.contract.digest,
+      "workflow" => profile.name,
+      "profile_digest" => profile.digest,
+      "primary_thread_id" => "pin-28-primary",
+      "ordered_steps" => [
+        %{
+          "id" => "deliver",
+          "step" => "Implement the PIN-28 fixture and validate its complete lifecycle evidence",
+          "status" => "in_progress",
+          "affected_paths" => @expected_diff,
+          "depends_on" => [],
+          "verification_profile" => "Full",
+          "proof_ids" => Enum.map(proofs, & &1["id"]),
+          "criterion_ids" => criterion_ids,
+          "invariants" => ["Completion accuracy remains identical between variants"],
+          "stop_conditions" => ["Stop if observed fixture evidence differs from PIN-28"],
+          "evidence_requirements" => ["Expected diff, proof, review, publication, and handoff receipts"]
+        }
+      ],
+      "affected_paths" => @expected_diff,
+      "scope" => %{
+        "in" => ["PIN-28 fixture lifecycle"],
+        "out" => ["Live provider latency"]
+      },
+      "execution_context" => "CI/test-only deterministic lifecycle evaluation",
+      "scale_shape" => "exactly ten fixed two-file baseline/candidate pairs",
+      "verification_profile" => "Full",
+      "proofs" => proofs,
+      "red_policy" => "waived",
+      "red_waiver_rationale" => "The deterministic benchmark evaluates an observed historical fixture rather than changing runtime behavior.",
+      "risks" => ["Synthetic adapters could diverge from production lifecycle contracts"],
+      "invariants" => ["Every successful sample has immutable lifecycle evidence"],
+      "rollback" => "revert the benchmark harness change",
+      "evidence_requirements" => ["Production planning lifecycle returns a sealed reviewed plan"],
+      "repository" => %{
+        "origin" => repository.origin,
+        "base_sha" => repository.base_sha,
+        "preactivation_digest" => repository.digest
       }
     }
+  end
 
-    plan = Map.put(semantic, "plan_digest", PlanningArtifact.digest(semantic))
+  defp prepare_lifecycle(
+         implementation,
+         prepared,
+         execution_plan,
+         command_executor,
+         reuse_proofs
+       ) do
+    if valid_fixture_implementation?(implementation) and is_map(execution_plan) do
+      prepare_valid_lifecycle(
+        implementation,
+        prepared,
+        execution_plan,
+        command_executor,
+        reuse_proofs
+      )
+    else
+      %{
+        passed: false,
+        reused: false,
+        workspace: prepared.workspace,
+        implementation: implementation,
+        verification: Enum.map(@required_verification, &%{command: &1, passed: false, receipt_digest: nil})
+      }
+    end
+  end
+
+  defp prepare_valid_lifecycle(
+         implementation,
+         prepared,
+         plan,
+         command_executor,
+         reuse_proofs
+       ) do
+    {:ok, state} = RepositoryFingerprint.capture(prepared.workspace)
+    proofs = plan["candidate"]["proofs"]
     key = ExecutionLedger.key(state.origin, prepared.issue.id, plan["plan_digest"])
 
     verification =

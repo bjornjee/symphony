@@ -2272,13 +2272,23 @@ defmodule SymphonyElixir.CoreTest do
         labels: ["backend"]
       }
 
+      handoff_publisher = fn issue, contract, evidence, opts ->
+        Process.sleep(25)
+        valid_handoff_publisher(issue, contract, evidence, opts)
+      end
+
+      issue_state_fetcher = fn [_issue_id] ->
+        Process.sleep(25)
+        {:ok, [issue]}
+      end
+
       assert :ok =
                AgentRunner.run(
                  issue,
                  self(),
-                 issue_state_fetcher: fn [_issue_id] -> {:ok, [issue]} end,
+                 issue_state_fetcher: issue_state_fetcher,
                  completion_evidence_validator: &valid_handoff_evidence/5,
-                 handoff_publisher: &valid_handoff_publisher/4,
+                 handoff_publisher: handoff_publisher,
                  planning_lifecycle_runner: &approve_execution_plan/6,
                  task_branch_ensurer: &accept_task_branch/5,
                  capability_diagnostics_resolver: &test_capability_diagnostics/1
@@ -2342,8 +2352,23 @@ defmodule SymphonyElixir.CoreTest do
 
       assert Enum.any?(phase_timings, fn timing ->
                timing["phase"] == "handoff" and
-                 timing["reason"] == "waiting for Linear comment readback and state transition"
+                 timing["reason"] ==
+                   "waiting for evidence validation, Linear comment readback, and state transition"
              end)
+
+      implementation_timing = Enum.find(phase_timings, &(&1["phase"] == "implementation"))
+      handoff_timings = Enum.filter(phase_timings, &(&1["phase"] == "handoff"))
+
+      assert Enum.any?(handoff_timings, fn timing ->
+               timing["reason"] == "waiting for Linear issue state refresh"
+             end)
+
+      assert implementation_timing["excluded_duration_ms"] >=
+               Enum.sum(Enum.map(handoff_timings, & &1["duration_ms"]))
+
+      assert implementation_timing["duration_ms"] ==
+               implementation_timing["inclusive_duration_ms"] -
+                 implementation_timing["excluded_duration_ms"]
 
       assert Enum.any?(audit_events, fn event ->
                event["phase"] == "command" and is_binary(event["detail"]) and

@@ -92,6 +92,17 @@ defmodule SymphonyElixir.RunAuditTest do
     assert event["attribution"] == "tool"
     assert event["budget_ms"] == 2_000
     assert event["budget_overrun_ms"] == 250
+
+    assert {:error, :invalid_excluded_phase_duration} =
+             RunAudit.record_phase(
+               context.workspace,
+               context.task,
+               "context_loading",
+               started_at,
+               ended_at,
+               "tool",
+               %{excluded_duration_ms: 2_251}
+             )
   end
 
   test "uses monotonic elapsed time when the wall clock moves backwards", context do
@@ -676,6 +687,110 @@ defmodule SymphonyElixir.RunAuditTest do
     manifest = base |> Path.join("attempts.json") |> File.read!() |> Jason.decode!()
     assert length(Enum.filter(stale_ids, &(&1 in manifest))) == 5
     refute File.exists?(Path.join([base, "attempts", hd(stale_ids)]))
+  end
+
+  test "does not refresh abandoned retention order when marker cleanup fails", context do
+    suffix = Base.url_encode64(:crypto.strong_rand_bytes(8), padding: false)
+    remote_workspace = Path.join(context.workspace, "protected-stale-workspace-#{suffix}")
+    File.mkdir_p!(remote_workspace)
+
+    RunAudit.start(remote_workspace, context.task, %{worker_host: "initial-worker"})
+    initial_paths = RunAudit.paths(remote_workspace, context.task)
+    RunAudit.finish(remote_workspace, context.task)
+
+    base = central_audit_base(initial_paths)
+    attempts = Path.join(base, "attempts")
+    File.rm_rf!(attempts)
+    File.mkdir_p!(attempts)
+
+    abandoned_id = "protected_abandoned"
+    abandoned = Path.join(attempts, abandoned_id)
+    File.mkdir_p!(abandoned)
+    File.touch!(Path.join(abandoned, ".active"))
+    File.write!(Path.join(abandoned, "run-audit.jsonl"), "{}\n")
+
+    completed_ids =
+      Enum.map(1..5, fn index ->
+        id = "completed_#{index}"
+        directory = Path.join(attempts, id)
+        File.mkdir_p!(directory)
+        File.write!(Path.join(directory, "run-audit.jsonl"), "{}\n")
+        id
+      end)
+
+    original_manifest = [abandoned_id | completed_ids]
+    manifest_path = Path.join(base, "attempts.json")
+    File.write!(manifest_path, Jason.encode!(original_manifest))
+    File.chmod!(abandoned, 0o500)
+
+    on_exit(fn ->
+      File.chmod(abandoned, 0o700)
+      File.rm_rf(base)
+    end)
+
+    assert :ok = RunAudit.start(remote_workspace, context.task, %{worker_host: "fallback-worker"})
+    assert original_manifest == manifest_path |> File.read!() |> Jason.decode!()
+    assert File.exists?(Path.join(abandoned, ".active"))
+    assert Enum.all?(completed_ids, &File.dir?(Path.join(attempts, &1)))
+  end
+
+  test "restores earlier abandoned markers when later cleanup fails", context do
+    suffix = Base.url_encode64(:crypto.strong_rand_bytes(8), padding: false)
+    remote_workspace = Path.join(context.workspace, "partial-cleanup-workspace-#{suffix}")
+    File.mkdir_p!(remote_workspace)
+
+    RunAudit.start(remote_workspace, context.task, %{worker_host: "initial-worker"})
+    initial_paths = RunAudit.paths(remote_workspace, context.task)
+    RunAudit.finish(remote_workspace, context.task)
+
+    base = central_audit_base(initial_paths)
+    attempts = Path.join(base, "attempts")
+    File.rm_rf!(attempts)
+    File.mkdir_p!(attempts)
+
+    abandoned_ids = ["abandoned_a", "abandoned_b"]
+
+    Enum.each(abandoned_ids, fn id ->
+      directory = Path.join(attempts, id)
+      File.mkdir_p!(directory)
+      File.touch!(Path.join(directory, ".active"))
+      File.write!(Path.join(directory, "run-audit.jsonl"), "{}\n")
+    end)
+
+    completed_ids =
+      Enum.map(1..5, fn index ->
+        id = "completed_#{index}"
+        directory = Path.join(attempts, id)
+        File.mkdir_p!(directory)
+        File.write!(Path.join(directory, "run-audit.jsonl"), "{}\n")
+        id
+      end)
+
+    original_manifest = abandoned_ids ++ completed_ids
+    manifest_path = Path.join(base, "attempts.json")
+    File.write!(manifest_path, Jason.encode!(original_manifest))
+
+    protected = Path.join(attempts, "abandoned_b")
+    File.chmod!(protected, 0o500)
+
+    on_exit(fn ->
+      File.chmod(protected, 0o700)
+      File.rm_rf(base)
+    end)
+
+    assert :ok = RunAudit.start(remote_workspace, context.task, %{worker_host: "fallback-worker"})
+    assert original_manifest == manifest_path |> File.read!() |> Jason.decode!()
+    assert File.exists?(Path.join([attempts, "abandoned_a", ".active"]))
+    assert File.exists?(Path.join([attempts, "abandoned_b", ".active"]))
+    assert Enum.all?(completed_ids, &File.dir?(Path.join(attempts, &1)))
+
+    File.chmod!(protected, 0o700)
+    assert :ok = RunAudit.start(remote_workspace, context.task, %{worker_host: "recovery-worker"})
+
+    recovered_manifest = manifest_path |> File.read!() |> Jason.decode!()
+    assert "abandoned_a" in recovered_manifest
+    assert "abandoned_b" in recovered_manifest
+    refute File.dir?(Path.join(attempts, "completed_1"))
   end
 
   test "compacts noisy history before the audit exceeds its summary bound", context do

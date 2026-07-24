@@ -406,12 +406,14 @@ defmodule SymphonyElixir.AgentRunner do
 
     {:ok, proof_ledger} = Agent.start_link(fn -> %{} end)
     {:ok, plan_progress} = Agent.start_link(fn -> nil end)
+    {:ok, nested_phase_time} = Agent.start_link(fn -> 0 end)
 
     runtime = %{
       issue_state_fetcher: issue_state_fetcher,
       opts: opts,
       proof_ledger: proof_ledger,
       plan_progress: plan_progress,
+      nested_phase_time: nested_phase_time,
       worker_host: worker_host
     }
 
@@ -557,6 +559,7 @@ defmodule SymphonyElixir.AgentRunner do
                 }
 
                 implementation_started_at = RunAudit.now()
+                Agent.update(runtime.nested_phase_time, fn _previous -> 0 end)
 
                 result =
                   do_run_codex_turns(
@@ -569,14 +572,17 @@ defmodule SymphonyElixir.AgentRunner do
                     {1, max_turns}
                   )
 
+                implementation_completed_at = RunAudit.now()
+                excluded_duration_ms = Agent.get(runtime.nested_phase_time, & &1)
+
                 RunAudit.record_phase(
                   workspace,
                   issue,
                   "implementation",
                   implementation_started_at,
-                  RunAudit.now(),
+                  implementation_completed_at,
                   "model",
-                  %{includes_nested_tool_time: true}
+                  %{excluded_duration_ms: excluded_duration_ms}
                 )
 
                 update_goal_for_result(session, workspace, issue, result)
@@ -604,6 +610,7 @@ defmodule SymphonyElixir.AgentRunner do
     after
       Agent.stop(proof_ledger)
       Agent.stop(plan_progress)
+      Agent.stop(nested_phase_time)
     end
   end
 
@@ -1402,7 +1409,8 @@ defmodule SymphonyElixir.AgentRunner do
         arguments,
         result,
         started_at,
-        RunAudit.now()
+        RunAudit.now(),
+        runtime.nested_phase_time
       )
 
       result
@@ -1416,7 +1424,8 @@ defmodule SymphonyElixir.AgentRunner do
          arguments,
          result,
          started_at,
-         ended_at
+         ended_at,
+         nested_phase_time
        ) do
     payload = decode_dynamic_tool_output(result)
 
@@ -1447,7 +1456,11 @@ defmodule SymphonyElixir.AgentRunner do
     }
 
     RunAudit.append(workspace, issue, execution_tool_event(tool), attrs)
-    record_execution_tool_timing(workspace, issue, tool, payload, started_at, ended_at)
+
+    case record_execution_tool_timing(workspace, issue, tool, payload, started_at, ended_at) do
+      :nested -> add_nested_phase_time(nested_phase_time, started_at, ended_at)
+      :ok -> :ok
+    end
   end
 
   defp record_execution_tool_timing(
@@ -1466,6 +1479,8 @@ defmodule SymphonyElixir.AgentRunner do
       ended_at,
       if(payload["cache_status"] == "hit", do: "tool", else: "subprocess")
     )
+
+    :nested
   end
 
   defp record_execution_tool_timing(
@@ -1477,6 +1492,7 @@ defmodule SymphonyElixir.AgentRunner do
          ended_at
        ) do
     RunAudit.record_phase(workspace, issue, "review", started_at, ended_at, "model")
+    :nested
   end
 
   defp record_execution_tool_timing(
@@ -1496,6 +1512,8 @@ defmodule SymphonyElixir.AgentRunner do
       "external",
       %{reason: "waiting for Git push and pull-request publication"}
     )
+
+    :nested
   end
 
   defp record_execution_tool_timing(
@@ -1507,6 +1525,13 @@ defmodule SymphonyElixir.AgentRunner do
          _ended_at
        ),
        do: :ok
+
+  defp add_nested_phase_time(nil, _started_at, _ended_at), do: :ok
+
+  defp add_nested_phase_time(tracker, started_at, ended_at) when is_pid(tracker) do
+    duration_ms = max(ended_at.monotonic_ms - started_at.monotonic_ms, 0)
+    Agent.update(tracker, &(&1 + duration_ms))
+  end
 
   defp decode_dynamic_tool_output(%{"output" => output}) when is_binary(output) do
     case Jason.decode(output) do
@@ -1591,7 +1616,7 @@ defmodule SymphonyElixir.AgentRunner do
          runtime,
          turn_numbers
        ) do
-    case continue_with_issue?(issue, task_contract, runtime.issue_state_fetcher) do
+    case timed_continue_with_issue?(workspace, issue, task_contract, runtime) do
       {:continue, refreshed_issue} ->
         handoff_result =
           finish_handoff(workspace, issue, refreshed_issue, task_contract, runtime, elem(turn_numbers, 0))
@@ -1612,6 +1637,25 @@ defmodule SymphonyElixir.AgentRunner do
       {:error, reason} ->
         record_continuation_failure(workspace, issue, reason, elem(turn_numbers, 0))
     end
+  end
+
+  defp timed_continue_with_issue?(workspace, issue, task_contract, runtime) do
+    refresh_started_at = RunAudit.now()
+    result = continue_with_issue?(issue, task_contract, runtime.issue_state_fetcher)
+    refresh_completed_at = RunAudit.now()
+
+    RunAudit.record_phase(
+      workspace,
+      issue,
+      "handoff",
+      refresh_started_at,
+      refresh_completed_at,
+      "external",
+      %{reason: "waiting for Linear issue state refresh"}
+    )
+
+    add_nested_phase_time(runtime.nested_phase_time, refresh_started_at, refresh_completed_at)
+    result
   end
 
   defp handle_handoff_result(
@@ -1791,7 +1835,8 @@ defmodule SymphonyElixir.AgentRunner do
         worker_host: runtime.worker_host,
         thread_id: Map.get(runtime, :thread_id),
         execution_plan: Keyword.get(runtime.opts, :execution_plan),
-        execution_ledger_key: Keyword.get(runtime.opts, :execution_ledger_key)
+        execution_ledger_key: Keyword.get(runtime.opts, :execution_ledger_key),
+        nested_phase_time: runtime.nested_phase_time
       ] ++
         Keyword.take(runtime.opts, [:completion_evidence_validator, :handoff_publisher, :handoff_state])
 
@@ -1899,51 +1944,103 @@ defmodule SymphonyElixir.AgentRunner do
          opts,
          turn_number
        ) do
-    case validate_handoff(
-           workspace,
-           refreshed_issue,
-           task_contract,
-           proofs,
-           opts
-         ) do
-      {:ok, evidence} ->
-        publish_handoff(workspace, issue, refreshed_issue, task_contract, evidence, opts, turn_number)
+    handoff_started_at = RunAudit.now()
 
-      {:error, {:handoff_evidence_invalid, :completion_evidence_missing}} = error ->
-        if active_issue_state?(refreshed_issue.state) and issue_routable?(refreshed_issue) do
-          append_handoff_audit(workspace, issue, :handoff_evidence_pending, task_contract, opts, %{
-            status: "pending",
-            evidence_result: "pending",
-            result: "pending",
-            retry: true,
-            ambiguous: false
-          })
+    result =
+      case validate_handoff(
+             workspace,
+             refreshed_issue,
+             task_contract,
+             proofs,
+             opts
+           ) do
+        {:ok, evidence} ->
+          publish_handoff(
+            workspace,
+            issue,
+            refreshed_issue,
+            task_contract,
+            evidence,
+            opts,
+            turn_number
+          )
 
-          {:continue, refreshed_issue}
-        else
-          append_handoff_audit(workspace, issue, :handoff_evidence_rejected, task_contract, opts, %{
-            status: "failed",
-            evidence_result: "rejected",
-            transition_target: Keyword.get(opts, :handoff_state),
-            result: "failed",
-            retry: false,
-            ambiguous: false
-          })
+        {:error, {:handoff_evidence_invalid, :completion_evidence_missing}} = error ->
+          if active_issue_state?(refreshed_issue.state) and issue_routable?(refreshed_issue) do
+            append_handoff_audit(
+              workspace,
+              issue,
+              :handoff_evidence_pending,
+              task_contract,
+              opts,
+              %{
+                status: "pending",
+                evidence_result: "pending",
+                result: "pending",
+                retry: true,
+                ambiguous: false
+              }
+            )
+
+            {:continue, refreshed_issue}
+          else
+            append_handoff_audit(
+              workspace,
+              issue,
+              :handoff_evidence_rejected,
+              task_contract,
+              opts,
+              %{
+                status: "failed",
+                evidence_result: "rejected",
+                transition_target: Keyword.get(opts, :handoff_state),
+                result: "failed",
+                retry: false,
+                ambiguous: false
+              }
+            )
+
+            error
+          end
+
+        {:error, _reason} = error ->
+          append_handoff_audit(
+            workspace,
+            issue,
+            :handoff_evidence_rejected,
+            task_contract,
+            opts,
+            %{
+              status: "failed",
+              evidence_result: "rejected",
+              result: "failed",
+              retry: true,
+              ambiguous: false
+            }
+          )
 
           error
-        end
+      end
 
-      {:error, _reason} = error ->
-        append_handoff_audit(workspace, issue, :handoff_evidence_rejected, task_contract, opts, %{
-          status: "failed",
-          evidence_result: "rejected",
-          result: "failed",
-          retry: true,
-          ambiguous: false
-        })
+    handoff_completed_at = RunAudit.now()
 
-        error
-    end
+    RunAudit.record_phase(
+      workspace,
+      issue,
+      "handoff",
+      handoff_started_at,
+      handoff_completed_at,
+      "external",
+      %{reason: "waiting for evidence validation, Linear comment readback, and state transition"}
+    )
+
+    add_nested_phase_time(
+      Keyword.get(opts, :nested_phase_time),
+      handoff_started_at,
+      handoff_completed_at
+    )
+
+    result
   end
 
   defp publish_handoff(workspace, issue, refreshed_issue, task_contract, evidence, opts, turn_number) do
@@ -1959,18 +2056,7 @@ defmodule SymphonyElixir.AgentRunner do
       ]
       |> maybe_put_thread_id(Keyword.get(opts, :thread_id))
 
-    handoff_started_at = RunAudit.now()
     publication_result = publisher.(refreshed_issue, task_contract, evidence, publisher_opts)
-
-    RunAudit.record_phase(
-      workspace,
-      issue,
-      "handoff",
-      handoff_started_at,
-      RunAudit.now(),
-      "external",
-      %{reason: "waiting for Linear comment readback and state transition"}
-    )
 
     case publication_result do
       {:ok, publication} ->

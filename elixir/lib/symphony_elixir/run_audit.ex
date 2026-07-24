@@ -193,35 +193,49 @@ defmodule SymphonyElixir.RunAudit do
       )
       when is_binary(workspace) and is_binary(phase) and is_integer(started_monotonic_ms) and
              is_integer(ended_monotonic_ms) and is_binary(attribution) and is_map(attrs) do
-    case validate_phase_timing(
-           phase,
-           started_monotonic_ms,
-           ended_monotonic_ms,
-           attribution,
-           attrs
-         ) do
-      {:ok, duration_ms} ->
-        budget_ms = attr(attrs, :budget_ms) || Map.fetch!(@phase_budgets_ms, phase)
+    with {:ok, inclusive_duration_ms} <-
+           validate_phase_timing(
+             phase,
+             started_monotonic_ms,
+             ended_monotonic_ms,
+             attribution,
+             attrs
+           ),
+         {:ok, duration_ms, excluded_duration_ms} <-
+           exclusive_duration(inclusive_duration_ms, attrs) do
+      budget_ms = attr(attrs, :budget_ms) || Map.fetch!(@phase_budgets_ms, phase)
 
-        timing =
-          attrs
-          |> Map.merge(%{
-            phase: phase,
-            status: "completed",
-            started_at: started_at,
-            ended_at: ended_at,
-            duration_ms: duration_ms,
-            attribution: attribution,
-            budget_ms: budget_ms,
-            budget_overrun_ms: budget_overrun(duration_ms, budget_ms)
-          })
+      timing =
+        attrs
+        |> Map.merge(%{
+          phase: phase,
+          status: "completed",
+          started_at: started_at,
+          ended_at: ended_at,
+          duration_ms: duration_ms,
+          attribution: attribution,
+          budget_ms: budget_ms,
+          budget_overrun_ms: budget_overrun(duration_ms, budget_ms)
+        })
+        |> maybe_put_inclusive_duration(inclusive_duration_ms, excluded_duration_ms)
 
-        append(workspace, issue, :phase_timing, timing)
-
-      {:error, _reason} = error ->
-        error
+      append(workspace, issue, :phase_timing, timing)
     end
   end
+
+  defp exclusive_duration(inclusive_duration_ms, attrs) do
+    excluded_duration_ms = attr(attrs, :excluded_duration_ms) || 0
+
+    if is_integer(excluded_duration_ms) and excluded_duration_ms >= 0 and
+         excluded_duration_ms <= inclusive_duration_ms,
+       do: {:ok, inclusive_duration_ms - excluded_duration_ms, excluded_duration_ms},
+       else: {:error, :invalid_excluded_phase_duration}
+  end
+
+  defp maybe_put_inclusive_duration(timing, _inclusive_duration_ms, 0), do: timing
+
+  defp maybe_put_inclusive_duration(timing, inclusive_duration_ms, _excluded_duration_ms),
+    do: Map.put(timing, :inclusive_duration_ms, inclusive_duration_ms)
 
   defp validate_phase_timing(phase, started_at_ms, ended_at_ms, attribution, attrs) do
     duration_ms = ended_at_ms - started_at_ms
@@ -1096,25 +1110,61 @@ defmodule SymphonyElixir.RunAudit do
       end)
       |> Enum.sort_by(&attempt_recency(attempts, &1))
 
-    ordered_candidates = (candidates -- abandoned) ++ abandoned
-    write_attempt_manifest(manifest_path, ordered_candidates)
+    with :ok <- remove_abandoned_attempt_markers(attempts, abandoned) do
+      ordered_candidates = (candidates -- abandoned) ++ abandoned
+      write_attempt_manifest(manifest_path, ordered_candidates)
 
-    Enum.each(abandoned, fn attempt ->
-      File.rm(Path.join([attempts, attempt, @active_attempt_marker]))
+      keep_set =
+        active
+        |> Kernel.++(Enum.take(completed ++ abandoned, -@retained_central_attempts))
+        |> MapSet.new()
+
+      keep = Enum.filter(ordered_candidates, &MapSet.member?(keep_set, &1))
+
+      ordered_candidates
+      |> Kernel.--(keep)
+      |> Enum.each(&File.rm_rf!(Path.join(attempts, &1)))
+
+      write_attempt_manifest(manifest_path, keep)
+    end
+  end
+
+  defp remove_abandoned_attempt_markers(attempts, abandoned) do
+    abandoned
+    |> Enum.reduce_while({:ok, []}, fn attempt, {:ok, removed} ->
+      case remove_active_attempt_marker(Path.join(attempts, attempt)) do
+        :ok ->
+          {:cont, {:ok, [attempt | removed]}}
+
+        {:error, _reason} = removal_error ->
+          {:halt, rollback_removed_markers(attempts, removed, removal_error)}
+      end
     end)
+    |> case do
+      {:ok, _removed} -> :ok
+      {:error, _reason} = error -> error
+    end
+  end
 
-    keep_set =
-      active
-      |> Kernel.++(Enum.take(completed ++ abandoned, -@retained_central_attempts))
-      |> MapSet.new()
+  defp rollback_removed_markers(attempts, removed, removal_error) do
+    case restore_active_attempt_markers(attempts, removed) do
+      :ok ->
+        removal_error
 
-    keep = Enum.filter(ordered_candidates, &MapSet.member?(keep_set, &1))
+      {:error, rollback_error} ->
+        {:error, {:central_run_audit_marker_rollback_failed, rollback_error, removal_error}}
+    end
+  end
 
-    ordered_candidates
-    |> Kernel.--(keep)
-    |> Enum.each(&File.rm_rf!(Path.join(attempts, &1)))
+  defp restore_active_attempt_markers(attempts, removed) do
+    Enum.reduce_while(removed, :ok, fn attempt, :ok ->
+      marker = Path.join([attempts, attempt, @active_attempt_marker])
 
-    write_attempt_manifest(manifest_path, keep)
+      case File.touch(marker) do
+        :ok -> {:cont, :ok}
+        {:error, reason} -> {:halt, {:error, {attempt, reason}}}
+      end
+    end)
   end
 
   defp attempt_ids_on_disk(attempts) do

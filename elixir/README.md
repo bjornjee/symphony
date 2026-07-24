@@ -226,7 +226,9 @@ The observability UI now runs on a minimal Phoenix stack:
 - Running sessions show the selected browser verification path, provenance, and diagnostic code
   when startup capability diagnostics are available
 - Audit diagnostics show the selected verification profile, proof-cache hits and misses, slowest
-  completed phase, and budget overruns during active runs and after final summary emission
+  completed phase, and budget overruns during active runs and after final summary emission.
+  Implementation model timing excludes nested proof, review, publication, and handoff time while
+  retaining its inclusive interval as diagnostic metadata
 - Run audits compact noisy history into per-phase and per-attribution totals before the bounded
   reader limit; remote-worker runs expose a per-attempt central mirror to the dashboard, retain every
   active attempt plus the five most recent completed attempts, and reconcile safe on-disk attempts
@@ -254,7 +256,8 @@ make benchmark-pin28
 The benchmark executes ten controlled baseline/candidate samples against the checked-out revision,
 records the environment and task-contract digest, and pins the task shape to the historical PIN-28
 paths, verification commands, and commit evidence. Each variant starts at controlled dispatch,
-creates its own workspace, performs the two-file edit, and binds expected-diff and review accuracy
+creates its own workspace, executes the production planning lifecycle through deterministic
+primary/reviewer adapters, performs the two-file edit, and binds expected-diff and review accuracy
 to the observed fixture content digest before running the three real fixture verification commands,
 proof receipts, publication evidence, and handoff validation. It fails when median latency
 improvement is below 40%, median end-to-end latency exceeds ten minutes, first useful edit exceeds
