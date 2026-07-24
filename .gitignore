@@ -1,2 +1,5 @@
 /.playwright-mcp/
 /.uiux-loop/
+/elixir/test/browser/node_modules/
+/elixir/test/browser/playwright-report/
+/elixir/test/browser/test-results/

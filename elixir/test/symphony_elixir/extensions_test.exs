@@ -6,6 +6,7 @@ defmodule SymphonyElixir.ExtensionsTest do
 
   alias SymphonyElixir.Linear.Adapter
   alias SymphonyElixir.Tracker.Memory
+  alias SymphonyElixirWeb.Presenter
 
   @endpoint SymphonyElixirWeb.Endpoint
 
@@ -487,6 +488,7 @@ defmodule SymphonyElixir.ExtensionsTest do
              Adapter.cleanup_issue_labels(issue, ["codex-ready"])
   end
 
+  @tag :dashboard_detail
   test "phoenix observability api preserves state, issue, and refresh responses" do
     snapshot = static_snapshot()
     orchestrator_name = Module.concat(__MODULE__, :ObservabilityApiOrchestrator)
@@ -640,6 +642,7 @@ defmodule SymphonyElixir.ExtensionsTest do
              json_response(conn, 202)
   end
 
+  @tag :dashboard_detail
   test "phoenix observability api preserves 405, 404, and unavailable behavior" do
     unavailable_orchestrator = Module.concat(__MODULE__, :UnavailableOrchestrator)
     start_test_endpoint(orchestrator: unavailable_orchestrator, snapshot_timeout_ms: 5)
@@ -676,6 +679,7 @@ defmodule SymphonyElixir.ExtensionsTest do
              }
   end
 
+  @tag :dashboard_detail
   test "phoenix observability api preserves snapshot timeout behavior" do
     timeout_orchestrator = Module.concat(__MODULE__, :TimeoutOrchestrator)
     {:ok, _pid} = SlowOrchestrator.start_link(name: timeout_orchestrator)
@@ -690,6 +694,154 @@ defmodule SymphonyElixir.ExtensionsTest do
              }
   end
 
+  @tag :dashboard_detail
+  test "dashboard detail exposes a bounded human-readable log tail" do
+    audit_events_path = write_dashboard_audit_events!()
+
+    detail =
+      Presenter.dashboard_detail(%{
+        issue_id: "issue-http",
+        issue_identifier: "MT-HTTP",
+        audit_events_path: audit_events_path
+      })
+
+    assert length(detail.log_tail) == 50
+    assert hd(detail.log_tail) == %{at: "2026-07-23T12:00:07Z", event: "agent_message", message: "event 7"}
+    assert List.last(detail.log_tail).message == "event 56"
+    refute inspect(detail.log_tail) =~ "discarded-prefix"
+    refute inspect(detail.log_tail) =~ "malformed-event"
+  end
+
+  @tag :dashboard_detail
+  test "dashboard log tail formats command completion output" do
+    audit_events_path =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-dashboard-command-#{System.unique_integer([:positive])}.jsonl"
+      )
+
+    File.write!(
+      audit_events_path,
+      Jason.encode!(%{
+        "event" => "codex_update",
+        "timestamp" => "2026-07-23T12:00:00Z",
+        "phase" => "command",
+        "command" => "mise exec -- make all",
+        "exit_code" => 0
+      }) <> "\n"
+    )
+
+    on_exit(fn -> File.rm(audit_events_path) end)
+
+    detail = Presenter.dashboard_detail(%{audit_events_path: audit_events_path})
+
+    assert detail.log_tail == [
+             %{
+               at: "2026-07-23T12:00:00Z",
+               event: "command",
+               message: "mise exec -- make all · exit 0"
+             }
+           ]
+  end
+
+  @tag :dashboard_detail
+  test "dashboard detail exposes the latest valid published pull request from the selected audit tail" do
+    audit_events_path =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-dashboard-pull-request-#{System.unique_integer([:positive])}.jsonl"
+      )
+
+    File.write!(
+      audit_events_path,
+      [
+        Jason.encode!(%{
+          "event" => "pull_request_published",
+          "timestamp" => "2026-07-23T12:00:00Z",
+          "detail" => "Published pull request",
+          "pull_request_url" => "javascript:alert(1)"
+        }),
+        Jason.encode!(%{
+          "event" => "pull_request_published",
+          "timestamp" => "2026-07-23T12:01:00Z",
+          "detail" => "Published pull request",
+          "pull_request_url" => "https://github.com/bjornjee/symphony/pull/25"
+        })
+      ]
+      |> Enum.join("\n")
+      |> Kernel.<>("\n")
+    )
+
+    on_exit(fn -> File.rm(audit_events_path) end)
+
+    detail = Presenter.dashboard_detail(%{audit_events_path: audit_events_path})
+
+    assert detail.pull_request_url == "https://github.com/bjornjee/symphony/pull/25"
+
+    assert List.last(detail.log_tail).pull_request_url ==
+             "https://github.com/bjornjee/symphony/pull/25"
+  end
+
+  @tag :dashboard_detail
+  test "dashboard detail does not expose an invalid published pull request URL" do
+    audit_events_path =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-dashboard-invalid-pull-request-#{System.unique_integer([:positive])}.jsonl"
+      )
+
+    File.write!(
+      audit_events_path,
+      Jason.encode!(%{
+        "event" => "pull_request_published",
+        "timestamp" => "2026-07-23T12:00:00Z",
+        "detail" => "Published pull request",
+        "pull_request_url" => "https://example.org/pull/25"
+      }) <> "\n"
+    )
+
+    on_exit(fn -> File.rm(audit_events_path) end)
+
+    detail = Presenter.dashboard_detail(%{audit_events_path: audit_events_path})
+
+    refute Map.has_key?(detail, :pull_request_url)
+    refute Map.has_key?(hd(detail.log_tail), :pull_request_url)
+  end
+
+  @tag :dashboard_detail
+  test "dashboard log tail redacts credential-shaped values before rendering" do
+    audit_events_path =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-dashboard-redaction-#{System.unique_integer([:positive])}.jsonl"
+      )
+
+    File.write!(
+      audit_events_path,
+      Jason.encode!(%{
+        "event" => "codex_update",
+        "timestamp" => "2026-07-23T12:00:00Z",
+        "detail" =>
+          "Authorization: Bearer auth-secret LINEAR_API_KEY=key-secret " <>
+            "https://example.test/result?token=query-secret&x-amz-signature=signed-secret"
+      }) <> "\n"
+    )
+
+    on_exit(fn -> File.rm(audit_events_path) end)
+
+    message = Presenter.dashboard_detail(%{audit_events_path: audit_events_path}).log_tail |> hd() |> Map.fetch!(:message)
+
+    assert message ==
+             "Authorization: [REDACTED] LINEAR_API_KEY=[REDACTED] " <>
+               "https://example.test/result?token=[REDACTED]&x-amz-signature=[REDACTED]"
+
+    refute message =~ "auth-secret"
+    refute message =~ "key-secret"
+    refute message =~ "query-secret"
+    refute message =~ "signed-secret"
+  end
+
+  @tag :dashboard_detail
   test "dashboard bootstraps liveview from embedded static assets" do
     orchestrator_name = Module.concat(__MODULE__, :AssetOrchestrator)
 
@@ -742,6 +894,7 @@ defmodule SymphonyElixir.ExtensionsTest do
     assert live_view_js =~ "var LiveView = (() => {"
   end
 
+  @tag :dashboard_detail
   test "dashboard liveview renders and refreshes over pubsub" do
     orchestrator_name = Module.concat(__MODULE__, :DashboardOrchestrator)
     snapshot = static_snapshot()
@@ -768,10 +921,15 @@ defmodule SymphonyElixir.ExtensionsTest do
     assert html =~ ~s(href="https://example.org/issues/MT-HTTP")
     assert html =~ ~s(href="https://example.org/issues/MT-RETRY")
     assert html =~ ~s(href="https://example.org/issues/MT-BLOCKED")
-    assert html =~ ~s(aria-label="Open MT-HTTP in the issue tracker")
+    assert html =~ ~s(aria-label="Issue MT-HTTP")
     assert html =~ "rendered"
     assert html =~ "turn blocked: waiting for user input"
-    assert html =~ "Runtime"
+    assert html =~ ~s(id="agent-detail-runtime")
+    assert html =~ "<dt>Runtime</dt>"
+    refute html =~ ~r/id="agent-detail-runtime"[^>]*>\d+m \d+s/
+    refute html =~ ~s(class="summary-totals")
+    refute html =~ "Token usage"
+    refute html =~ ">Tokens<"
     assert html =~ "Live"
     assert html =~ "Offline"
     assert html =~ "Copy ID"
@@ -838,6 +996,7 @@ defmodule SymphonyElixir.ExtensionsTest do
     refute render(view) =~ "javascript:alert"
   end
 
+  @tag :dashboard_detail
   test "dashboard liveview renders an unavailable state without crashing" do
     start_test_endpoint(
       orchestrator: Module.concat(__MODULE__, :MissingDashboardOrchestrator),
@@ -1027,6 +1186,38 @@ defmodule SymphonyElixir.ExtensionsTest do
     capability_diagnostics_fixture()
     |> Jason.encode!()
     |> Jason.decode!()
+  end
+
+  defp write_dashboard_audit_events! do
+    path =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-dashboard-detail-#{System.unique_integer([:positive])}.jsonl"
+      )
+
+    base = ~U[2026-07-23 12:00:00Z]
+
+    events =
+      Enum.map(1..56, fn index ->
+        Jason.encode!(%{
+          "event" => "agent_message",
+          "timestamp" => DateTime.add(base, index, :second) |> DateTime.to_iso8601(),
+          "detail" => "event #{index}"
+        })
+      end)
+
+    content =
+      [
+        String.duplicate("discarded-prefix", 5_000),
+        ~s({"event":"malformed-event"),
+        events
+      ]
+      |> List.flatten()
+      |> Enum.join("\n")
+
+    File.write!(path, content)
+    on_exit(fn -> File.rm(path) end)
+    path
   end
 
   defp wait_for_bound_port do
