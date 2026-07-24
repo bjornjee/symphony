@@ -449,6 +449,39 @@ defmodule SymphonyElixir.RunAuditTest do
     assert attempts == manifest
   end
 
+  test "does not prune untracked attempts before the reconciled manifest is published", context do
+    suffix = Base.url_encode64(:crypto.strong_rand_bytes(8), padding: false)
+    remote_workspace = Path.join(context.workspace, "interrupted-remote-workspace-#{suffix}")
+    File.mkdir_p!(remote_workspace)
+
+    RunAudit.start(remote_workspace, context.task, %{worker_host: "first-worker"})
+    paths = RunAudit.paths(remote_workspace, context.task)
+    RunAudit.finish(remote_workspace, context.task)
+
+    base = central_audit_base(paths)
+    attempts_dir = Path.join(base, "attempts")
+    manifest_path = Path.join(base, "attempts.json")
+
+    Enum.each(1..6, fn attempt ->
+      directory = Path.join(attempts_dir, "interrupted_attempt_#{attempt}")
+      File.mkdir_p!(directory)
+      File.write!(Path.join(directory, "run-audit.jsonl"), "{}\n")
+    end)
+
+    File.rm!(manifest_path)
+    File.mkdir!(manifest_path)
+    existing = attempts_dir |> File.ls!() |> MapSet.new()
+
+    on_exit(fn -> File.rm_rf(base) end)
+
+    assert_raise File.RenameError, fn ->
+      RunAudit.start(remote_workspace, context.task, %{worker_host: "next-worker"})
+    end
+
+    remaining = attempts_dir |> File.ls!() |> MapSet.new()
+    assert MapSet.subset?(existing, remaining)
+  end
+
   test "keeps an active attempt listed while newer attempts finish", context do
     suffix = Base.url_encode64(:crypto.strong_rand_bytes(8), padding: false)
     remote_workspace = Path.join(context.workspace, "active-remote-workspace-#{suffix}")

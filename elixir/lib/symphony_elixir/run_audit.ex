@@ -975,17 +975,18 @@ defmodule SymphonyElixir.RunAudit do
 
   defp retain_central_audit_attempts(base, attempts, run_id) do
     manifest_path = Path.join(base, @attempt_manifest)
-    retained = read_attempt_manifest(manifest_path)
+    on_disk = attempt_ids_on_disk(attempts)
+    retained = Enum.filter(read_attempt_manifest(manifest_path), &(&1 in on_disk))
     current = List.wrap(run_id)
 
     discovered =
-      attempts
-      |> attempt_ids_on_disk()
+      on_disk
       |> Kernel.--(retained)
       |> Kernel.--(current)
       |> Enum.sort_by(&attempt_recency(attempts, &1))
 
     candidates = Enum.uniq(retained ++ discovered ++ current)
+    write_attempt_manifest(manifest_path, candidates)
 
     {active, completed} =
       Enum.split_with(candidates, fn attempt ->
