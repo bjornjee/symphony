@@ -32,12 +32,64 @@ defmodule SymphonyElixir.EngineCommandTest do
     assert failed.exit_status == 7
   end
 
+  test "preserves safe browser execution provenance from the sandbox executor" do
+    executor =
+      executor(
+        {:ok,
+         %{
+           exit_status: 0,
+           stdout: "passed",
+           stderr: "",
+           browser_path: "playwright_headless",
+           browser_provenance: "npm_playwright_offline",
+           browser_selection_provenance: "codex_global_mcp",
+           browser_version: "1.59.1"
+         }}
+      )
+
+    assert {:ok, result} =
+             EngineCommand.run(System.tmp_dir!(), "npm test",
+               timeout_ms: 1_000,
+               executor: executor
+             )
+
+    assert Map.take(result, [
+             :browser_path,
+             :browser_provenance,
+             :browser_selection_provenance,
+             :browser_version
+           ]) == %{
+             browser_path: "playwright_headless",
+             browser_provenance: "npm_playwright_offline",
+             browser_selection_provenance: "codex_global_mcp",
+             browser_version: "1.59.1"
+           }
+  end
+
   test "reports a sandbox timeout" do
     assert {:error, %{reason: :timeout}} =
              EngineCommand.run(System.tmp_dir!(), "sleep 1",
                timeout_ms: 20,
                executor: executor({:error, :timeout})
              )
+  end
+
+  test "preserves selected browser provenance when the browser runner fails" do
+    error = %{
+      reason: "playwright cache unavailable",
+      browser_path: "playwright_headless",
+      browser_selection_provenance: "codex_global_mcp"
+    }
+
+    assert {:error, result} =
+             EngineCommand.run(System.tmp_dir!(), "npm test",
+               timeout_ms: 20,
+               executor: executor({:error, error})
+             )
+
+    assert result.reason == "playwright cache unavailable"
+    assert result.browser_path == "playwright_headless"
+    assert result.browser_selection_provenance == "codex_global_mcp"
   end
 
   test "rejects oversized combined sandbox output" do

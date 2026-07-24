@@ -19,12 +19,15 @@ defmodule SymphonyElixir.EngineCommand do
 
   defp execute(executor, directory, command, timeout_ms) do
     case executor.(directory, command, timeout_ms: timeout_ms, output_bytes_cap: @output_limit) do
-      {:ok, %{exit_status: status, stdout: stdout, stderr: stderr}}
+      {:ok, %{exit_status: status, stdout: stdout, stderr: stderr} = payload}
       when is_integer(status) and is_binary(stdout) and is_binary(stderr) ->
-        result(status, stdout <> stderr)
+        result(status, stdout <> stderr, browser_metadata(payload))
 
       {:ok, payload} ->
         {:error, failure(inspect({:invalid_sandbox_result, payload}), "")}
+
+      {:error, %{reason: reason} = payload} ->
+        {:error, failure(reason, "") |> Map.merge(browser_metadata(payload))}
 
       {:error, :timeout} ->
         {:error, failure(:timeout, "")}
@@ -34,17 +37,30 @@ defmodule SymphonyElixir.EngineCommand do
     end
   end
 
-  defp result(status, output) when byte_size(output) <= @output_limit do
+  defp result(status, output, metadata) when byte_size(output) <= @output_limit do
     {:ok,
-     %{
-       exit_status: status,
-       output_bytes: byte_size(output),
-       output_hash: digest(output),
-       output_tail: keep_tail(output)
-     }}
+     Map.merge(
+       %{
+         exit_status: status,
+         output_bytes: byte_size(output),
+         output_hash: digest(output),
+         output_tail: keep_tail(output)
+       },
+       metadata
+     )}
   end
 
-  defp result(_status, output), do: {:error, failure(:output_limit_exceeded, output)}
+  defp result(_status, output, metadata),
+    do: {:error, failure(:output_limit_exceeded, output) |> Map.merge(metadata)}
+
+  defp browser_metadata(payload) do
+    Map.take(payload, [
+      :browser_path,
+      :browser_provenance,
+      :browser_selection_provenance,
+      :browser_version
+    ])
+  end
 
   defp keep_tail(value) when byte_size(value) <= @tail_limit, do: value
   defp keep_tail(value), do: binary_part(value, byte_size(value) - @tail_limit, @tail_limit)

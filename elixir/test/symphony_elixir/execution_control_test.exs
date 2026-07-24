@@ -112,6 +112,43 @@ defmodule SymphonyElixir.ExecutionControlTest do
     assert green["passed"]
   end
 
+  test "records the selected browser path and execution provenance in proof receipts", ctx do
+    command_executor = fn _directory, _command, _opts ->
+      {:ok,
+       %{
+         exit_status: 2,
+         stdout: "expected failure",
+         stderr: "",
+         browser_path: "playwright_headless",
+         browser_provenance: "npm_playwright_offline",
+         browser_selection_provenance: "codex_global_mcp",
+         browser_version: "1.59.1"
+       }}
+    end
+
+    assert {:ok, receipt} =
+             SymphonyElixir.ExecutionControl.run_plan_proof(
+               ctx.plan,
+               ctx.key,
+               ctx.workspace,
+               "reproduce",
+               "red",
+               command_executor: command_executor
+             )
+
+    assert Map.take(receipt, [
+             "browser_path",
+             "browser_provenance",
+             "browser_selection_provenance",
+             "browser_version"
+           ]) == %{
+             "browser_path" => "playwright_headless",
+             "browser_provenance" => "npm_playwright_offline",
+             "browser_selection_provenance" => "codex_global_mcp",
+             "browser_version" => "1.59.1"
+           }
+  end
+
   test "limits every proof to three attempts", ctx do
     for remaining <- [2, 1, 0] do
       assert {:ok, %{"attempts_remaining" => ^remaining}} =

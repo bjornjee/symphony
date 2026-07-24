@@ -1089,6 +1089,12 @@ client to:
   - prefer a runtime-bound Codex Browser backend when available
   - otherwise select a responsive inherited headless Playwright MCP for automated rendering,
     inspection, screenshots, and behavior checks
+  - for approved local Playwright Test proof commands, resolve the exact stable package-lock
+    version to a matching bounded npm execution-cache runtime, start a one-client loopback
+    Playwright server with a secret-free environment, and inject only its redacted endpoint into
+    sandboxed `command/exec`
+  - record capability-selection provenance separately from the actual proof browser runtime
+    provenance, without endpoints or session identifiers
   - report an actionable unavailable state when neither browser path responds
 - Browser plugin enablement MUST NOT be treated as evidence that a Browser backend is bound to the
   app-server session. Implementations MUST NOT attach to undocumented Desktop transports or copy
@@ -1299,6 +1305,12 @@ single-path eligible `feature` or `chore` workflow with one criterion and one ex
     attempts. Three failed receipts publish one deterministic read-back-verified blocker, move the
     issue to Human Review, mark the goal blocked, and return a terminal non-retryable completion.
     No unsandboxed fallback exists, and agent shell events never satisfy proof contracts.
+    Local Playwright Test proofs may connect to a one-client loopback browser server selected by
+    exact stable package-lock version from a bounded npm execution cache. The approved command
+    remains inside `command/exec`; the engine runs no repository-controlled package outside that
+    sandbox, scrubs the browser-server environment, redacts its ephemeral endpoint, and records
+    selection and execution provenance separately. Missing exact runtimes and remote-worker
+    browser proofs fail closed with actionable diagnostics.
 13. For `planned`, preserve native-plan identity for visibility while immutable external proof,
     diagnosis, and phase receipts authoritatively gate ordered progress. Fixes require RED then a
     grounded diagnosis before GREEN; refactors require a clean baseline and preservation proofs.

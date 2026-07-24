@@ -156,6 +156,82 @@ defmodule SymphonyElixir.AppServerTest do
            }
   end
 
+  test "app server connects Playwright proofs to a bounded headless server without exposing its endpoint" do
+    test_root = test_root("playwright-command-exec")
+    workspace_root = Path.join(test_root, "workspaces")
+    workspace = Path.join(workspace_root, "PIN-27")
+    codex_binary = Path.join(test_root, "fake-codex")
+    trace_file = Path.join(test_root, "playwright-command-exec.trace")
+    endpoint = "ws://127.0.0.1:43127/symphony-test-endpoint"
+    File.mkdir_p!(workspace)
+
+    File.write!(codex_binary, """
+    #!/bin/sh
+    count=0
+    while IFS= read -r line; do
+      count=$((count + 1))
+      printf '%s\\n' "$line" >> "#{trace_file}"
+      case "$count" in
+        1) printf '%s\\n' '{"id":1,"result":{}}' ;;
+        3) printf '%s\\n' '{"id":2,"result":{"thread":{"id":"thread-playwright-command"},"instructionSources":[]}}' ;;
+        4) printf '%s\\n' '{"id":6,"result":{"exitCode":0,"stdout":"connected #{endpoint}","stderr":""}}' ;;
+      esac
+    done
+    """)
+
+    File.chmod!(codex_binary, 0o755)
+
+    write_workflow_file!(Workflow.workflow_file_path(),
+      workspace_root: workspace_root,
+      codex_command: "#{codex_binary} app-server"
+    )
+
+    on_exit(fn -> File.rm_rf(test_root) end)
+
+    browser_server = fn _workspace, _directory, _worker_host, callback ->
+      callback.(%{
+        endpoint: endpoint,
+        path: "playwright_headless",
+        provenance: "npm_playwright_offline",
+        selection_provenance: "codex_global_mcp",
+        version: "1.59.1"
+      })
+    end
+
+    assert {:ok, session} = AppServer.start_session(workspace)
+
+    assert {:ok, result} =
+             AppServer.run_command(session, workspace, "npm test",
+               timeout_ms: 15_000,
+               output_bytes_cap: 1_048_576,
+               browser_path: %{selected: "playwright_headless", provenance: "codex_global_mcp"},
+               playwright_server: browser_server
+             )
+
+    assert result == %{
+             exit_status: 0,
+             stdout: "connected [REDACTED_PLAYWRIGHT_ENDPOINT]",
+             stderr: "",
+             browser_path: "playwright_headless",
+             browser_provenance: "npm_playwright_offline",
+             browser_selection_provenance: "codex_global_mcp",
+             browser_version: "1.59.1"
+           }
+
+    assert :ok = AppServer.stop_session(session)
+
+    request =
+      trace_file
+      |> File.read!()
+      |> String.split("\n", trim: true)
+      |> Enum.map(&Jason.decode!/1)
+      |> Enum.find(&(&1["method"] == "command/exec"))
+
+    assert request["params"]["command"] == ["sh", "-c", "npm test"]
+    assert request["params"]["env"]["PW_TEST_CONNECT_WS_ENDPOINT"] == endpoint
+    assert request["params"]["env"]["GITHUB_TOKEN"] == nil
+  end
+
   test "app server resumes the exact persisted thread without starting a replacement" do
     test_root =
       Path.join(

@@ -984,6 +984,8 @@ defmodule SymphonyElixir.AgentRunner do
   defp execution_tool_executor(app_session, runtime, workspace, issue, contract) do
     plan = Keyword.fetch!(runtime.opts, :execution_plan)
     key = Keyword.fetch!(runtime.opts, :execution_ledger_key)
+    capability_diagnostics = Keyword.get(runtime.opts, :capability_diagnostics, %{})
+    browser_path = capability_diagnostics[:browser_path]
 
     fn tool, arguments ->
       result =
@@ -1007,7 +1009,12 @@ defmodule SymphonyElixir.AgentRunner do
             arguments,
             worker_host: runtime.worker_host,
             command_executor: fn directory, command, command_opts ->
-              AppServer.run_command(app_session, directory, command, command_opts)
+              AppServer.run_command(
+                app_session,
+                directory,
+                command,
+                Keyword.put(command_opts, :browser_path, browser_path)
+              )
             end
           )
           |> dynamic_tool_result()
@@ -1031,6 +1038,10 @@ defmodule SymphonyElixir.AgentRunner do
       verdict: payload["verdict"],
       proof_role: payload["role"],
       proof_passed: payload["passed"],
+      browser_path: payload["browser_path"],
+      browser_provenance: payload["browser_provenance"],
+      browser_selection_provenance: payload["browser_selection_provenance"],
+      browser_version: payload["browser_version"],
       repository_head_sha: payload["head_sha"] || payload["repository_head_sha"],
       pull_request_url: payload["pull_request_url"]
     }
