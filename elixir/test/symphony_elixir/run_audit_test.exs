@@ -159,7 +159,15 @@ defmodule SymphonyElixir.RunAuditTest do
   end
 
   test "records the first completed file change as the first useful edit", context do
-    update = %{
+    started = %{
+      event: :notification,
+      payload: %{
+        "method" => "item/started",
+        "params" => %{"item" => %{"type" => "fileChange", "status" => "inProgress"}}
+      }
+    }
+
+    completed = %{
       event: :notification,
       payload: %{
         "method" => "item/completed",
@@ -167,15 +175,37 @@ defmodule SymphonyElixir.RunAuditTest do
       }
     }
 
-    assert {:ok, nil} = RunAudit.append_codex_update(context.workspace, context.task, update)
-    assert {:ok, nil} = RunAudit.append_codex_update(context.workspace, context.task, update)
+    assert {:ok, nil} = RunAudit.append_codex_update(context.workspace, context.task, started)
+    assert [] == Enum.filter(events(context.workspace), &(&1["event"] == "first_useful_edit"))
+
+    assert {:ok, nil} = RunAudit.append_codex_update(context.workspace, context.task, completed)
+    assert {:ok, nil} = RunAudit.append_codex_update(context.workspace, context.task, completed)
 
     first_edit_events =
       Enum.filter(events(context.workspace), fn event ->
-        event["event"] == "first_useful_edit" and event["phase"] == "implementation"
+        event["event"] == "first_useful_edit" and
+          event["phase"] == "implementation" and
+          event["status"] == "completed"
       end)
 
     assert length(first_edit_events) == 1
+  end
+
+  test "applies runtime phase budgets when no override is supplied", context do
+    assert :ok =
+             RunAudit.record_phase(
+               context.workspace,
+               context.task,
+               "context_loading",
+               ~U[2026-07-24 08:00:00Z],
+               ~U[2026-07-24 08:01:01Z],
+               "tool"
+             )
+
+    assert %{
+             "budget_ms" => 60_000,
+             "budget_overrun_ms" => 1_000
+           } = List.last(events(context.workspace))
   end
 
   test "appends a compact run summary for bounded dashboard reads", context do

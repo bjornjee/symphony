@@ -6,6 +6,8 @@ defmodule SymphonyElixir.RepositoryFingerprint do
   alias SymphonyElixir.SSH
 
   @max_snapshot_bytes 4_194_304
+  @max_untracked_files 256
+  @max_untracked_path_bytes 65_536
   @engine_artifacts [
     ".symphony/execution-manifest.json",
     ".symphony/codex-thread.json",
@@ -28,7 +30,8 @@ defmodule SymphonyElixir.RepositoryFingerprint do
           clean: boolean(),
           status_digest: String.t(),
           staged_digest: String.t(),
-          unstaged_digest: String.t()
+          unstaged_digest: String.t(),
+          untracked_digest: String.t()
         }
 
   @spec capture(Path.t(), String.t() | nil) :: {:ok, snapshot()} | {:error, term()}
@@ -45,7 +48,8 @@ defmodule SymphonyElixir.RepositoryFingerprint do
       base_sha: ["rev-parse", "HEAD"],
       status: status_args(),
       unstaged: diff_args([]),
-      staged: diff_args(["--cached"])
+      staged: diff_args(["--cached"]),
+      untracked_paths: untracked_args()
     ]
 
     with {:ok, captured} <- parallel_git(commands, runner),
@@ -54,16 +58,30 @@ defmodule SymphonyElixir.RepositoryFingerprint do
          status <- captured.status,
          unstaged <- captured.unstaged,
          staged <- captured.staged,
+         untracked_paths <- captured.untracked_paths,
          :ok <- bounded(status, "status"),
          :ok <- bounded(unstaged, "unstaged diff"),
-         :ok <- bounded(staged, "staged diff") do
+         :ok <- bounded(staged, "staged diff"),
+         :ok <- bounded(untracked_paths, "untracked paths"),
+         {:ok, untracked} <- fingerprint_untracked(untracked_paths, runner) do
       origin = String.trim(origin)
       base_sha = String.trim(base_sha)
 
       if origin == "" or not Regex.match?(~r/^[a-f0-9]{40,64}$/, base_sha) do
         {:error, :invalid_repository_identity}
       else
-        digest = sha256([base_sha, <<0>>, status, <<0>>, unstaged, <<0>>, staged])
+        digest =
+          sha256([
+            base_sha,
+            <<0>>,
+            status,
+            <<0>>,
+            unstaged,
+            <<0>>,
+            staged,
+            <<0>>,
+            untracked
+          ])
 
         {:ok,
          %{
@@ -73,9 +91,37 @@ defmodule SymphonyElixir.RepositoryFingerprint do
            clean: String.trim(status) == "" and staged == "" and unstaged == "",
            status_digest: sha256(status),
            staged_digest: sha256(staged),
-           unstaged_digest: sha256(unstaged)
+           unstaged_digest: sha256(unstaged),
+           untracked_digest: sha256(untracked)
          }}
       end
+    end
+  end
+
+  defp fingerprint_untracked("", _runner), do: {:ok, ""}
+
+  defp fingerprint_untracked(payload, runner) do
+    paths = payload |> String.split(<<0>>, trim: true) |> Enum.sort()
+
+    cond do
+      length(paths) > @max_untracked_files ->
+        {:error, {:too_many_untracked_files, @max_untracked_files}}
+
+      byte_size(payload) > @max_untracked_path_bytes ->
+        {:error, {:untracked_paths_too_large, @max_untracked_path_bytes}}
+
+      true ->
+        with {:ok, hashes} <- runner.(["hash-object", "--no-filters", "--" | paths]),
+             hash_lines <- String.split(hashes, "\n", trim: true),
+             true <- length(hash_lines) == length(paths) || {:error, :untracked_hash_count_mismatch},
+             true <-
+               Enum.all?(hash_lines, &Regex.match?(~r/^[a-f0-9]{40,64}$/, &1)) ||
+                 {:error, :invalid_untracked_hash} do
+          {:ok,
+           paths
+           |> Enum.zip(hash_lines)
+           |> Enum.map_join("", fn {path, hash} -> path <> <<0>> <> hash <> <<0>> end)}
+        end
     end
   end
 
@@ -127,6 +173,10 @@ defmodule SymphonyElixir.RepositoryFingerprint do
 
   defp diff_args(extra) do
     ["diff", "--binary", "--no-ext-diff"] ++ extra ++ ["--", "."] ++ exclusions()
+  end
+
+  defp untracked_args do
+    ["ls-files", "--others", "--exclude-standard", "-z", "--", "."] ++ exclusions()
   end
 
   defp exclusions do

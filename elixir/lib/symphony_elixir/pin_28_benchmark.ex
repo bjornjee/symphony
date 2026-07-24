@@ -5,10 +5,15 @@ defmodule SymphonyElixir.Pin28Benchmark do
 
   @expected_diff ["Makefile", "docs/symphony-linear-setup.md"]
   @pin_28_commit "41808f55b68b3727710651df7601e6f2023e40dc"
+  @required_verification [
+    "make symphony-workflow",
+    "make symphony-workflow-check",
+    "mise exec -- make all"
+  ]
   @task_contract %{
     goal: "Add Makefile commands and setup documentation for running Symphony.",
     affected_paths: @expected_diff,
-    verification: ["make all"],
+    verification: @required_verification,
     review_checks: ["correctness", "security", "convention", "scope"],
     handoff_fields: ["summary", "verification", "reviewer_action", "audit"]
   }
@@ -56,8 +61,18 @@ defmodule SymphonyElixir.Pin28Benchmark do
       environment: benchmark_environment(),
       task_contract_digest: digest(@task_contract),
       expected_diff: @expected_diff,
-      model_configuration: "fixed-equivalent-work",
+      model_configuration: %{
+        kind: "deterministic-agent-replay",
+        revision: 1,
+        live_model: false
+      },
       required_artifacts: Map.take(@task_contract, [:verification, :review_checks, :handoff_fields]),
+      evidence: %{
+        expected_diff: "PIN-28 commit 41808f55",
+        verification: "PIN-28 commit message",
+        review: "deterministic diff review",
+        handoff: "validated replay handoff"
+      },
       baseline: baseline,
       candidate: candidate,
       improvement_percent: improvement_percent,
@@ -67,41 +82,65 @@ defmodule SymphonyElixir.Pin28Benchmark do
   end
 
   defp sample(run_number, observation_delay_ms, fixed_overhead_ms, expected_diff_matches) do
-    {baseline_context_ms, baseline_snapshot} =
-      serial_capture(observation_delay_ms)
+    baseline =
+      run_variant(&serial_capture/1, observation_delay_ms, fixed_overhead_ms)
 
-    {candidate_context_ms, candidate_snapshot} =
-      parallel_capture(observation_delay_ms)
+    candidate =
+      run_variant(&parallel_capture/1, observation_delay_ms, fixed_overhead_ms)
 
-    artifacts = benchmark_artifacts()
-
-    accuracy =
+    baseline_accuracy =
       completion_accuracy_checks(
         expected_diff_matches,
-        baseline_snapshot,
-        candidate_snapshot,
-        artifacts
+        baseline.snapshot,
+        candidate.snapshot,
+        baseline.artifacts
+      )
+
+    candidate_accuracy =
+      completion_accuracy_checks(
+        expected_diff_matches,
+        baseline.snapshot,
+        candidate.snapshot,
+        candidate.artifacts
       )
 
     %{
       run: run_number,
-      baseline:
-        sample_result(
-          baseline_context_ms,
-          fixed_overhead_ms,
-          accuracy
-        ),
-      candidate:
-        sample_result(
-          candidate_context_ms,
-          fixed_overhead_ms,
-          accuracy
-        )
+      baseline: Map.put(baseline.result, :accuracy, baseline_accuracy),
+      candidate: Map.put(candidate.result, :accuracy, candidate_accuracy)
+    }
+  end
+
+  defp run_variant(capture, observation_delay_ms, fixed_overhead_ms) do
+    started_ms = System.monotonic_time(:millisecond)
+    snapshot = capture.(observation_delay_ms)
+    context_completed_ms = System.monotonic_time(:millisecond)
+
+    pre_edit_ms = div(fixed_overhead_ms * 3, 5)
+    Process.sleep(pre_edit_ms)
+    first_edit_ms = max(System.monotonic_time(:millisecond) - started_ms, 0)
+    Process.sleep(fixed_overhead_ms - pre_edit_ms)
+    fixed_work_completed_ms = System.monotonic_time(:millisecond)
+
+    artifacts = benchmark_artifacts()
+    completed_ms = System.monotonic_time(:millisecond)
+
+    %{
+      snapshot: snapshot,
+      artifacts: artifacts,
+      result: %{
+        end_to_end_ms: max(completed_ms - started_ms, 0),
+        first_useful_edit_ms: first_edit_ms,
+        phases: %{
+          context_loading_ms: max(context_completed_ms - started_ms, 0),
+          unchanged_model_and_tool_ms: max(fixed_work_completed_ms - context_completed_ms, 0),
+          artifact_validation_ms: max(completed_ms - fixed_work_completed_ms, 0)
+        }
+      }
     }
   end
 
   defp serial_capture(delay_ms) do
-    started_ms = System.monotonic_time(:millisecond)
     {:ok, lock} = Agent.start_link(fn -> :ready end)
 
     runner = fn args ->
@@ -114,28 +153,14 @@ defmodule SymphonyElixir.Pin28Benchmark do
 
     {:ok, snapshot} = RepositoryFingerprint.capture(".", nil, git_runner: runner)
     Agent.stop(lock)
-    {max(System.monotonic_time(:millisecond) - started_ms, 0), snapshot}
+    snapshot
   end
 
   defp parallel_capture(delay_ms) do
-    started_ms = System.monotonic_time(:millisecond)
-
     {:ok, snapshot} =
       RepositoryFingerprint.capture(".", nil, git_runner: &delayed_observation(&1, delay_ms))
 
-    {max(System.monotonic_time(:millisecond) - started_ms, 0), snapshot}
-  end
-
-  defp sample_result(context_ms, fixed_overhead_ms, accuracy) do
-    %{
-      end_to_end_ms: context_ms + fixed_overhead_ms,
-      first_useful_edit_ms: context_ms + div(fixed_overhead_ms * 3, 5),
-      phases: %{
-        context_loading_ms: context_ms,
-        unchanged_model_and_tool_ms: fixed_overhead_ms
-      },
-      accuracy: accuracy
-    }
+    snapshot
   end
 
   defp summarize(samples, variant) do
@@ -144,6 +169,7 @@ defmodule SymphonyElixir.Pin28Benchmark do
     first_edit = Enum.map(results, & &1.first_useful_edit_ms)
     context = Enum.map(results, & &1.phases.context_loading_ms)
     unchanged = Enum.map(results, & &1.phases.unchanged_model_and_tool_ms)
+    artifact_validation = Enum.map(results, & &1.phases.artifact_validation_ms)
 
     %{
       median_end_to_end_ms: median(end_to_end),
@@ -155,6 +181,10 @@ defmodule SymphonyElixir.Pin28Benchmark do
         unchanged_model_and_tool: %{
           median_ms: median(unchanged),
           p95_ms: percentile(unchanged, 95)
+        },
+        artifact_validation: %{
+          median_ms: median(artifact_validation),
+          p95_ms: percentile(artifact_validation, 95)
         }
       },
       completion_accuracy: completion_accuracy(results)
@@ -197,19 +227,45 @@ defmodule SymphonyElixir.Pin28Benchmark do
       expected_diff: expected_diff_matches,
       verification:
         baseline_snapshot == candidate_snapshot and
-          artifacts.verification == @task_contract.verification,
-      review: artifacts.review_checks == @task_contract.review_checks,
-      handoff: artifacts.handoff_fields == @task_contract.handoff_fields
+          Enum.all?(@required_verification, &MapSet.member?(artifacts.verification, &1)),
+      review:
+        artifacts.review
+        |> Map.take(@task_contract.review_checks)
+        |> Map.values()
+        |> Enum.all?(),
+      handoff:
+        Enum.all?(@task_contract.handoff_fields, fn field ->
+          artifacts.handoff
+          |> Map.get(field)
+          |> non_empty_string?()
+        end)
     }
   end
 
   defp benchmark_artifacts do
+    diff = observed_pin_28_diff()
+    commit_message = observed_pin_28_commit_message()
+    subject = commit_message |> String.split("\n", parts: 2) |> List.first()
+    verification = observed_verification_commands(commit_message)
+
     %{
-      verification: ["make all"],
-      review_checks: ["correctness", "security", "convention", "scope"],
-      handoff_fields: ["summary", "verification", "reviewer_action", "audit"]
+      verification: verification,
+      review: %{
+        "correctness" => diff == @expected_diff,
+        "security" => Enum.all?(diff, &(Path.extname(&1) in ["", ".md"])),
+        "convention" => String.starts_with?(subject, "chore: "),
+        "scope" => diff == @expected_diff
+      },
+      handoff: %{
+        "summary" => "Replayed the expected PIN-28 Makefile and documentation change.",
+        "verification" => verification |> Enum.sort() |> Enum.join(", "),
+        "reviewer_action" => "Review the replay artifacts and latency report.",
+        "audit" => "Controlled deterministic-agent benchmark sample."
+      }
     }
   end
+
+  defp non_empty_string?(value), do: is_binary(value) and String.trim(value) != ""
 
   defp repository_revision do
     case System.cmd("git", ["rev-parse", "HEAD"], stderr_to_stdout: true) do
@@ -245,6 +301,18 @@ defmodule SymphonyElixir.Pin28Benchmark do
       |> Enum.sort()
     else
       _ -> []
+    end
+  end
+
+  defp observed_verification_commands(commit_message) do
+    Enum.filter(@required_verification, &String.contains?(commit_message, &1))
+    |> MapSet.new()
+  end
+
+  defp observed_pin_28_commit_message do
+    case System.cmd("git", ["show", "-s", "--format=%B", @pin_28_commit], stderr_to_stdout: true) do
+      {message, 0} -> message
+      _ -> ""
     end
   end
 

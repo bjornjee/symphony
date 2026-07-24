@@ -248,10 +248,12 @@ make benchmark-pin28
 ```
 
 The benchmark executes ten controlled baseline/candidate samples against the checked-out revision,
-records the environment and task-contract digest, verifies the historical PIN-28 expected diff, and
-fails when median latency improvement is below 40%, median end-to-end latency exceeds ten minutes,
-first useful edit exceeds four minutes, or completion accuracy differs. CI runs the same target
-after `make all`.
+records the environment and task-contract digest, verifies the historical PIN-28 expected diff and
+commit evidence, and fails when median latency improvement is below 40%, median end-to-end latency
+exceeds ten minutes, first useful edit exceeds four minutes, or completion accuracy differs. It uses
+the same deterministic-agent replay for both variants so CI measures Symphony-controlled harness
+overhead without model-provider variance; it is not a live provider benchmark. CI runs the same
+target after `make all`.
 
 Run the real external end-to-end test only when you want Symphony to create disposable Linear
 resources and launch a real `codex app-server` session:

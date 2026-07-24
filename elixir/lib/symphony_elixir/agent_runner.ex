@@ -901,9 +901,11 @@ defmodule SymphonyElixir.AgentRunner do
            instruction_authority
          ) do
       {:ok, :missing} ->
+        record_context_cache_result(workspace, issue, "miss", repository)
         planning_runner.(session, workspace, issue, contract, profile, planning_opts)
 
       {:ok, plan} when is_map(plan) ->
+        record_context_cache_result(workspace, issue, "hit", repository)
         {:ok, plan}
 
       {:error, {:instruction_drift_with_changes, old_plan_digest}} ->
@@ -912,6 +914,17 @@ defmodule SymphonyElixir.AgentRunner do
       {:error, _reason} = error ->
         error
     end
+  end
+
+  defp record_context_cache_result(workspace, issue, status, repository)
+       when status in ~w(hit miss) do
+    RunAudit.append(workspace, issue, :context_cache_result, %{
+      phase: "context_loading",
+      cache: "execution_context",
+      cache_status: status,
+      repository_digest: repository.digest,
+      base_sha: repository.base_sha
+    })
   end
 
   # This is one bounded decision table over immutable authority receipts.

@@ -146,6 +146,19 @@ defmodule SymphonyElixir.AgentRunnerThreadResumeTest do
       assert_receive {:published_handoff, ^first_comment_id, ^first_artifact_digest}
       assert Agent.get(planning_calls, & &1) == 1
 
+      audit_events =
+        workspace
+        |> Path.join(".symphony/run-audit.jsonl")
+        |> File.read!()
+        |> String.split("\n", trim: true)
+        |> Enum.map(&Jason.decode!/1)
+
+      assert Enum.any?(audit_events, fn event ->
+               event["event"] == "context_cache_result" and
+                 event["cache"] == "execution_context" and
+                 event["cache_status"] == "hit"
+             end)
+
       requests =
         trace_file
         |> File.read!()

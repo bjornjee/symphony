@@ -42,6 +42,20 @@ defmodule SymphonyElixir.VerificationProfileTest do
              VerificationProfile.resolve(plan("Full", ["lib/runtime.ex"]), ["lib/runtime.ex"])
   end
 
+  test "uncertain profile data escalates to Full" do
+    assert {:ok,
+            %{
+              selected: "Uncertain",
+              effective: "Full",
+              escalated: true,
+              reason: "verification profile is uncertain"
+            }} =
+             VerificationProfile.resolve(
+               %{"execution_mode" => "simple", "affected_paths" => ["lib/runtime.ex"]},
+               ["lib/runtime.ex"]
+             )
+  end
+
   defp plan(profile, affected_paths) do
     %{
       "execution_mode" => "simple",

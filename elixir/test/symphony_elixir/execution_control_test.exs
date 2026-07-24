@@ -335,6 +335,111 @@ defmodule SymphonyElixir.ExecutionControlTest do
     assert first["receipt_digest"] == second["receipt_digest"]
   end
 
+  test "runs a Full final gate once and reuses it only for unchanged inputs", ctx do
+    {:ok, calls} = Agent.start_link(fn -> 0 end)
+
+    executor = fn _directory, _command, _opts ->
+      Agent.update(calls, &(&1 + 1))
+      {:ok, %{exit_status: 0, stdout: "full gate passed", stderr: ""}}
+    end
+
+    final =
+      proof("final", "direct", "final", "success", "make all")
+
+    plan =
+      ctx.plan
+      |> Map.put("workflow", "chore")
+      |> put_in(
+        ["candidate"],
+        %{
+          "repository" => get_in(ctx.plan, ["candidate", "repository"]),
+          "affected_paths" => ["README.md"],
+          "verification_profile" => "Full",
+          "ordered_steps" => [
+            %{
+              "id" => "direct",
+              "depends_on" => [],
+              "affected_paths" => ["README.md"],
+              "proof_ids" => ["final"]
+            }
+          ],
+          "proofs" => [final]
+        }
+      )
+
+    opts = [command_executor: executor]
+
+    assert {:ok, %{"cache_status" => "miss", "passed" => true}} =
+             SymphonyElixir.ExecutionControl.run_plan_proof(
+               plan,
+               ctx.key,
+               ctx.workspace,
+               "direct",
+               "final",
+               opts
+             )
+
+    assert {:ok, %{"cache_status" => "hit", "passed" => true, "reused" => true}} =
+             SymphonyElixir.ExecutionControl.run_plan_proof(
+               plan,
+               ctx.key,
+               ctx.workspace,
+               "direct",
+               "final",
+               opts
+             )
+
+    assert Agent.get(calls, & &1) == 1
+  end
+
+  test "plan, instruction, profile, and proof changes invalidate passed receipts", ctx do
+    mutations = [
+      {"plan", &Map.put(&1, "plan_digest", String.duplicate("d", 64))},
+      {"instructions", &Map.put(&1, "instruction_digest", String.duplicate("d", 64))},
+      {"workflow", &Map.put(&1, "profile_digest", String.duplicate("d", 64))},
+      {"proof",
+       fn plan ->
+         update_in(plan, ["candidate", "proofs"], fn [proof | rest] ->
+           [Map.put(proof, "command", "exit 3") | rest]
+         end)
+       end}
+    ]
+
+    for {name, mutate} <- mutations do
+      key = ctx.key <> "-" <> name
+      {:ok, calls} = Agent.start_link(fn -> 0 end)
+
+      executor = fn _directory, _command, _opts ->
+        Agent.update(calls, &(&1 + 1))
+        {:ok, %{exit_status: 2, stdout: "expected failure", stderr: ""}}
+      end
+
+      opts = [command_executor: executor]
+
+      assert {:ok, %{"cache_status" => "miss", "passed" => true}} =
+               SymphonyElixir.ExecutionControl.run_plan_proof(
+                 ctx.plan,
+                 key,
+                 ctx.workspace,
+                 "reproduce",
+                 "red",
+                 opts
+               )
+
+      assert {:ok, %{"cache_status" => "miss", "passed" => true}} =
+               SymphonyElixir.ExecutionControl.run_plan_proof(
+                 mutate.(ctx.plan),
+                 key,
+                 ctx.workspace,
+                 "reproduce",
+                 "red",
+                 opts
+               )
+
+      assert Agent.get(calls, & &1) == 2
+    end
+  end
+
   test "repository changes invalidate a passed proof receipt", ctx do
     {:ok, calls} = Agent.start_link(fn -> 0 end)
 

@@ -2327,9 +2327,16 @@ defmodule SymphonyElixir.CoreTest do
                    is_binary(timing["started_at"]) and
                    is_binary(timing["ended_at"]) and
                    is_integer(timing["duration_ms"]) and
+                   is_integer(timing["budget_ms"]) and
                    timing["attribution"] in ~w(model tool subprocess external)
                end)
       end
+
+      assert Enum.any?(audit_events, fn event ->
+               event["event"] == "context_cache_result" and
+                 event["cache"] == "execution_context" and
+                 event["cache_status"] == "miss"
+             end)
 
       assert Enum.any?(phase_timings, fn timing ->
                timing["phase"] == "handoff" and

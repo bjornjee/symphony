@@ -33,6 +33,18 @@ defmodule SymphonyElixir.RepositoryFingerprintTest do
     refute first.digest == second.digest
   end
 
+  test "invalidates when an untracked file changes in place", %{workspace: workspace} do
+    path = Path.join(workspace, "new-source.ex")
+    File.write!(path, "first version\n")
+    assert {:ok, first} = RepositoryFingerprint.capture(workspace)
+
+    File.write!(path, "second version\n")
+    assert {:ok, second} = RepositoryFingerprint.capture(workspace)
+
+    refute first.digest == second.digest
+    refute first.untracked_digest == second.untracked_digest
+  end
+
   test "ignores engine-owned symphony artifacts", %{workspace: workspace} do
     assert {:ok, first} = RepositoryFingerprint.capture(workspace)
     File.mkdir_p!(Path.join(workspace, ".symphony"))
@@ -91,7 +103,7 @@ defmodule SymphonyElixir.RepositoryFingerprintTest do
       end)
 
     started =
-      for _index <- 1..5 do
+      for _index <- 1..6 do
         assert_receive {:git_capture_started, pid, args}, 1_000
         {pid, args}
       end
@@ -99,6 +111,15 @@ defmodule SymphonyElixir.RepositoryFingerprintTest do
     Enum.each(started, fn {pid, _args} -> send(pid, :continue) end)
 
     assert {:ok, %{base_sha: ^base_sha, clean: true}} = Task.await(capture)
+  end
+
+  test "fails closed when the untracked input set exceeds its bound", %{workspace: workspace} do
+    for index <- 1..257 do
+      File.write!(Path.join(workspace, "untracked-#{index}.txt"), "#{index}\n")
+    end
+
+    assert {:error, {:too_many_untracked_files, 256}} =
+             RepositoryFingerprint.capture(workspace)
   end
 
   test "invalidates for instructions, workflow, manifests, lockfiles, and toolchain configuration", %{

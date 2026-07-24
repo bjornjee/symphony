@@ -17,6 +17,20 @@ defmodule SymphonyElixir.RunAudit do
     queueing workspace_bootstrap context_loading research planning implementation
     verification review git_pr external_wait handoff run
   )
+  @phase_budgets_ms %{
+    "queueing" => 30_000,
+    "workspace_bootstrap" => 60_000,
+    "context_loading" => 60_000,
+    "research" => 60_000,
+    "planning" => 240_000,
+    "implementation" => 240_000,
+    "verification" => 300_000,
+    "review" => 120_000,
+    "git_pr" => 120_000,
+    "external_wait" => 120_000,
+    "handoff" => 120_000,
+    "run" => 600_000
+  }
   @attributions ~w(model tool subprocess external)
   @handoff_events [
     :handoff_publish_started,
@@ -145,6 +159,8 @@ defmodule SymphonyElixir.RunAudit do
       when is_binary(workspace) and is_binary(phase) and is_binary(attribution) and is_map(attrs) do
     case validate_phase_timing(phase, started_at, ended_at, attribution, attrs) do
       {:ok, duration_ms} ->
+        budget_ms = attr(attrs, :budget_ms) || Map.fetch!(@phase_budgets_ms, phase)
+
         timing =
           attrs
           |> Map.merge(%{
@@ -154,7 +170,8 @@ defmodule SymphonyElixir.RunAudit do
             ended_at: ended_at,
             duration_ms: duration_ms,
             attribution: attribution,
-            budget_overrun_ms: budget_overrun(duration_ms, attr(attrs, :budget_ms))
+            budget_ms: budget_ms,
+            budget_overrun_ms: budget_overrun(duration_ms, budget_ms)
           })
 
         append(workspace, issue, :phase_timing, timing)
@@ -401,15 +418,18 @@ defmodule SymphonyElixir.RunAudit do
 
   defp maybe_attach_command_proof(attrs), do: {attrs, nil}
 
-  defp maybe_append_first_useful_edit(workspace, issue, %{payload: %{"method" => method} = payload})
-       when method in ["item/started", "item/completed"] do
+  defp maybe_append_first_useful_edit(
+         workspace,
+         issue,
+         %{payload: %{"method" => "item/completed"} = payload}
+       ) do
     if get_in(payload, ["params", "item", "type"]) == "fileChange" do
       case File.write(first_edit_marker_path(workspace), "", [:write, :exclusive]) do
         :ok ->
           append(workspace, issue, :first_useful_edit, %{
             phase: "implementation",
-            status: if(method == "item/completed", do: "completed", else: "started"),
-            method: method
+            status: "completed",
+            method: "item/completed"
           })
 
         {:error, :eexist} ->
