@@ -110,21 +110,11 @@ defmodule SymphonyElixirWeb.DashboardLive do
             <p>Active, retrying, and blocked sessions will appear here when work starts.</p>
           </section>
         <% true -> %>
-          <section class="fleet-summary" aria-label="Runtime summary">
+          <section class="fleet-summary" aria-label="Agent summary">
             <div class="summary-counts" aria-label="Agent counts">
               <span><strong class="numeric"><%= @payload.counts.running %></strong> running</span>
               <span><strong class="numeric"><%= @payload.counts.retrying %></strong> retrying</span>
               <span><strong class="numeric"><%= @payload.counts.blocked %></strong> blocked</span>
-            </div>
-            <div class="summary-totals">
-              <span>
-                Runtime
-                <strong class="numeric"><%= format_runtime_seconds(total_runtime_seconds(@payload, @now)) %></strong>
-              </span>
-              <span>
-                Tokens
-                <strong class="numeric"><%= format_int(@payload.codex_totals.total_tokens) %></strong>
-              </span>
             </div>
           </section>
 
@@ -318,15 +308,11 @@ defmodule SymphonyElixirWeb.DashboardLive do
       <dl class="detail-facts">
         <div>
           <dt>Runtime</dt>
-          <dd class="numeric"><%= runtime_for_agent(@agent, @now) %></dd>
+          <dd id="agent-detail-runtime" class="numeric"><%= runtime_for_agent(@agent, @now) %></dd>
         </div>
         <div>
           <dt>Turns</dt>
           <dd class="numeric"><%= @agent.turn_count || "n/a" %></dd>
-        </div>
-        <div>
-          <dt>Token usage</dt>
-          <dd class="numeric"><%= token_total(@agent.tokens) %></dd>
         </div>
         <div>
           <dt>Last activity</dt>
@@ -534,15 +520,6 @@ defmodule SymphonyElixirWeb.DashboardLive do
     end
   end
 
-  defp completed_runtime_seconds(payload), do: payload.codex_totals.seconds_running || 0
-
-  defp total_runtime_seconds(payload, now) do
-    completed_runtime_seconds(payload) +
-      Enum.reduce(payload.running, 0, fn entry, total ->
-        total + runtime_seconds_from_started_at(entry.started_at, now)
-      end)
-  end
-
   defp runtime_for_agent(%{started_at: started_at}, now) when not is_nil(started_at) do
     started_at
     |> runtime_seconds_from_started_at(now)
@@ -555,9 +532,12 @@ defmodule SymphonyElixirWeb.DashboardLive do
     whole_seconds = max(trunc(seconds), 0)
     hours = div(whole_seconds, 3_600)
     mins = div(rem(whole_seconds, 3_600), 60)
-    secs = rem(whole_seconds, 60)
 
-    if hours > 0, do: "#{hours}h #{mins}m", else: "#{mins}m #{secs}s"
+    cond do
+      hours > 0 -> "#{hours}h #{mins}m"
+      mins > 0 -> "#{mins}m"
+      true -> "<1m"
+    end
   end
 
   defp runtime_seconds_from_started_at(%DateTime{} = started_at, %DateTime{} = now) do
@@ -572,19 +552,6 @@ defmodule SymphonyElixirWeb.DashboardLive do
   end
 
   defp runtime_seconds_from_started_at(_started_at, _now), do: 0
-
-  defp format_int(value) when is_integer(value) do
-    value
-    |> Integer.to_string()
-    |> String.reverse()
-    |> String.replace(~r/.{3}(?=.)/, "\\0,")
-    |> String.reverse()
-  end
-
-  defp format_int(_value), do: "n/a"
-
-  defp token_total(%{total_tokens: total}), do: format_int(total)
-  defp token_total(_tokens), do: "n/a"
 
   defp browser_path(%{browser_path: %{selected: selected}}) when is_binary(selected), do: selected
   defp browser_path(_diagnostics), do: nil

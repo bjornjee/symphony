@@ -130,6 +130,14 @@ test("dashboard states and live interactions remain observable", async ({page, r
 
     await gotoReady(page, request);
     await expect(page.locator("#agent-issue-running")).toBeVisible();
+    await expect(page.locator(".fleet-summary")).not.toContainText("Runtime");
+    await expect(page.getByText("Tokens", {exact: true})).toHaveCount(0);
+    await expect(page.getByText("Token usage", {exact: true})).toHaveCount(0);
+    await expect(page.locator("#agent-detail-runtime")).toHaveText(
+      /^(?:<1m|\d+m|\d+h \d+m)$/
+    );
+    await expect(page.getByText("Turns", {exact: true})).toBeVisible();
+    await expect(page.getByText("Last activity", {exact: true})).toBeVisible();
     await expect(page.locator("#agent-detail-log .log-line")).toHaveCount(50);
     await expect(
       page.locator("#agent-detail-log").getByText("Streaming implementation output 60")

@@ -1109,7 +1109,12 @@ defmodule SymphonyElixir.ExtensionsTest do
     assert html =~ ~s(aria-label="Open MT-HTTP in the issue tracker")
     assert html =~ "rendered"
     assert html =~ "turn blocked: waiting for user input"
-    assert html =~ "Runtime"
+    assert html =~ ~s(id="agent-detail-runtime")
+    assert html =~ "<dt>Runtime</dt>"
+    refute html =~ ~r/id="agent-detail-runtime"[^>]*>\d+m \d+s/
+    refute html =~ ~s(class="summary-totals")
+    refute html =~ "Token usage"
+    refute html =~ ">Tokens<"
     assert html =~ "Live"
     assert html =~ "Offline"
     assert html =~ "Copy ID"

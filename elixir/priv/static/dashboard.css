@@ -25,6 +25,7 @@
   --log-muted: #aeb8b2;
   --log-subtle: #929b96;
   --log-line: rgb(255 255 255 / 6%);
+  --font-mono: "SFMono-Regular", "SF Mono", Consolas, "Liberation Mono", monospace;
   --shadow: 0 1px 2px rgba(20, 28, 23, 0.05);
 }
 
@@ -75,7 +76,7 @@ a {
 }
 
 .mono {
-  font-family: "SFMono-Regular", "SF Mono", Consolas, "Liberation Mono", monospace;
+  font-family: var(--font-mono);
 }
 
 .app-shell {
@@ -193,16 +194,14 @@ a {
   font-size: 0.82rem;
 }
 
-.summary-counts,
-.summary-totals {
+.summary-counts {
   display: flex;
   align-items: center;
   gap: 1rem;
   min-width: 0;
 }
 
-.summary-counts strong,
-.summary-totals strong {
+.summary-counts strong {
   color: var(--ink);
 }
 
@@ -816,8 +815,7 @@ a {
     flex-direction: column;
   }
 
-  .summary-counts,
-  .summary-totals {
+  .summary-counts {
     flex-wrap: wrap;
     gap: 0.55rem 0.9rem;
   }
