@@ -808,8 +808,10 @@ defmodule SymphonyElixir.Pin28Benchmark do
   defp valid_observed_implementation?(implementation) do
     implementation.changed_paths == @expected_diff and
       implementation.commit_sha == @pin_28_commit and
-      observed_verification_commands(implementation.commit_message) ==
+      MapSet.equal?(
+        observed_verification_commands(implementation.commit_message),
         MapSet.new(@required_verification)
+      )
   end
 
   defp failed_review do

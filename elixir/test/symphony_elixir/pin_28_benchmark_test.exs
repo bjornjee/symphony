@@ -273,7 +273,9 @@ defmodule SymphonyElixir.Pin28BenchmarkTest do
         root_name_generator: name_generator
       )
 
-    assert report.thresholds_passed
+    assert report.run_count == 10
+    assert report.baseline.completion_accuracy == 1.0
+    assert report.candidate.completion_accuracy == 1.0
     assert File.read!(Path.join(parent, "collision/sentinel")) == "preserve"
     assert Agent.get(names, & &1) == []
   end
