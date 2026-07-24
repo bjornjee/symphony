@@ -8,7 +8,8 @@ defmodule SymphonyElixir.ExecutionControl do
     HumanReviewBlocker,
     PlanningArtifact,
     ProofWorkingDirectory,
-    RepositoryFingerprint
+    RepositoryFingerprint,
+    VerificationProfile
   }
 
   alias SymphonyElixir.Linear.{Issue, TaskContract}
@@ -56,7 +57,6 @@ defmodule SymphonyElixir.ExecutionControl do
           {:ok, map()} | {:error, term()}
   def run_plan_proof(plan, ledger_key, workspace, phase_id, proof_id, opts \\ []) do
     with {:ok, proof} <- find_proof(plan, phase_id, proof_id),
-         {:ok, generation, attempt} <- next_attempt(ledger_key, proof_id),
          {:ok, proof_directory} <-
            ProofWorkingDirectory.resolve(
              workspace,
@@ -64,7 +64,25 @@ defmodule SymphonyElixir.ExecutionControl do
              Keyword.get(opts, :worker_host)
            ),
          {:ok, before} <- RepositoryFingerprint.capture(workspace, Keyword.get(opts, :worker_host)),
-         :ok <- workflow_preconditions(plan, ledger_key, proof, before),
+         :ok <- workflow_preconditions(plan, ledger_key, proof, before) do
+      case reusable_proof_receipt(plan, ledger_key, proof, before) do
+        {:ok, receipt} ->
+          {:ok, receipt |> Map.put("cache_status", "hit") |> Map.put("reused", true)}
+
+        :missing ->
+          execute_plan_proof(plan, ledger_key, workspace, proof_directory, proof, before, opts)
+
+        {:error, _reason} = error ->
+          error
+      end
+    end
+  end
+
+  defp execute_plan_proof(plan, ledger_key, workspace, proof_directory, proof, before, opts) do
+    proof_id = proof["id"]
+    started_ms = System.monotonic_time(:millisecond)
+
+    with {:ok, generation, attempt} <- next_attempt(ledger_key, proof_id),
          command_result <-
            EngineCommand.run(proof_directory, proof["command"],
              timeout_ms: min(proof["timeout_ms"], 1_800_000),
@@ -82,7 +100,7 @@ defmodule SymphonyElixir.ExecutionControl do
           "profile_digest" => plan["profile_digest"],
           "proof_id" => proof_id,
           "proof_digest" => PlanningArtifact.digest(proof),
-          "phase_id" => phase_id,
+          "phase_id" => proof["phase_id"],
           "role" => proof["role"],
           "criterion_ids" => proof["criterion_ids"],
           "generation" => generation,
@@ -99,6 +117,9 @@ defmodule SymphonyElixir.ExecutionControl do
           "before_state_digest" => before.digest,
           "after_state_digest" => after_state.digest,
           "head_sha" => after_state.base_sha,
+          "cache_status" => "miss",
+          "reused" => false,
+          "duration_ms" => max(System.monotonic_time(:millisecond) - started_ms, 0),
           "recorded_at" => DateTime.utc_now() |> DateTime.to_iso8601()
         }
         |> Map.merge(browser_receipt_metadata(proof, result))
@@ -114,6 +135,35 @@ defmodule SymphonyElixir.ExecutionControl do
         {:error, reason} -> {:error, {:proof_receipt_failed, reason}}
       end
     end
+  end
+
+  defp reusable_proof_receipt(plan, ledger_key, proof, repository) do
+    case ExecutionLedger.list(ledger_key, "proof") do
+      {:ok, receipts} -> find_reusable_proof_receipt(receipts, plan, proof, repository)
+      {:error, _reason} = error -> error
+    end
+  end
+
+  defp find_reusable_proof_receipt(receipts, plan, proof, repository) do
+    case Enum.find(receipts, fn receipt ->
+           receipt["passed"] == true and
+             same_proof_inputs?(receipt, plan, proof, repository)
+         end) do
+      %{} = receipt -> {:ok, receipt}
+      _missing_or_failed -> :missing
+    end
+  end
+
+  defp same_proof_inputs?(receipt, plan, proof, repository) do
+    receipt["proof_id"] == proof["id"] and
+      receipt["proof_digest"] == PlanningArtifact.digest(proof) and
+      receipt["plan_digest"] == plan["plan_digest"] and
+      receipt["instruction_digest"] == plan["instruction_digest"] and
+      receipt["profile_digest"] == plan["profile_digest"] and
+      receipt["after_state_digest"] == repository.digest and
+      receipt["head_sha"] == repository.base_sha and
+      is_nil(receipt["runner_error"]) and
+      is_nil(receipt["freshness_error"])
   end
 
   @spec exhausted_proof(map(), String.t()) ::
@@ -204,6 +254,7 @@ defmodule SymphonyElixir.ExecutionControl do
              execution_base(plan),
              Keyword.get(opts, :worker_host)
            ),
+         {:ok, profile} <- VerificationProfile.resolve(plan, changed_paths),
          :ok <- paths_within_approved_scope(changed_paths, approved_paths(plan)),
          {:ok, final} <- latest_role(plan, ledger_key, "final"),
          true <- final["passed"] || {:error, :final_proof_failed},
@@ -211,7 +262,13 @@ defmodule SymphonyElixir.ExecutionControl do
          true <- final["head_sha"] == state.base_sha || {:error, :final_proof_head_stale},
          :ok <- workflow_delivery_evidence(plan, ledger_key),
          :ok <- ensure_surgical_chore_review(plan, ledger_key, workspace, state, opts) do
-      {:ok, %{repository: state, final_proof: final, changed_paths: changed_paths}}
+      {:ok,
+       %{
+         repository: state,
+         final_proof: final,
+         changed_paths: changed_paths,
+         verification_profile: profile
+       }}
     end
   end
 
@@ -558,7 +615,13 @@ defmodule SymphonyElixir.ExecutionControl do
     with {:ok, changed_paths} <-
            RepositoryFingerprint.changed_paths(workspace, execution_base(plan), Keyword.get(opts, :worker_host)),
          true <-
-           Enum.all?(changed_paths, &approved_path?(&1, get_in(plan, ["candidate", "affected_paths"]))) ||
+           Enum.all?(
+             changed_paths,
+             &VerificationProfile.approved_path?(
+               &1,
+               get_in(plan, ["candidate", "affected_paths"])
+             )
+           ) ||
              {:error, :surgical_review_scope_drift} do
       receipt = %{
         "plan_digest" => plan["plan_digest"],
@@ -633,14 +696,14 @@ defmodule SymphonyElixir.ExecutionControl do
       |> Kernel.++([Enum.find(phases, &(&1["id"] == phase_id))])
       |> Enum.flat_map(& &1["affected_paths"])
 
-    case Enum.find(changed, &(not approved_path?(&1, allowed))) do
+    case Enum.find(changed, &(not VerificationProfile.approved_path?(&1, allowed))) do
       nil -> :ok
       path -> {:error, {:changed_path_outside_phase_scope, path}}
     end
   end
 
   defp paths_within_approved_scope(changed, allowed) do
-    case Enum.find(changed, &(not approved_path?(&1, allowed))) do
+    case Enum.find(changed, &(not VerificationProfile.approved_path?(&1, allowed))) do
       nil -> :ok
       path -> {:error, {:changed_path_outside_approved_scope, path}}
     end
@@ -649,12 +712,6 @@ defmodule SymphonyElixir.ExecutionControl do
   defp approved_paths(%{"candidate" => %{"affected_paths" => paths}}), do: paths
   defp approved_paths(%{"affected_paths" => paths}), do: paths
   defp approved_paths(_plan), do: []
-
-  defp approved_path?(changed_path, allowed) do
-    Enum.any?(allowed, fn path ->
-      changed_path == path or String.starts_with?(changed_path, String.trim_trailing(path, "/") <> "/")
-    end)
-  end
 
   defp proof_receipts_in_order(receipts) do
     timestamps = Enum.map(receipts, & &1["recorded_at"])

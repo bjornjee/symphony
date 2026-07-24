@@ -272,6 +272,24 @@ authorization artifact without a native planning turn or reviewer. Its semantic 
 and becomes part of the later Codex goal and completion evidence. State is inferred from these
 immutable artifacts; there is no mutable workflow-state file.
 
+The authority digest MUST include repository origin, base revision, preactivation worktree digest,
+instructions, workflow profile, task contract, and primary thread. The implementation MAY reuse a
+repository observation within one uninterrupted preactivation boundary, but MUST recapture after a
+model turn or other boundary that could change repository state. The execution prompt SHOULD include
+one compact brief containing the validated base, affected paths, selected verification profile, and
+proof commands so the implementation turn does not rediscover those facts.
+
+Verification profiles are selected before implementation. Observed diff expansion within approved
+scope MUST promote `Surgical` work to at least `Targeted`; uncertain profile data MUST promote to
+`Full`. A changed path outside approved scope is both a Full-risk escalation and an authority
+violation, so delivery MUST fail closed rather than treating the broader path as implicitly approved.
+Affected directory scopes MUST end in `/`; other entries authorize only the exact repository path.
+
+Passed proof receipts MAY be reused only when proof, plan, instruction, workflow profile, repository
+digest, and head revision all match. Failed, malformed, stale, or ambiguous receipts are misses.
+Consequently, a required Full final gate is never skipped, but an unchanged passed Full receipt is
+not executed twice.
+
 #### 4.1.5.3 Completion Evidence
 
 Engine-owned JSON derived exclusively from immutable external proof, phase, review, and publication
@@ -1304,6 +1322,7 @@ single-path eligible `feature` or `chore` workflow with one criterion and one ex
    setup is idempotently replayed after a restart.
 11. Create or resume one task branch from the pinned base SHA, then resume the same primary thread
     with write-capable implementation policy and the approved execution authorization as authority.
+    Include one compact execution brief from the validated preactivation context.
 12. Plans contain typed proof specifications and phase proof IDs. Symphony alone executes those
     commands through sandboxed app-server `command/exec`, including for SSH-backed workers. The
     proof sandbox permits writes only under the issue workspace, disables network, removes known
@@ -1312,7 +1331,9 @@ single-path eligible `feature` or `chore` workflow with one criterion and one ex
     diagnostic tail, exact expected-exit semantics, repository pre/post digests, and at most three
     attempts. Three failed receipts publish one deterministic read-back-verified blocker, move the
     issue to Human Review, mark the goal blocked, and return a terminal non-retryable completion.
-    No unsandboxed fallback exists, and agent shell events never satisfy proof contracts.
+    No unsandboxed fallback exists, and agent shell events never satisfy proof contracts. An exact
+    passed receipt with unchanged content-addressed inputs is reused; all other observations execute
+    a fresh proof and consume an attempt.
     Browser proofs are an explicit additive plan variant. Their command starts only a local fixture
     through streaming `command/exec` with worker-local `HOME`, `PATH`, and `TMPDIR`, after which all
     other environment variables are cleared. The current app-server sandbox
@@ -1574,6 +1595,18 @@ If implemented:
 - Treat them as observability-only output.
 - Do not make orchestrator logic depend on humanized strings.
 
+Each workspace run SHOULD also maintain a machine-readable audit with start, end, duration, and
+one primary attribution (`model`, `tool`, `subprocess`, or `external`) for queueing, workspace
+bootstrap, context loading, research/preflight, planning, implementation, verification, review,
+Git/PR publication, and handoff when those phases occur. External attribution MUST include a
+non-empty wait reason. Overlapping phases MUST NOT be double-counted under multiple primary
+attributions; an inclusive parent interval MAY be retained as separate diagnostic metadata. The
+audit SHOULD record the first useful edit, selected and effective
+verification profiles, proof-cache outcome, and budget overrun. A compact finalized summary SHOULD
+identify the slowest phase without requiring log reconstruction. Audit persistence MUST remain
+bounded; when a worker workspace is not locally readable, the orchestrator MUST expose a bounded
+central audit path to the dashboard instead of silently losing the worker's events.
+
 ### 13.7 OPTIONAL HTTP Server Extension
 
 This section defines an OPTIONAL HTTP interface for observability and operational control.
@@ -1610,6 +1643,8 @@ Enablement (extension):
   retry delays, token consumption, runtime totals, recent events, and health/error indicators).
 - Active-session status SHOULD show the selected browser verification path and provenance when
   capability diagnostics are available.
+- Active-session diagnostics SHOULD show the verification profile, proof-cache hits and misses,
+  slowest completed harness phase, and budget overruns from a bounded audit read.
 - It is up to the implementation whether this is server-generated HTML or a client-side app that
   consumes the JSON API below.
 
@@ -2276,6 +2311,20 @@ Unless otherwise noted, Sections 17.1 through 17.7 are `Core Conformance`. Bulle
 - Validation failures are operator-visible
 - Structured logging includes issue/session context fields
 - Logging sink failures do not crash orchestration
+- Major harness phases emit machine-readable timing and attribution data; external waits include a
+  reason
+- The PIN-28-style benchmark runs at least ten controlled baseline/candidate samples on one
+  repository revision, environment, task contract, and model configuration; it reports median and
+  p95 phase/end-to-end latency plus expected diff, verification, review, and handoff accuracy
+- CI MAY use one fixed deterministic-agent lifecycle fixture for both variants to isolate
+  engine-controlled overhead, but it MUST execute the production planning lifecycle through
+  deterministic adapters and exercise observed diff handling, proof receipts, review, publication
+  evidence, and handoff validation. Each variant MUST perform its own observable fixture edit before
+  first-useful-edit is recorded, and expected-diff/review accuracy MUST be bound to the evaluated
+  workspace content rather than path constants alone. Identify that configuration, require 100%
+  completion accuracy, and MUST NOT represent it as live provider latency
+- Cache invalidation tests independently cover base revision, instructions, workflow, manifests,
+  lockfiles, and toolchain configuration
 - Token/rate-limit aggregation remains correct across repeated agent updates
 - If a human-readable status surface is implemented, it is driven from orchestrator state and does
   not affect correctness

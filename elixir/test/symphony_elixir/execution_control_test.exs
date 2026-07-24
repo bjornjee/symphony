@@ -202,19 +202,22 @@ defmodule SymphonyElixir.ExecutionControlTest do
            }
   end
 
-  test "limits every proof to three attempts", ctx do
+  test "limits every failed proof to three attempts", ctx do
+    proof =
+      ctx.plan
+      |> get_in(["candidate", "proofs"])
+      |> hd()
+      |> Map.put("expected_exit", "success")
+
+    plan = put_in(ctx.plan, ["candidate", "proofs"], [proof])
+
     for remaining <- [2, 1, 0] do
       assert {:ok, %{"attempts_remaining" => ^remaining}} =
-               ExecutionControl.run_plan_proof(
-                 ctx.plan,
-                 ctx.key,
-                 ctx.workspace,
-                 "reproduce",
-                 "red"
-               )
+               ExecutionControl.run_plan_proof(plan, ctx.key, ctx.workspace, "reproduce", "red")
     end
 
-    assert {:error, :proof_attempts_exhausted} = ExecutionControl.run_plan_proof(ctx.plan, ctx.key, ctx.workspace, "reproduce", "red")
+    assert {:error, :proof_attempts_exhausted} =
+             ExecutionControl.run_plan_proof(plan, ctx.key, ctx.workspace, "reproduce", "red")
   end
 
   test "reports a proof as exhausted only after three failed receipts", ctx do
@@ -296,6 +299,220 @@ defmodule SymphonyElixir.ExecutionControlTest do
     end
 
     assert :none = ExecutionControl.exhausted_proof(ctx.plan, ctx.key)
+  end
+
+  test "reuses a passed proof when all content-addressed inputs are unchanged", ctx do
+    {:ok, calls} = Agent.start_link(fn -> 0 end)
+
+    executor = fn _directory, _command, _opts ->
+      Agent.update(calls, &(&1 + 1))
+      {:ok, %{exit_status: 2, stdout: "expected failure", stderr: ""}}
+    end
+
+    opts = [command_executor: executor]
+
+    assert {:ok, %{"cache_status" => "miss", "passed" => true} = first} =
+             SymphonyElixir.ExecutionControl.run_plan_proof(
+               ctx.plan,
+               ctx.key,
+               ctx.workspace,
+               "reproduce",
+               "red",
+               opts
+             )
+
+    assert {:ok, %{"cache_status" => "hit", "passed" => true} = second} =
+             SymphonyElixir.ExecutionControl.run_plan_proof(
+               ctx.plan,
+               ctx.key,
+               ctx.workspace,
+               "reproduce",
+               "red",
+               opts
+             )
+
+    assert Agent.get(calls, & &1) == 1
+    assert first["receipt_digest"] == second["receipt_digest"]
+  end
+
+  test "runs a Full final gate once and reuses it only for unchanged inputs", ctx do
+    {:ok, calls} = Agent.start_link(fn -> 0 end)
+
+    executor = fn _directory, _command, _opts ->
+      Agent.update(calls, &(&1 + 1))
+      {:ok, %{exit_status: 0, stdout: "full gate passed", stderr: ""}}
+    end
+
+    final =
+      proof("final", "direct", "final", "success", "make all")
+
+    plan =
+      ctx.plan
+      |> Map.put("workflow", "chore")
+      |> put_in(
+        ["candidate"],
+        %{
+          "repository" => get_in(ctx.plan, ["candidate", "repository"]),
+          "affected_paths" => ["README.md"],
+          "verification_profile" => "Full",
+          "ordered_steps" => [
+            %{
+              "id" => "direct",
+              "depends_on" => [],
+              "affected_paths" => ["README.md"],
+              "proof_ids" => ["final"]
+            }
+          ],
+          "proofs" => [final]
+        }
+      )
+
+    opts = [command_executor: executor]
+
+    assert {:ok, %{"cache_status" => "miss", "passed" => true}} =
+             SymphonyElixir.ExecutionControl.run_plan_proof(
+               plan,
+               ctx.key,
+               ctx.workspace,
+               "direct",
+               "final",
+               opts
+             )
+
+    assert {:ok, %{"cache_status" => "hit", "passed" => true, "reused" => true}} =
+             SymphonyElixir.ExecutionControl.run_plan_proof(
+               plan,
+               ctx.key,
+               ctx.workspace,
+               "direct",
+               "final",
+               opts
+             )
+
+    assert Agent.get(calls, & &1) == 1
+  end
+
+  test "plan, instruction, profile, and proof changes invalidate passed receipts", ctx do
+    mutations = [
+      {"plan", &Map.put(&1, "plan_digest", String.duplicate("d", 64))},
+      {"instructions", &Map.put(&1, "instruction_digest", String.duplicate("d", 64))},
+      {"workflow", &Map.put(&1, "profile_digest", String.duplicate("d", 64))},
+      {"proof",
+       fn plan ->
+         update_in(plan, ["candidate", "proofs"], fn [proof | rest] ->
+           [Map.put(proof, "command", "exit 3") | rest]
+         end)
+       end}
+    ]
+
+    for {name, mutate} <- mutations do
+      key = ctx.key <> "-" <> name
+      {:ok, calls} = Agent.start_link(fn -> 0 end)
+
+      executor = fn _directory, _command, _opts ->
+        Agent.update(calls, &(&1 + 1))
+        {:ok, %{exit_status: 2, stdout: "expected failure", stderr: ""}}
+      end
+
+      opts = [command_executor: executor]
+
+      assert {:ok, %{"cache_status" => "miss", "passed" => true}} =
+               SymphonyElixir.ExecutionControl.run_plan_proof(
+                 ctx.plan,
+                 key,
+                 ctx.workspace,
+                 "reproduce",
+                 "red",
+                 opts
+               )
+
+      assert {:ok, %{"cache_status" => "miss", "passed" => true}} =
+               SymphonyElixir.ExecutionControl.run_plan_proof(
+                 mutate.(ctx.plan),
+                 key,
+                 ctx.workspace,
+                 "reproduce",
+                 "red",
+                 opts
+               )
+
+      assert Agent.get(calls, & &1) == 2
+    end
+  end
+
+  test "repository changes invalidate a passed proof receipt", ctx do
+    {:ok, calls} = Agent.start_link(fn -> 0 end)
+
+    executor = fn _directory, _command, _opts ->
+      Agent.update(calls, &(&1 + 1))
+      {:ok, %{exit_status: 2, stdout: "expected failure", stderr: ""}}
+    end
+
+    opts = [command_executor: executor]
+
+    assert {:ok, %{"cache_status" => "miss"}} =
+             SymphonyElixir.ExecutionControl.run_plan_proof(
+               ctx.plan,
+               ctx.key,
+               ctx.workspace,
+               "reproduce",
+               "red",
+               opts
+             )
+
+    File.write!(Path.join(ctx.workspace, "README.md"), "changed input\n")
+
+    assert {:ok, %{"cache_status" => "miss", "attempt" => 2}} =
+             SymphonyElixir.ExecutionControl.run_plan_proof(
+               ctx.plan,
+               ctx.key,
+               ctx.workspace,
+               "reproduce",
+               "red",
+               opts
+             )
+
+    assert Agent.get(calls, & &1) == 2
+  end
+
+  test "failed proofs are never reused", ctx do
+    {:ok, calls} = Agent.start_link(fn -> 0 end)
+
+    executor = fn _directory, _command, _opts ->
+      Agent.update(calls, &(&1 + 1))
+      {:ok, %{exit_status: 2, stdout: "unexpected failure", stderr: ""}}
+    end
+
+    proof =
+      ctx.plan
+      |> get_in(["candidate", "proofs"])
+      |> hd()
+      |> Map.put("expected_exit", "success")
+
+    plan = put_in(ctx.plan, ["candidate", "proofs"], [proof])
+    opts = [command_executor: executor]
+
+    assert {:ok, %{"cache_status" => "miss", "passed" => false, "attempt" => 1}} =
+             SymphonyElixir.ExecutionControl.run_plan_proof(
+               plan,
+               ctx.key,
+               ctx.workspace,
+               "reproduce",
+               "red",
+               opts
+             )
+
+    assert {:ok, %{"cache_status" => "miss", "passed" => false, "attempt" => 2}} =
+             SymphonyElixir.ExecutionControl.run_plan_proof(
+               plan,
+               ctx.key,
+               ctx.workspace,
+               "reproduce",
+               "red",
+               opts
+             )
+
+    assert Agent.get(calls, & &1) == 2
   end
 
   test "rejects an unsupported execution tool", ctx do

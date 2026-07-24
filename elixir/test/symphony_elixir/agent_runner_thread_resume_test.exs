@@ -139,10 +139,47 @@ defmodule SymphonyElixir.AgentRunnerThreadResumeTest do
       assert {:ok, "thread-durable"} = ThreadIdentity.read(workspace)
       assert_receive {:published_handoff, first_comment_id, first_artifact_digest}
 
+      File.mkdir_p!(Path.join(workspace, "docs"))
+      File.write!(Path.join(workspace, "docs/progress.md"), "# uncommitted task progress\n")
       assert :ok = AgentRunner.run(issue, nil, run_opts)
 
       assert File.read!(ExecutionManifest.path(workspace)) == first_manifest
       assert {:ok, "thread-durable"} = ThreadIdentity.read(workspace)
+      assert_receive {:published_handoff, ^first_comment_id, ^first_artifact_digest}
+
+      audit_events =
+        workspace
+        |> Path.join(".symphony/run-audit.jsonl")
+        |> File.read!()
+        |> String.split("\n", trim: true)
+        |> Enum.map(&Jason.decode!/1)
+
+      assert Enum.any?(audit_events, fn event ->
+               event["event"] == "context_cache_result" and
+                 event["cache"] == "execution_context" and
+                 event["cache_status"] == "hit"
+             end)
+
+      assert Enum.any?(audit_events, fn event ->
+               event["event"] == "phase_timing" and
+                 event["phase"] == "planning" and
+                 event["attribution"] == "tool"
+             end)
+
+      System.cmd("git", ["-C", workspace, "add", "docs/progress.md"])
+      System.cmd("git", ["-C", workspace, "commit", "-m", "test: checkpoint task progress"])
+
+      assert :ok = AgentRunner.run(issue, nil, run_opts)
+      assert_receive {:published_handoff, ^first_comment_id, ^first_artifact_digest}
+
+      System.cmd("git", ["-C", workspace, "commit", "--allow-empty", "-m", "test: empty checkpoint"])
+      assert :ok = AgentRunner.run(issue, nil, run_opts)
+      assert_receive {:published_handoff, ^first_comment_id, ^first_artifact_digest}
+
+      File.rm!(Path.join(workspace, "docs/progress.md"))
+      System.cmd("git", ["-C", workspace, "add", "docs/progress.md"])
+      System.cmd("git", ["-C", workspace, "commit", "-m", "test: revert task progress"])
+      assert :ok = AgentRunner.run(issue, nil, run_opts)
       assert_receive {:published_handoff, ^first_comment_id, ^first_artifact_digest}
       assert Agent.get(planning_calls, & &1) == 1
 
@@ -151,9 +188,9 @@ defmodule SymphonyElixir.AgentRunnerThreadResumeTest do
         |> File.read!()
         |> String.split("\n", trim: true)
 
-      assert Enum.count(requests, &(&1 == "RUN")) == 2
+      assert Enum.count(requests, &(&1 == "RUN")) == 5
       assert Enum.count(requests, &String.contains?(&1, "\"method\":\"thread/start\"")) == 1
-      assert Enum.count(requests, &String.contains?(&1, "\"method\":\"thread/resume\"")) == 1
+      assert Enum.count(requests, &String.contains?(&1, "\"method\":\"thread/resume\"")) == 4
 
       goal_statuses =
         requests
@@ -163,10 +200,32 @@ defmodule SymphonyElixir.AgentRunnerThreadResumeTest do
         |> Enum.filter(&(&1["method"] == "thread/goal/set"))
         |> Enum.map(&get_in(&1, ["params", "status"]))
 
-      assert goal_statuses == ["active", "complete", "active", "complete"]
+      assert goal_statuses == [
+               "active",
+               "complete",
+               "active",
+               "complete",
+               "active",
+               "complete",
+               "active",
+               "complete",
+               "active",
+               "complete"
+             ]
     after
       File.rm_rf(test_root)
     end
+  end
+
+  test "remote repository failures remain retryable instead of becoming instruction drift" do
+    failure =
+      {:error, {:git_failed, "worker-01:2200", ["branch", "--show-current"], {:ssh_failed, "worker-01:2200", 75, "temporary transport failure"}}}
+
+    assert ^failure =
+             AgentRunner.classify_registered_plan_progress_for_test(
+               failure,
+               String.duplicate("a", 64)
+             )
   end
 
   defp approve_execution_plan_with_phase(session, workspace, issue, contract, profile, opts) do
@@ -185,7 +244,7 @@ defmodule SymphonyElixir.AgentRunnerThreadResumeTest do
         "id" => "implement",
         "step" => "Implement and prove the task",
         "status" => "in_progress",
-        "affected_paths" => ["README.md"],
+        "affected_paths" => ["docs/"],
         "depends_on" => [],
         "verification_profile" => "Targeted",
         "proof_ids" => ["final"],
@@ -199,6 +258,7 @@ defmodule SymphonyElixir.AgentRunnerThreadResumeTest do
     semantic =
       execution_plan
       |> Map.delete("plan_digest")
+      |> put_in(["candidate", "affected_paths"], ["docs/"])
       |> put_in(["candidate", "ordered_steps"], ordered_steps)
 
     {:ok, Map.put(semantic, "plan_digest", SymphonyElixir.PlanningArtifact.digest(semantic))}

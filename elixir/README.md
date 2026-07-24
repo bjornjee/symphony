@@ -225,6 +225,14 @@ The observability UI now runs on a minimal Phoenix stack:
 - Tracker issue identifiers link to the tracker-provided URL when it uses `http` or `https`
 - Running sessions show the selected browser verification path, provenance, and diagnostic code
   when startup capability diagnostics are available
+- Audit diagnostics show the selected verification profile, proof-cache hits and misses, slowest
+  completed phase, and budget overruns during active runs and after final summary emission.
+  Implementation model timing excludes nested proof, review, publication, and handoff time while
+  retaining its inclusive interval as diagnostic metadata
+- Run audits compact noisy history into per-phase and per-attribution totals before the bounded
+  reader limit; remote-worker runs expose a per-attempt central mirror to the dashboard, retain every
+  active attempt plus the five most recent completed attempts, and reconcile safe on-disk attempts
+  if the manifest is interrupted, even if the same workspace path also exists locally
 
 ## Project Layout
 
@@ -238,6 +246,24 @@ The observability UI now runs on a minimal Phoenix stack:
 ```bash
 make all
 ```
+
+Run the repeatable PIN-28-style latency and completion-accuracy evaluation locally with:
+
+```bash
+make benchmark-pin28
+```
+
+The benchmark executes ten controlled baseline/candidate samples against the checked-out revision,
+records the environment and task-contract digest, and pins the task shape to the historical PIN-28
+paths, verification commands, and commit evidence. Each variant starts at controlled dispatch,
+creates its own workspace, executes the production planning lifecycle through deterministic
+primary/reviewer adapters, performs the two-file edit, and binds expected-diff and review accuracy
+to the observed fixture content digest before running the three real fixture verification commands,
+proof receipts, publication evidence, and handoff validation. It fails when median latency
+improvement is below 40%, median end-to-end latency exceeds ten minutes, first useful edit exceeds
+four minutes, either variant is not 100% accurate, or completion accuracy differs. The fixture is
+deterministic so CI measures Symphony-controlled harness overhead without model-provider variance;
+it is not a live provider benchmark. CI runs the same target after `make all`.
 
 Run the real external end-to-end test only when you want Symphony to create disposable Linear
 resources and launch a real `codex app-server` session:
