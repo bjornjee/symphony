@@ -235,12 +235,7 @@ defmodule SymphonyElixir.RepositoryFingerprint do
         sizes =
           output
           |> String.split("\n", trim: true)
-          |> Enum.map(fn value ->
-            case Integer.parse(String.trim(value)) do
-              {size, ""} -> size
-              _ -> :invalid
-            end
-          end)
+          |> Enum.map(&parse_untracked_size/1)
 
         {:ok, sizes}
 
@@ -249,6 +244,13 @@ defmodule SymphonyElixir.RepositoryFingerprint do
 
       {:error, reason} ->
         {:error, {:untracked_file_stat_failed, worker_host, reason}}
+    end
+  end
+
+  defp parse_untracked_size(value) do
+    case Integer.parse(String.trim(value)) do
+      {size, ""} -> size
+      _ -> :invalid
     end
   end
 

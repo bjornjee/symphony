@@ -973,11 +973,7 @@ defmodule SymphonyElixir.AgentRunner do
           {:error, :registered_execution_plan_invalid}
 
         length(exact) == 1 ->
-          plan = hd(exact)["plan"]
-
-          with :ok <- validate_registered_authority(plan, issue, session, authority) do
-            {:ok, plan}
-          end
+          validate_exact_registered_plan(hd(exact)["plan"], issue, session, authority)
 
         length(exact) > 1 ->
           {:error, :multiple_registered_execution_plans}
@@ -992,19 +988,14 @@ defmodule SymphonyElixir.AgentRunner do
           {:error, :multiple_registered_execution_plans}
 
         length(authority_matches) == 1 ->
-          plan = hd(authority_matches)["plan"]
-
-          case validate_registered_progress(
-                 workspace,
-                 issue,
-                 plan,
-                 session,
-                 authority,
-                 worker_host
-               ) do
-            :ok -> {:ok, plan}
-            {:error, _reason} -> {:error, {:instruction_drift_with_changes, plan["plan_digest"]}}
-          end
+          validate_registered_plan_progress(
+            hd(authority_matches)["plan"],
+            workspace,
+            issue,
+            session,
+            authority,
+            worker_host
+          )
 
         repository.clean and
             Enum.any?(valid, &(execution_plan_base_sha(&1["plan"]) == repository.base_sha)) ->
@@ -1014,6 +1005,20 @@ defmodule SymphonyElixir.AgentRunner do
           old_plan = List.first(valid)["plan"]
           {:error, {:instruction_drift_with_changes, old_plan["plan_digest"]}}
       end
+    end
+  end
+
+  defp validate_exact_registered_plan(plan, issue, session, authority) do
+    case validate_registered_authority(plan, issue, session, authority) do
+      :ok -> {:ok, plan}
+      {:error, _reason} = error -> error
+    end
+  end
+
+  defp validate_registered_plan_progress(plan, workspace, issue, session, authority, worker_host) do
+    case validate_registered_progress(workspace, issue, plan, session, authority, worker_host) do
+      :ok -> {:ok, plan}
+      {:error, _reason} -> {:error, {:instruction_drift_with_changes, plan["plan_digest"]}}
     end
   end
 
