@@ -2311,8 +2311,10 @@ Unless otherwise noted, Sections 17.1 through 17.7 are `Core Conformance`. Bulle
 - The PIN-28-style benchmark runs at least ten controlled baseline/candidate samples on one
   repository revision, environment, task contract, and model configuration; it reports median and
   p95 phase/end-to-end latency plus expected diff, verification, review, and handoff accuracy
-- CI MAY use one fixed deterministic-agent replay for both variants to isolate engine-controlled
-  overhead, but MUST identify that configuration and MUST NOT represent it as live provider latency
+- CI MAY use one fixed deterministic-agent lifecycle fixture for both variants to isolate
+  engine-controlled overhead, but it MUST exercise planning, observed diff handling, proof receipts,
+  review, publication evidence, and handoff validation; identify that configuration; require 100%
+  completion accuracy; and MUST NOT represent it as live provider latency
 - Cache invalidation tests independently cover base revision, instructions, workflow, manifests,
   lockfiles, and toolchain configuration
 - Token/rate-limit aggregation remains correct across repeated agent updates

@@ -99,19 +99,30 @@ defmodule SymphonyElixir.DashboardVisualFixture.Orchestrator do
               "verification_profile" => "Full"
             }),
             Jason.encode!(%{
-              "event" => "proof_completed",
+              "event" => "context_cache_result",
               "timestamp" =>
                 DateTime.utc_now()
                 |> DateTime.add(-23, :second)
                 |> DateTime.truncate(:second)
                 |> DateTime.to_iso8601(),
+              "cache" => "execution_context",
+              "cache_status" => "miss"
+            }),
+            Jason.encode!(%{
+              "event" => "proof_completed",
+              "timestamp" =>
+                DateTime.utc_now()
+                |> DateTime.add(-22, :second)
+                |> DateTime.truncate(:second)
+                |> DateTime.to_iso8601(),
+              "cache" => "proof",
               "cache_status" => "hit"
             }),
             Jason.encode!(%{
               "event" => "phase_timing",
               "timestamp" =>
                 DateTime.utc_now()
-                |> DateTime.add(-22, :second)
+                |> DateTime.add(-21, :second)
                 |> DateTime.truncate(:second)
                 |> DateTime.to_iso8601(),
               "phase" => "planning",

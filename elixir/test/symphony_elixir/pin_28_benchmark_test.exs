@@ -16,7 +16,7 @@ defmodule SymphonyElixir.Pin28BenchmarkTest do
 
     assert report.model_configuration == %{
              kind: "deterministic-agent-replay",
-             revision: 1,
+             revision: 2,
              live_model: false
            }
 
@@ -30,9 +30,9 @@ defmodule SymphonyElixir.Pin28BenchmarkTest do
     assert report.required_artifacts.handoff_fields == ["summary", "verification", "reviewer_action", "audit"]
     assert report.expected_diff == ["Makefile", "docs/symphony-linear-setup.md"]
     assert report.evidence.expected_diff == "PIN-28 commit 41808f55"
-    assert report.evidence.verification == "PIN-28 commit message"
-    assert report.evidence.review == "deterministic diff review"
-    assert report.evidence.handoff == "validated replay handoff"
+    assert report.evidence.verification == "deterministic lifecycle proof receipts"
+    assert report.evidence.review == "deterministic lifecycle review"
+    assert report.evidence.handoff == "validated lifecycle publication and handoff"
     assert report.baseline.median_end_to_end_ms > report.candidate.median_end_to_end_ms
     assert report.improvement_percent >= 40.0
     assert report.candidate.median_end_to_end_ms <= 600_000
@@ -43,8 +43,11 @@ defmodule SymphonyElixir.Pin28BenchmarkTest do
     assert Enum.all?(report.samples, fn sample ->
              Enum.all?(sample.baseline.accuracy, fn {_name, passed} -> passed end) and
                Enum.all?(sample.candidate.accuracy, fn {_name, passed} -> passed end) and
-               Map.has_key?(sample.baseline.phases, :artifact_validation_ms) and
-               Map.has_key?(sample.candidate.phases, :artifact_validation_ms) and
+               sample.baseline.lifecycle.planning.passed and
+               sample.baseline.lifecycle.publication.passed and
+               non_empty_handoff?(sample.baseline.lifecycle.handoff) and
+               Map.has_key?(sample.baseline.phases, :verification_ms) and
+               Map.has_key?(sample.candidate.phases, :handoff_ms) and
                sample.baseline.end_to_end_ms >=
                  Enum.sum(Map.values(sample.baseline.phases)) and
                sample.candidate.end_to_end_ms >=
@@ -53,6 +56,24 @@ defmodule SymphonyElixir.Pin28BenchmarkTest do
 
     assert report.candidate.p95_end_to_end_ms >= report.candidate.median_end_to_end_ms
     assert report.thresholds_passed
+  end
+
+  test "fails completion accuracy when observed lifecycle evidence is incomplete" do
+    observer = fn ->
+      %{changed_paths: [], commit_message: "", commit_sha: nil}
+    end
+
+    report =
+      Pin28Benchmark.run(
+        runs: 10,
+        observation_delay_ms: 1,
+        fixed_overhead_ms: 1,
+        artifact_observer: observer
+      )
+
+    assert report.baseline.completion_accuracy == 0.0
+    assert report.candidate.completion_accuracy == 0.0
+    refute report.thresholds_passed
   end
 
   test "rejects fewer than ten controlled runs" do
@@ -95,5 +116,11 @@ defmodule SymphonyElixir.Pin28BenchmarkTest do
         ])
       end)
     end
+  end
+
+  defp non_empty_handoff?(handoff) do
+    Enum.all?(["summary", "verification", "reviewer_action", "audit"], fn field ->
+      is_binary(handoff[field]) and String.trim(handoff[field]) != ""
+    end)
   end
 end

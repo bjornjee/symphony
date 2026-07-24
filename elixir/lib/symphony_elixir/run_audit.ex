@@ -65,6 +65,7 @@ defmodule SymphonyElixir.RunAudit do
   ]
 
   @type event_name :: atom() | String.t()
+  @type time_point :: %{utc: DateTime.t(), monotonic_ms: integer()}
   @type handoff_event ::
           :handoff_publish_started
           | :handoff_comment_result
@@ -86,6 +87,11 @@ defmodule SymphonyElixir.RunAudit do
       audit_path: markdown_path(workspace),
       audit_events_path: jsonl_path(workspace)
     }
+  end
+
+  @spec now() :: time_point()
+  def now do
+    %{utc: DateTime.utc_now(), monotonic_ms: System.monotonic_time(:millisecond)}
   end
 
   @spec start(Path.t(), Issue.t(), map()) :: :ok
@@ -142,8 +148,8 @@ defmodule SymphonyElixir.RunAudit do
           Path.t(),
           Issue.t(),
           String.t(),
-          DateTime.t(),
-          DateTime.t(),
+          time_point(),
+          time_point(),
           String.t(),
           map()
         ) :: :ok | {:error, term()}
@@ -151,13 +157,20 @@ defmodule SymphonyElixir.RunAudit do
         workspace,
         %Issue{} = issue,
         phase,
-        %DateTime{} = started_at,
-        %DateTime{} = ended_at,
+        %{utc: %DateTime{} = started_at, monotonic_ms: started_monotonic_ms},
+        %{utc: %DateTime{} = ended_at, monotonic_ms: ended_monotonic_ms},
         attribution,
         attrs \\ %{}
       )
-      when is_binary(workspace) and is_binary(phase) and is_binary(attribution) and is_map(attrs) do
-    case validate_phase_timing(phase, started_at, ended_at, attribution, attrs) do
+      when is_binary(workspace) and is_binary(phase) and is_integer(started_monotonic_ms) and
+             is_integer(ended_monotonic_ms) and is_binary(attribution) and is_map(attrs) do
+    case validate_phase_timing(
+           phase,
+           started_monotonic_ms,
+           ended_monotonic_ms,
+           attribution,
+           attrs
+         ) do
       {:ok, duration_ms} ->
         budget_ms = attr(attrs, :budget_ms) || Map.fetch!(@phase_budgets_ms, phase)
 
@@ -181,8 +194,8 @@ defmodule SymphonyElixir.RunAudit do
     end
   end
 
-  defp validate_phase_timing(phase, started_at, ended_at, attribution, attrs) do
-    duration_ms = DateTime.diff(ended_at, started_at, :millisecond)
+  defp validate_phase_timing(phase, started_at_ms, ended_at_ms, attribution, attrs) do
+    duration_ms = ended_at_ms - started_at_ms
     reason = attr(attrs, :reason)
 
     cond do
@@ -209,14 +222,22 @@ defmodule SymphonyElixir.RunAudit do
           {:ok,
            %{
              verification_profile: String.t() | nil,
-             cache: %{hits: non_neg_integer(), misses: non_neg_integer()},
+             cache: %{
+               context: %{hits: non_neg_integer(), misses: non_neg_integer()},
+               proof: %{hits: non_neg_integer(), misses: non_neg_integer()}
+             },
              slowest_phase: %{phase: String.t(), duration_ms: non_neg_integer()} | nil,
              budget_overruns: [%{phase: String.t(), budget_overrun_ms: pos_integer()}],
              phases: [map()]
            }}
           | {:error, term()}
   def summary(workspace) when is_binary(workspace) do
-    with {:ok, events} <- read_events(workspace) do
+    summary_path(jsonl_path(workspace))
+  end
+
+  @spec summary_path(Path.t()) :: {:ok, map()} | {:error, term()}
+  def summary_path(path) when is_binary(path) do
+    with {:ok, events} <- read_events_path(path) do
       phases = Enum.filter(events, &(&1["event"] == "phase_timing"))
 
       {:ok,
@@ -240,8 +261,10 @@ defmodule SymphonyElixir.RunAudit do
         phase: "run",
         status: "completed",
         verification_profile: run_summary.verification_profile,
-        cache_hits: run_summary.cache.hits,
-        cache_misses: run_summary.cache.misses,
+        context_cache_hits: run_summary.cache.context.hits,
+        context_cache_misses: run_summary.cache.context.misses,
+        proof_cache_hits: run_summary.cache.proof.hits,
+        proof_cache_misses: run_summary.cache.proof.misses,
         slowest_phase: slowest && slowest.phase,
         slowest_phase_duration_ms: slowest && slowest.duration_ms,
         budget_overrun_count: length(overruns),
@@ -497,9 +520,7 @@ defmodule SymphonyElixir.RunAudit do
 
   defp budget_overrun(_duration_ms, _budget_ms), do: nil
 
-  defp read_events(workspace) do
-    path = jsonl_path(workspace)
-
+  defp read_events_path(path) do
     case File.read(path) do
       {:ok, payload} when byte_size(payload) <= @max_summary_bytes ->
         decode_events(payload)
@@ -534,12 +555,27 @@ defmodule SymphonyElixir.RunAudit do
   end
 
   defp cache_summary(events) do
-    Enum.reduce(events, %{hits: 0, misses: 0}, fn
-      %{"cache_status" => "hit"}, counts -> Map.update!(counts, :hits, &(&1 + 1))
-      %{"cache_status" => "miss"}, counts -> Map.update!(counts, :misses, &(&1 + 1))
-      _event, counts -> counts
+    initial = %{
+      context: %{hits: 0, misses: 0},
+      proof: %{hits: 0, misses: 0}
+    }
+
+    Enum.reduce(events, initial, fn
+      %{"cache" => cache, "cache_status" => status}, counts
+      when cache in ["context", "execution_context"] and status in ["hit", "miss"] ->
+        update_in(counts, [:context, cache_count_key(status)], &(&1 + 1))
+
+      %{"cache" => "proof", "cache_status" => status}, counts
+      when status in ["hit", "miss"] ->
+        update_in(counts, [:proof, cache_count_key(status)], &(&1 + 1))
+
+      _event, counts ->
+        counts
     end)
   end
+
+  defp cache_count_key("hit"), do: :hits
+  defp cache_count_key("miss"), do: :misses
 
   defp slowest_phase([]), do: nil
 

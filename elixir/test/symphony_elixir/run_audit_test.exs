@@ -62,8 +62,8 @@ defmodule SymphonyElixir.RunAuditTest do
   end
 
   test "records machine-readable phase timing with attribution and budget overrun", context do
-    started_at = ~U[2026-07-24 08:00:00.000Z]
-    ended_at = ~U[2026-07-24 08:00:02.250Z]
+    started_at = time_point(~U[2026-07-24 08:00:00.000Z], 1_000)
+    ended_at = time_point(~U[2026-07-24 08:00:02.250Z], 3_250)
 
     assert :ok =
              RunAudit.record_phase(
@@ -88,14 +88,32 @@ defmodule SymphonyElixir.RunAuditTest do
     assert event["budget_overrun_ms"] == 250
   end
 
+  test "uses monotonic elapsed time when the wall clock moves backwards", context do
+    assert :ok =
+             RunAudit.record_phase(
+               context.workspace,
+               context.task,
+               "planning",
+               time_point(~U[2026-07-24 08:00:02Z], 10_000),
+               time_point(~U[2026-07-24 08:00:01Z], 10_750),
+               "model"
+             )
+
+    assert %{
+             "started_at" => "2026-07-24T08:00:02Z",
+             "ended_at" => "2026-07-24T08:00:01Z",
+             "duration_ms" => 750
+           } = List.last(events(context.workspace))
+  end
+
   test "requires a reason for external wait timing", context do
     assert {:error, :external_wait_reason_required} =
              RunAudit.record_phase(
                context.workspace,
                context.task,
                "external_wait",
-               ~U[2026-07-24 08:00:00Z],
-               ~U[2026-07-24 08:00:01Z],
+               time_point(~U[2026-07-24 08:00:00Z], 1_000),
+               time_point(~U[2026-07-24 08:00:01Z], 2_000),
                "external",
                %{}
              )
@@ -105,8 +123,8 @@ defmodule SymphonyElixir.RunAuditTest do
                context.workspace,
                context.task,
                "external_wait",
-               ~U[2026-07-24 08:00:00Z],
-               ~U[2026-07-24 08:00:01Z],
+               time_point(~U[2026-07-24 08:00:00Z], 1_000),
+               time_point(~U[2026-07-24 08:00:01Z], 2_000),
                "external",
                %{reason: "waiting for GitHub checks"}
              )
@@ -118,8 +136,8 @@ defmodule SymphonyElixir.RunAuditTest do
                context.workspace,
                context.task,
                "planning",
-               ~U[2026-07-24 08:00:00Z],
-               ~U[2026-07-24 08:00:03Z],
+               time_point(~U[2026-07-24 08:00:00Z], 1_000),
+               time_point(~U[2026-07-24 08:00:03Z], 4_000),
                "model",
                %{budget_ms: 2_000}
              )
@@ -129,8 +147,8 @@ defmodule SymphonyElixir.RunAuditTest do
                context.workspace,
                context.task,
                "verification",
-               ~U[2026-07-24 08:00:03Z],
-               ~U[2026-07-24 08:00:04Z],
+               time_point(~U[2026-07-24 08:00:03Z], 4_000),
+               time_point(~U[2026-07-24 08:00:04Z], 5_000),
                "subprocess"
              )
 
@@ -153,7 +171,12 @@ defmodule SymphonyElixir.RunAuditTest do
 
     assert {:ok, summary} = RunAudit.summary(context.workspace)
     assert summary.verification_profile == "Targeted"
-    assert summary.cache == %{hits: 1, misses: 1}
+
+    assert summary.cache == %{
+             context: %{hits: 1, misses: 0},
+             proof: %{hits: 0, misses: 1}
+           }
+
     assert summary.slowest_phase == %{phase: "planning", duration_ms: 3_000}
     assert summary.budget_overruns == [%{phase: "planning", budget_overrun_ms: 1_000}]
   end
@@ -197,8 +220,8 @@ defmodule SymphonyElixir.RunAuditTest do
                context.workspace,
                context.task,
                "context_loading",
-               ~U[2026-07-24 08:00:00Z],
-               ~U[2026-07-24 08:01:01Z],
+               time_point(~U[2026-07-24 08:00:00Z], 1_000),
+               time_point(~U[2026-07-24 08:01:01Z], 62_000),
                "tool"
              )
 
@@ -214,8 +237,8 @@ defmodule SymphonyElixir.RunAuditTest do
                context.workspace,
                context.task,
                "verification",
-               ~U[2026-07-24 08:00:00Z],
-               ~U[2026-07-24 08:00:02Z],
+               time_point(~U[2026-07-24 08:00:00Z], 1_000),
+               time_point(~U[2026-07-24 08:00:02Z], 3_000),
                "subprocess",
                %{budget_ms: 1_500}
              )
@@ -224,15 +247,20 @@ defmodule SymphonyElixir.RunAuditTest do
       verification_profile: "Full"
     })
 
-    RunAudit.append(context.workspace, context.task, :proof_cache_result, %{cache_status: "hit"})
+    RunAudit.append(context.workspace, context.task, :proof_cache_result, %{
+      cache: "proof",
+      cache_status: "hit"
+    })
 
     assert :ok = RunAudit.finish(context.workspace, context.task)
 
     assert %{
              "event" => "run_summary",
              "verification_profile" => "Full",
-             "cache_hits" => 1,
-             "cache_misses" => 0,
+             "context_cache_hits" => 0,
+             "context_cache_misses" => 0,
+             "proof_cache_hits" => 1,
+             "proof_cache_misses" => 0,
              "slowest_phase" => "verification",
              "slowest_phase_duration_ms" => 2_000,
              "budget_overrun_count" => 1,
@@ -286,4 +314,6 @@ defmodule SymphonyElixir.RunAuditTest do
     |> String.split("\n", trim: true)
     |> Enum.map(&Jason.decode!/1)
   end
+
+  defp time_point(utc, monotonic_ms), do: %{utc: utc, monotonic_ms: monotonic_ms}
 end

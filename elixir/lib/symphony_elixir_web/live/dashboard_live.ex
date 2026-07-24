@@ -405,10 +405,17 @@ defmodule SymphonyElixirWeb.DashboardLive do
             <dd><strong><%= @agent.audit_summary.verification_profile || "n/a" %></strong></dd>
           </div>
           <div :if={@agent.audit_summary}>
-            <dt>Cache</dt>
+            <dt>Context cache</dt>
             <dd>
-              <%= @agent.audit_summary.cache_hits %> hits ·
-              <%= @agent.audit_summary.cache_misses %> misses
+              <%= @agent.audit_summary.context_cache_hits %> hits ·
+              <%= @agent.audit_summary.context_cache_misses %> misses
+            </dd>
+          </div>
+          <div :if={@agent.audit_summary}>
+            <dt>Proof cache</dt>
+            <dd>
+              <%= @agent.audit_summary.proof_cache_hits %> hits ·
+              <%= @agent.audit_summary.proof_cache_misses %> misses
             </dd>
           </div>
           <div :if={@agent.audit_summary && @agent.audit_summary.slowest_phase}>

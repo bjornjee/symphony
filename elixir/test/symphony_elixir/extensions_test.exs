@@ -722,15 +722,20 @@ defmodule SymphonyElixir.ExtensionsTest do
 
     events = [
       %{
-        "event" => "run_summary",
+        "event" => "execution_plan_approved",
+        "timestamp" => "2026-07-24T08:00:00Z",
+        "verification_profile" => "Full"
+      },
+      %{"event" => "context_cache_result", "cache" => "execution_context", "cache_status" => "hit"},
+      %{"event" => "context_cache_result", "cache" => "execution_context", "cache_status" => "hit"},
+      %{"event" => "context_cache_result", "cache" => "execution_context", "cache_status" => "miss"},
+      %{"event" => "proof_completed", "cache" => "proof", "cache_status" => "hit"},
+      %{
+        "event" => "phase_timing",
         "timestamp" => "2026-07-24T08:00:10Z",
-        "verification_profile" => "Full",
-        "cache_hits" => 3,
-        "cache_misses" => 1,
-        "slowest_phase" => "planning",
-        "slowest_phase_duration_ms" => 12_500,
-        "budget_overrun_count" => 1,
-        "max_budget_overrun_ms" => 2_500
+        "phase" => "planning",
+        "duration_ms" => 12_500,
+        "budget_overrun_ms" => 2_500
       }
     ]
 
@@ -745,8 +750,10 @@ defmodule SymphonyElixir.ExtensionsTest do
 
     assert detail.audit_summary == %{
              verification_profile: "Full",
-             cache_hits: 3,
-             cache_misses: 1,
+             context_cache_hits: 2,
+             context_cache_misses: 1,
+             proof_cache_hits: 1,
+             proof_cache_misses: 0,
              slowest_phase: "planning",
              slowest_phase_duration_ms: 12_500,
              budget_overrun_count: 1,
@@ -764,7 +771,7 @@ defmodule SymphonyElixir.ExtensionsTest do
 
     events = [
       %{"event" => "execution_plan_approved", "verification_profile" => "Targeted"},
-      %{"event" => "proof_completed", "cache_status" => "hit"},
+      %{"event" => "proof_completed", "cache" => "proof", "cache_status" => "hit"},
       %{
         "event" => "phase_timing",
         "phase" => "planning",
@@ -780,12 +787,60 @@ defmodule SymphonyElixir.ExtensionsTest do
 
     assert detail.audit_summary == %{
              verification_profile: "Targeted",
-             cache_hits: 1,
-             cache_misses: 0,
+             context_cache_hits: 0,
+             context_cache_misses: 0,
+             proof_cache_hits: 1,
+             proof_cache_misses: 0,
              slowest_phase: "planning",
              slowest_phase_duration_ms: 12_500,
              budget_overrun_count: 1,
              max_budget_overrun_ms: 2_500
+           }
+  end
+
+  @tag :dashboard_detail
+  test "dashboard uses the RunAudit summary for an active audit larger than its log tail" do
+    audit_events_path =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-dashboard-large-live-summary-#{System.unique_integer([:positive])}.jsonl"
+      )
+
+    prefix =
+      [
+        %{"event" => "execution_plan_approved", "verification_profile" => "Full"},
+        %{"event" => "context_cache_result", "cache" => "execution_context", "cache_status" => "hit"}
+      ]
+
+    filler =
+      for index <- 1..1_200 do
+        %{"event" => "agent_message", "detail" => String.duplicate("x", 80), "index" => index}
+      end
+
+    suffix = [
+      %{"event" => "proof_completed", "cache" => "proof", "cache_status" => "miss"},
+      %{"event" => "phase_timing", "phase" => "planning", "duration_ms" => 12_500}
+    ]
+
+    File.write!(
+      audit_events_path,
+      Enum.map_join(prefix ++ filler ++ suffix, "", &(Jason.encode!(&1) <> "\n"))
+    )
+
+    on_exit(fn -> File.rm(audit_events_path) end)
+
+    detail = Presenter.dashboard_detail(%{audit_events_path: audit_events_path})
+
+    assert detail.audit_summary == %{
+             verification_profile: "Full",
+             context_cache_hits: 1,
+             context_cache_misses: 0,
+             proof_cache_hits: 0,
+             proof_cache_misses: 1,
+             slowest_phase: "planning",
+             slowest_phase_duration_ms: 12_500,
+             budget_overrun_count: 0,
+             max_budget_overrun_ms: 0
            }
   end
 
@@ -984,15 +1039,42 @@ defmodule SymphonyElixir.ExtensionsTest do
     File.write!(
       audit_events_path,
       Jason.encode!(%{
-        "event" => "run_summary",
+        "event" => "execution_plan_approved",
         "verification_profile" => "Full",
-        "cache_hits" => 3,
-        "cache_misses" => 1,
-        "slowest_phase" => "planning",
-        "slowest_phase_duration_ms" => 12_500,
-        "budget_overrun_count" => 1,
-        "max_budget_overrun_ms" => 2_500
-      }) <> "\n"
+        "timestamp" => "2026-07-24T08:00:00Z"
+      }) <>
+        "\n" <>
+        Jason.encode!(%{
+          "event" => "context_cache_result",
+          "cache" => "execution_context",
+          "cache_status" => "hit"
+        }) <>
+        "\n" <>
+        Jason.encode!(%{
+          "event" => "context_cache_result",
+          "cache" => "execution_context",
+          "cache_status" => "hit"
+        }) <>
+        "\n" <>
+        Jason.encode!(%{
+          "event" => "proof_completed",
+          "cache" => "proof",
+          "cache_status" => "hit"
+        }) <>
+        "\n" <>
+        Jason.encode!(%{
+          "event" => "phase_timing",
+          "phase" => "planning",
+          "duration_ms" => 12_500,
+          "budget_overrun_ms" => 2_500
+        }) <>
+        "\n" <>
+        Jason.encode!(%{
+          "event" => "context_cache_result",
+          "cache" => "execution_context",
+          "cache_status" => "miss",
+          "timestamp" => "2026-07-24T08:00:01Z"
+        }) <> "\n"
     )
 
     on_exit(fn -> File.rm(audit_events_path) end)
@@ -1044,7 +1126,8 @@ defmodule SymphonyElixir.ExtensionsTest do
     assert html =~ "Audit"
     assert html =~ "Copy audit"
     assert html =~ "Verification profile"
-    assert html =~ "3 hits"
+    assert html =~ "2 hits"
+    assert html =~ "1 hits"
     assert html =~ "Slowest phase"
     assert html =~ "planning"
     assert html =~ "Budget overruns"

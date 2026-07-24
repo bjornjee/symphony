@@ -122,6 +122,40 @@ defmodule SymphonyElixir.RepositoryFingerprintTest do
              RepositoryFingerprint.capture(workspace)
   end
 
+  test "fails closed when one untracked file exceeds its content bound", %{workspace: workspace} do
+    File.write!(Path.join(workspace, "large.bin"), :binary.copy(<<0>>, 1_048_577))
+
+    assert {:error, {:untracked_file_too_large, "large.bin", 1_048_576}} =
+             RepositoryFingerprint.capture(workspace)
+  end
+
+  test "fails closed when aggregate untracked content exceeds its bound", %{workspace: workspace} do
+    for index <- 1..5 do
+      File.write!(
+        Path.join(workspace, "large-#{index}.bin"),
+        :binary.copy(<<index>>, 1_048_576)
+      )
+    end
+
+    assert {:error, {:untracked_content_too_large, 4_194_304}} =
+             RepositoryFingerprint.capture(workspace)
+  end
+
+  test "fails closed when a repository observation exceeds its subprocess timeout", %{
+    workspace: workspace
+  } do
+    runner = fn _args ->
+      Process.sleep(50)
+      {:ok, ""}
+    end
+
+    assert {:error, {:git_command_timeout, _command}} =
+             RepositoryFingerprint.capture(workspace, nil,
+               git_runner: runner,
+               command_timeout_ms: 5
+             )
+  end
+
   test "invalidates for instructions, workflow, manifests, lockfiles, and toolchain configuration", %{
     workspace: workspace
   } do

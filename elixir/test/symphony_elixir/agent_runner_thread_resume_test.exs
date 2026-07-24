@@ -139,12 +139,12 @@ defmodule SymphonyElixir.AgentRunnerThreadResumeTest do
       assert {:ok, "thread-durable"} = ThreadIdentity.read(workspace)
       assert_receive {:published_handoff, first_comment_id, first_artifact_digest}
 
+      File.write!(Path.join(workspace, "README.md"), "# uncommitted task progress\n")
       assert :ok = AgentRunner.run(issue, nil, run_opts)
 
       assert File.read!(ExecutionManifest.path(workspace)) == first_manifest
       assert {:ok, "thread-durable"} = ThreadIdentity.read(workspace)
       assert_receive {:published_handoff, ^first_comment_id, ^first_artifact_digest}
-      assert Agent.get(planning_calls, & &1) == 1
 
       audit_events =
         workspace
@@ -159,14 +159,27 @@ defmodule SymphonyElixir.AgentRunnerThreadResumeTest do
                  event["cache_status"] == "hit"
              end)
 
+      assert Enum.any?(audit_events, fn event ->
+               event["event"] == "phase_timing" and
+                 event["phase"] == "planning" and
+                 event["attribution"] == "tool"
+             end)
+
+      System.cmd("git", ["-C", workspace, "add", "README.md"])
+      System.cmd("git", ["-C", workspace, "commit", "-m", "test: checkpoint task progress"])
+
+      assert :ok = AgentRunner.run(issue, nil, run_opts)
+      assert_receive {:published_handoff, ^first_comment_id, ^first_artifact_digest}
+      assert Agent.get(planning_calls, & &1) == 1
+
       requests =
         trace_file
         |> File.read!()
         |> String.split("\n", trim: true)
 
-      assert Enum.count(requests, &(&1 == "RUN")) == 2
+      assert Enum.count(requests, &(&1 == "RUN")) == 3
       assert Enum.count(requests, &String.contains?(&1, "\"method\":\"thread/start\"")) == 1
-      assert Enum.count(requests, &String.contains?(&1, "\"method\":\"thread/resume\"")) == 1
+      assert Enum.count(requests, &String.contains?(&1, "\"method\":\"thread/resume\"")) == 2
 
       goal_statuses =
         requests
@@ -176,7 +189,14 @@ defmodule SymphonyElixir.AgentRunnerThreadResumeTest do
         |> Enum.filter(&(&1["method"] == "thread/goal/set"))
         |> Enum.map(&get_in(&1, ["params", "status"]))
 
-      assert goal_statuses == ["active", "complete", "active", "complete"]
+      assert goal_statuses == [
+               "active",
+               "complete",
+               "active",
+               "complete",
+               "active",
+               "complete"
+             ]
     after
       File.rm_rf(test_root)
     end

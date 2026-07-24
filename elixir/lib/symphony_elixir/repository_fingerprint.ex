@@ -8,6 +8,9 @@ defmodule SymphonyElixir.RepositoryFingerprint do
   @max_snapshot_bytes 4_194_304
   @max_untracked_files 256
   @max_untracked_path_bytes 65_536
+  @max_untracked_file_bytes 1_048_576
+  @max_untracked_content_bytes 4_194_304
+  @command_timeout_ms 10_000
   @engine_artifacts [
     ".symphony/execution-manifest.json",
     ".symphony/codex-thread.json",
@@ -43,6 +46,19 @@ defmodule SymphonyElixir.RepositoryFingerprint do
   def capture(workspace, worker_host, opts) when is_binary(workspace) and is_list(opts) do
     runner = Keyword.get(opts, :git_runner, &git(workspace, worker_host, &1))
 
+    untracked_sizer =
+      Keyword.get(opts, :untracked_sizer, &untracked_sizes(workspace, worker_host, &1))
+
+    command_timeout_ms = Keyword.get(opts, :command_timeout_ms, @command_timeout_ms)
+
+    timed_runner = fn args ->
+      run_with_timeout(fn -> runner.(args) end, command_timeout_ms, args)
+    end
+
+    timed_sizer = fn paths ->
+      run_with_timeout(fn -> untracked_sizer.(paths) end, command_timeout_ms, :untracked_size)
+    end
+
     commands = [
       origin: ["config", "--get", "remote.origin.url"],
       base_sha: ["rev-parse", "HEAD"],
@@ -52,7 +68,7 @@ defmodule SymphonyElixir.RepositoryFingerprint do
       untracked_paths: untracked_args()
     ]
 
-    with {:ok, captured} <- parallel_git(commands, runner),
+    with {:ok, captured} <- parallel_git(commands, timed_runner, command_timeout_ms),
          origin <- captured.origin,
          base_sha <- captured.base_sha,
          status <- captured.status,
@@ -63,7 +79,8 @@ defmodule SymphonyElixir.RepositoryFingerprint do
          :ok <- bounded(unstaged, "unstaged diff"),
          :ok <- bounded(staged, "staged diff"),
          :ok <- bounded(untracked_paths, "untracked paths"),
-         {:ok, untracked} <- fingerprint_untracked(untracked_paths, runner) do
+         {:ok, untracked} <-
+           fingerprint_untracked(untracked_paths, timed_runner, timed_sizer) do
       origin = String.trim(origin)
       base_sha = String.trim(base_sha)
 
@@ -98,11 +115,28 @@ defmodule SymphonyElixir.RepositoryFingerprint do
     end
   end
 
-  defp fingerprint_untracked("", _runner), do: {:ok, ""}
+  defp fingerprint_untracked("", _runner, _sizer), do: {:ok, ""}
 
-  defp fingerprint_untracked(payload, runner) do
+  defp fingerprint_untracked(payload, runner, sizer) do
     paths = payload |> String.split(<<0>>, trim: true) |> Enum.sort()
 
+    with :ok <- validate_untracked_paths(paths, payload),
+         {:ok, sizes} <- sizer.(paths),
+         :ok <- validate_untracked_sizes(paths, sizes),
+         {:ok, hashes} <- runner.(["hash-object", "--no-filters", "--" | paths]),
+         hash_lines <- String.split(hashes, "\n", trim: true),
+         true <- length(hash_lines) == length(paths) || {:error, :untracked_hash_count_mismatch},
+         true <-
+           Enum.all?(hash_lines, &Regex.match?(~r/^[a-f0-9]{40,64}$/, &1)) ||
+             {:error, :invalid_untracked_hash} do
+      {:ok,
+       paths
+       |> Enum.zip(hash_lines)
+       |> Enum.map_join("", fn {path, hash} -> path <> <<0>> <> hash <> <<0>> end)}
+    end
+  end
+
+  defp validate_untracked_paths(paths, payload) do
     cond do
       length(paths) > @max_untracked_files ->
         {:error, {:too_many_untracked_files, @max_untracked_files}}
@@ -110,28 +144,49 @@ defmodule SymphonyElixir.RepositoryFingerprint do
       byte_size(payload) > @max_untracked_path_bytes ->
         {:error, {:untracked_paths_too_large, @max_untracked_path_bytes}}
 
+      Enum.any?(paths, &(Path.type(&1) != :relative or ".." in Path.split(&1))) ->
+        {:error, :unsafe_untracked_path}
+
       true ->
-        with {:ok, hashes} <- runner.(["hash-object", "--no-filters", "--" | paths]),
-             hash_lines <- String.split(hashes, "\n", trim: true),
-             true <- length(hash_lines) == length(paths) || {:error, :untracked_hash_count_mismatch},
-             true <-
-               Enum.all?(hash_lines, &Regex.match?(~r/^[a-f0-9]{40,64}$/, &1)) ||
-                 {:error, :invalid_untracked_hash} do
-          {:ok,
-           paths
-           |> Enum.zip(hash_lines)
-           |> Enum.map_join("", fn {path, hash} -> path <> <<0>> <> hash <> <<0>> end)}
-        end
+        :ok
     end
   end
 
-  defp parallel_git(commands, runner) do
+  defp validate_untracked_sizes(paths, sizes)
+       when is_list(sizes) and length(paths) == length(sizes) do
+    paths
+    |> Enum.zip(sizes)
+    |> Enum.reduce_while({:ok, 0}, fn
+      {path, size}, {:ok, total} when is_integer(size) and size >= 0 ->
+        cond do
+          size > @max_untracked_file_bytes ->
+            {:halt, {:error, {:untracked_file_too_large, path, @max_untracked_file_bytes}}}
+
+          total + size > @max_untracked_content_bytes ->
+            {:halt, {:error, {:untracked_content_too_large, @max_untracked_content_bytes}}}
+
+          true ->
+            {:cont, {:ok, total + size}}
+        end
+
+      _invalid, _total ->
+        {:halt, {:error, :invalid_untracked_file_size}}
+    end)
+    |> case do
+      {:ok, _total} -> :ok
+      {:error, _reason} = error -> error
+    end
+  end
+
+  defp validate_untracked_sizes(_paths, _sizes), do: {:error, :untracked_size_count_mismatch}
+
+  defp parallel_git(commands, runner, timeout_ms) do
     commands
     |> Task.async_stream(
       fn {key, args} -> {key, runner.(args)} end,
       max_concurrency: length(commands),
       ordered: true,
-      timeout: 120_000,
+      timeout: timeout_ms + 100,
       on_timeout: :kill_task
     )
     |> Enum.reduce_while({:ok, %{}}, fn
@@ -144,6 +199,57 @@ defmodule SymphonyElixir.RepositoryFingerprint do
       {:exit, reason}, _captured ->
         {:halt, {:error, {:git_capture_task_failed, reason}}}
     end)
+  end
+
+  defp run_with_timeout(fun, timeout_ms, command) do
+    task = Task.async(fun)
+
+    case Task.yield(task, timeout_ms) || Task.shutdown(task, :brutal_kill) do
+      {:ok, result} -> result
+      nil -> {:error, {:git_command_timeout, command}}
+      {:exit, reason} -> {:error, {:git_command_failed, command, reason}}
+    end
+  end
+
+  defp untracked_sizes(workspace, nil, paths) do
+    Enum.reduce_while(paths, {:ok, []}, fn path, {:ok, sizes} ->
+      case File.stat(Path.join(workspace, path)) do
+        {:ok, %{size: size}} -> {:cont, {:ok, [size | sizes]}}
+        {:error, reason} -> {:halt, {:error, {:untracked_file_stat_failed, path, reason}}}
+      end
+    end)
+    |> case do
+      {:ok, sizes} -> {:ok, Enum.reverse(sizes)}
+      {:error, _reason} = error -> error
+    end
+  end
+
+  defp untracked_sizes(workspace, worker_host, paths) when is_binary(worker_host) do
+    commands =
+      Enum.map(paths, fn path ->
+        "wc -c < " <> shell_escape(Path.join(workspace, path))
+      end)
+
+    case SSH.run(worker_host, Enum.join(commands, " && "), stderr_to_stdout: true) do
+      {:ok, {output, 0}} ->
+        sizes =
+          output
+          |> String.split("\n", trim: true)
+          |> Enum.map(fn value ->
+            case Integer.parse(String.trim(value)) do
+              {size, ""} -> size
+              _ -> :invalid
+            end
+          end)
+
+        {:ok, sizes}
+
+      {:ok, {output, status}} ->
+        {:error, {:untracked_file_stat_failed, worker_host, status, output}}
+
+      {:error, reason} ->
+        {:error, {:untracked_file_stat_failed, worker_host, reason}}
+    end
   end
 
   @spec head(Path.t(), String.t() | nil) :: {:ok, String.t()} | {:error, term()}

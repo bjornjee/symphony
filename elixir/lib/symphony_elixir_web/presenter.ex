@@ -3,7 +3,7 @@ defmodule SymphonyElixirWeb.Presenter do
   Shared projections for the observability API and dashboard.
   """
 
-  alias SymphonyElixir.{Config, GitHubRepository, Orchestrator, StatusDashboard}
+  alias SymphonyElixir.{Config, GitHubRepository, Orchestrator, RunAudit, StatusDashboard}
 
   @audit_tail_bytes 64 * 1_024
   @audit_event_limit 50
@@ -241,87 +241,27 @@ defmodule SymphonyElixirWeb.Presenter do
   defp read_audit_events(_path), do: []
 
   defp read_audit_summary(path) when is_binary(path) and path != "" do
-    with {:ok, %{size: size}} <- File.stat(path),
-         {:ok, data} <- read_audit_tail(path, size) do
-      offset = max(size - @audit_tail_bytes, 0)
-
-      events =
-        data
-        |> discard_partial_line(offset)
-        |> String.split("\n", trim: true)
-        |> Enum.flat_map(&decode_json_map/1)
-
-      events
-      |> Enum.reverse()
-      |> Enum.find_value(&decode_run_summary/1)
-      |> Kernel.||(summarize_live_audit(events))
+    with {:ok, summary} <- RunAudit.summary_path(path) do
+      %{
+        verification_profile: summary.verification_profile,
+        context_cache_hits: summary.cache.context.hits,
+        context_cache_misses: summary.cache.context.misses,
+        proof_cache_hits: summary.cache.proof.hits,
+        proof_cache_misses: summary.cache.proof.misses,
+        slowest_phase: summary.slowest_phase && summary.slowest_phase.phase,
+        slowest_phase_duration_ms: summary.slowest_phase && summary.slowest_phase.duration_ms,
+        budget_overrun_count: length(summary.budget_overruns),
+        max_budget_overrun_ms:
+          summary.budget_overruns
+          |> Enum.map(& &1.budget_overrun_ms)
+          |> Enum.max(fn -> 0 end)
+      }
     else
       _ -> nil
     end
   end
 
   defp read_audit_summary(_path), do: nil
-
-  defp decode_run_summary(%{"event" => "run_summary"} = event) do
-    %{
-      verification_profile: event["verification_profile"],
-      cache_hits: event["cache_hits"] || 0,
-      cache_misses: event["cache_misses"] || 0,
-      slowest_phase: event["slowest_phase"],
-      slowest_phase_duration_ms: event["slowest_phase_duration_ms"],
-      budget_overrun_count: event["budget_overrun_count"] || 0,
-      max_budget_overrun_ms: event["max_budget_overrun_ms"] || 0
-    }
-  end
-
-  defp decode_run_summary(_event), do: nil
-
-  defp summarize_live_audit(events) do
-    phases =
-      Enum.filter(events, fn event ->
-        event["event"] == "phase_timing" and is_integer(event["duration_ms"])
-      end)
-
-    slowest = Enum.max_by(phases, & &1["duration_ms"], fn -> nil end)
-    overruns = Enum.filter(phases, &positive_integer?(&1["budget_overrun_ms"]))
-
-    profile =
-      events
-      |> Enum.reverse()
-      |> Enum.find_value(fn event ->
-        value = event["verification_profile"]
-        if is_binary(value), do: value
-      end)
-
-    cache_statuses =
-      events
-      |> Enum.map(& &1["cache_status"])
-      |> Enum.filter(&(&1 in ["hit", "miss"]))
-
-    if profile || slowest || cache_statuses != [] do
-      %{
-        verification_profile: profile,
-        cache_hits: Enum.count(cache_statuses, &(&1 == "hit")),
-        cache_misses: Enum.count(cache_statuses, &(&1 == "miss")),
-        slowest_phase: slowest && slowest["phase"],
-        slowest_phase_duration_ms: slowest && slowest["duration_ms"],
-        budget_overrun_count: length(overruns),
-        max_budget_overrun_ms:
-          overruns
-          |> Enum.map(& &1["budget_overrun_ms"])
-          |> Enum.max(fn -> 0 end)
-      }
-    end
-  end
-
-  defp positive_integer?(value), do: is_integer(value) and value > 0
-
-  defp decode_json_map(line) do
-    case Jason.decode(line) do
-      {:ok, %{} = event} -> [event]
-      _ -> []
-    end
-  end
 
   defp read_audit_tail(path, size) do
     offset = max(size - @audit_tail_bytes, 0)
