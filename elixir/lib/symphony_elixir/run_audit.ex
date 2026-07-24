@@ -13,6 +13,7 @@ defmodule SymphonyElixir.RunAudit do
   @first_edit_marker "first-useful-edit"
   @max_preview_chars 160
   @max_summary_bytes 4_194_304
+  @compact_tail_events 50
   @phase_names ~w(
     queueing workspace_bootstrap context_loading research planning implementation
     verification review git_pr external_wait handoff run
@@ -89,6 +90,19 @@ defmodule SymphonyElixir.RunAudit do
     }
   end
 
+  @spec paths(Path.t(), Issue.t()) :: %{audit_path: Path.t(), audit_events_path: Path.t()}
+  def paths(workspace, %Issue{} = issue) when is_binary(workspace) do
+    directory =
+      if File.dir?(workspace),
+        do: audit_dir(workspace),
+        else: central_audit_dir(workspace, issue)
+
+    %{
+      audit_path: Path.join(directory, @markdown_file),
+      audit_events_path: Path.join(directory, @jsonl_file)
+    }
+  end
+
   @spec now() :: time_point()
   def now do
     %{utc: DateTime.utc_now(), monotonic_ms: System.monotonic_time(:millisecond)}
@@ -96,51 +110,48 @@ defmodule SymphonyElixir.RunAudit do
 
   @spec start(Path.t(), Issue.t(), map()) :: :ok
   def start(workspace, %Issue{} = issue, attrs \\ %{}) when is_binary(workspace) and is_map(attrs) do
-    with_audit_guard(workspace, fn ->
-      File.mkdir_p!(audit_dir(workspace))
-      File.write!(jsonl_path(workspace), "")
-      File.rm(first_edit_marker_path(workspace))
+    Enum.each(audit_targets(workspace, issue), fn directory ->
+      with_audit_guard(workspace, fn ->
+        File.mkdir_p!(directory)
+        File.write!(Path.join(directory, @jsonl_file), "")
+        File.rm(Path.join(directory, @first_edit_marker))
 
-      File.write!(
-        markdown_path(workspace),
-        [
-          "# Run Audit\n\n",
-          "- issue: `",
-          safe_text(issue.identifier || issue.id || "unknown"),
-          "`\n",
-          "- workspace: `",
-          safe_text(workspace),
-          "`\n",
-          optional_markdown_field("worker_host", Map.get(attrs, :worker_host)),
-          "\n## Events\n\n"
-        ]
-      )
-
-      append(workspace, issue, :run_started, attrs)
+        File.write!(
+          Path.join(directory, @markdown_file),
+          markdown_header(workspace, issue, attrs)
+        )
+      end)
     end)
+
+    append(workspace, issue, :run_started, attrs)
   end
 
   @spec append(Path.t(), Issue.t(), event_name(), map()) :: :ok
   def append(workspace, %Issue{} = issue, event, attrs \\ %{})
       when is_binary(workspace) and is_map(attrs) do
-    with_audit_guard(workspace, fn ->
-      File.mkdir_p!(audit_dir(workspace))
+    timestamp = DateTime.utc_now()
+    normalized_attrs = normalize_attrs(attrs)
 
-      timestamp = DateTime.utc_now()
-      normalized_attrs = normalize_attrs(attrs)
+    json_event =
+      normalized_attrs
+      |> Map.merge(%{
+        event: to_string(event),
+        timestamp: DateTime.to_iso8601(timestamp),
+        issue_id: issue.id,
+        issue_identifier: issue.identifier
+      })
+      |> drop_nil_values()
 
-      json_event =
-        normalized_attrs
-        |> Map.merge(%{
-          event: to_string(event),
-          timestamp: DateTime.to_iso8601(timestamp),
-          issue_id: issue.id,
-          issue_identifier: issue.identifier
-        })
-        |> drop_nil_values()
+    Enum.each(audit_targets(workspace, issue), fn directory ->
+      with_audit_guard(workspace, fn ->
+        File.mkdir_p!(directory)
+        append_json_event(Path.join(directory, @jsonl_file), json_event)
 
-      File.write!(jsonl_path(workspace), Jason.encode!(json_event) <> "\n", [:append])
-      File.write!(markdown_path(workspace), markdown_event(timestamp, event, normalized_attrs), [:append])
+        append_markdown_event(
+          Path.join(directory, @markdown_file),
+          markdown_event(timestamp, event, normalized_attrs)
+        )
+      end)
     end)
   end
 
@@ -253,7 +264,7 @@ defmodule SymphonyElixir.RunAudit do
 
   @spec finish(Path.t(), Issue.t()) :: :ok | {:error, term()}
   def finish(workspace, %Issue{} = issue) when is_binary(workspace) do
-    with {:ok, run_summary} <- summary(workspace) do
+    with {:ok, run_summary} <- summary_path(paths(workspace, issue).audit_events_path) do
       slowest = run_summary.slowest_phase
       overruns = run_summary.budget_overruns
 
@@ -447,7 +458,7 @@ defmodule SymphonyElixir.RunAudit do
          %{payload: %{"method" => "item/completed"} = payload}
        ) do
     if get_in(payload, ["params", "item", "type"]) == "fileChange" do
-      case File.write(first_edit_marker_path(workspace), "", [:write, :exclusive]) do
+      case File.write(first_edit_marker_path(workspace, issue), "", [:write, :exclusive]) do
         :ok ->
           append(workspace, issue, :first_useful_edit, %{
             phase: "implementation",
@@ -601,6 +612,116 @@ defmodule SymphonyElixir.RunAudit do
   defp max_budget_overrun([]), do: 0
   defp max_budget_overrun(overruns), do: overruns |> Enum.map(& &1.budget_overrun_ms) |> Enum.max()
 
+  defp append_json_event(path, event) do
+    line = Jason.encode!(event) <> "\n"
+    current_size = file_size(path)
+
+    if current_size + byte_size(line) <= @max_summary_bytes do
+      File.write!(path, line, [:append])
+    else
+      compact_json_events(path, event)
+    end
+  end
+
+  defp compact_json_events(path, event) do
+    existing =
+      case File.read(path) do
+        {:ok, payload} ->
+          case decode_events(payload) do
+            {:ok, events} -> events
+            {:error, reason} -> raise "cannot compact invalid run audit: #{inspect(reason)}"
+          end
+
+        {:error, :enoent} ->
+          []
+
+        {:error, reason} ->
+          raise File.Error, reason: reason, action: "read", path: path
+      end
+
+    events = existing ++ [event]
+    tail = Enum.take(events, -@compact_tail_events)
+
+    compacted =
+      events
+      |> Enum.filter(&retain_compacted_event?/1)
+      |> Kernel.++(tail)
+      |> Enum.uniq()
+      |> encode_events()
+
+    payload =
+      if byte_size(compacted) <= @max_summary_bytes do
+        compacted
+      else
+        tail
+        |> bounded_event_tail(@max_summary_bytes)
+        |> encode_events()
+      end
+
+    File.write!(path, payload)
+  end
+
+  defp retain_compacted_event?(%{"event" => event} = item) do
+    event in [
+      "run_started",
+      "phase_timing",
+      "first_useful_edit",
+      "verification_profile_selected",
+      "execution_plan_approved",
+      "context_cache_result",
+      "proof_cache_result",
+      "proof_completed",
+      "run_summary"
+    ] or
+      String.starts_with?(event, "handoff_") or
+      (event == "codex_update" and is_integer(item["exit_code"]))
+  end
+
+  defp retain_compacted_event?(_event), do: false
+
+  defp encode_events(events), do: Enum.map_join(events, "", &(Jason.encode!(&1) <> "\n"))
+
+  defp bounded_event_tail(events, limit) do
+    events
+    |> Enum.reverse()
+    |> Enum.reduce_while({[], 0}, fn event, {kept, size} ->
+      event_size = event |> Jason.encode!() |> byte_size() |> Kernel.+(1)
+
+      if size + event_size <= limit,
+        do: {:cont, {[event | kept], size + event_size}},
+        else: {:halt, {kept, size}}
+    end)
+    |> elem(0)
+  end
+
+  defp append_markdown_event(path, line) do
+    line = IO.iodata_to_binary(line)
+    current_size = file_size(path)
+
+    if current_size + byte_size(line) <= @max_summary_bytes do
+      File.write!(path, line, [:append])
+    else
+      existing =
+        case File.read(path) do
+          {:ok, payload} -> keep_binary_tail(payload, div(@max_summary_bytes, 2))
+          {:error, _reason} -> ""
+        end
+
+      File.write!(path, existing <> line)
+    end
+  end
+
+  defp keep_binary_tail(value, limit) when byte_size(value) <= limit, do: value
+  defp keep_binary_tail(value, limit), do: binary_part(value, byte_size(value) - limit, limit)
+
+  defp file_size(path) do
+    case File.stat(path) do
+      {:ok, %{size: size}} -> size
+      {:error, :enoent} -> 0
+      {:error, reason} -> raise File.Error, reason: reason, action: "stat", path: path
+    end
+  end
+
   defp scalar?(value) do
     is_binary(value) or is_atom(value) or is_integer(value) or is_float(value) or
       is_boolean(value) or is_nil(value)
@@ -624,6 +745,20 @@ defmodule SymphonyElixir.RunAudit do
   defp optional_markdown_field(_label, nil), do: ""
   defp optional_markdown_field(label, value), do: ["- ", label, ": `", safe_text(value), "`\n"]
 
+  defp markdown_header(workspace, issue, attrs) do
+    [
+      "# Run Audit\n\n",
+      "- issue: `",
+      safe_text(issue.identifier || issue.id || "unknown"),
+      "`\n",
+      "- workspace: `",
+      safe_text(workspace),
+      "`\n",
+      optional_markdown_field("worker_host", Map.get(attrs, :worker_host)),
+      "\n## Events\n\n"
+    ]
+  end
+
   defp preview(value) when is_binary(value) do
     value
     |> String.replace("\n", " ")
@@ -639,7 +774,27 @@ defmodule SymphonyElixir.RunAudit do
   defp audit_dir(workspace), do: Path.join(workspace, @audit_dir)
   defp jsonl_path(workspace), do: Path.join(audit_dir(workspace), @jsonl_file)
   defp markdown_path(workspace), do: Path.join(audit_dir(workspace), @markdown_file)
-  defp first_edit_marker_path(workspace), do: Path.join(audit_dir(workspace), @first_edit_marker)
+
+  defp first_edit_marker_path(workspace, issue),
+    do: Path.join(Path.dirname(paths(workspace, issue).audit_events_path), @first_edit_marker)
+
+  defp audit_targets(workspace, issue) do
+    if File.dir?(workspace), do: [audit_dir(workspace)], else: [central_audit_dir(workspace, issue)]
+  end
+
+  defp central_audit_dir(workspace, issue) do
+    root =
+      Application.get_env(:symphony_elixir, :execution_state_root) ||
+        :filename.basedir(:user_data, "symphony") |> to_string() |> Path.join("execution")
+
+    key =
+      [workspace, <<0>>, issue.id || issue.identifier || "unknown"]
+      |> IO.iodata_to_binary()
+      |> then(&:crypto.hash(:sha256, &1))
+      |> Base.encode16(case: :lower)
+
+    Path.join([root, "run-audits", key])
+  end
 
   defp with_audit_guard(workspace, fun) when is_function(fun, 0) do
     fun.()

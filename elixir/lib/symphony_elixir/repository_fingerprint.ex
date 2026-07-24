@@ -264,15 +264,42 @@ defmodule SymphonyElixir.RepositoryFingerprint do
 
   @spec changed_paths(Path.t(), String.t(), String.t() | nil) :: {:ok, [String.t()]} | {:error, term()}
   def changed_paths(workspace, base_sha, worker_host \\ nil) do
-    with {:ok, committed} <- git(workspace, worker_host, ["diff", "--name-only", "#{base_sha}..HEAD", "--", "."] ++ exclusions()),
-         {:ok, status} <- git(workspace, worker_host, status_args()) do
-      status_paths =
-        status
-        |> String.split("\n", trim: true)
-        |> Enum.map(fn line -> line |> String.slice(3..-1//1) |> String.split(" -> ") |> List.last() end)
+    commands = [
+      committed: changed_path_args(["#{base_sha}..HEAD"]),
+      unstaged: changed_path_args([]),
+      staged: changed_path_args(["--cached"]),
+      untracked: untracked_args()
+    ]
 
-      {:ok, (String.split(committed, "\n", trim: true) ++ status_paths) |> Enum.uniq() |> Enum.sort()}
+    with {:ok, captured} <-
+           parallel_git(
+             commands,
+             &git(workspace, worker_host, &1),
+             @command_timeout_ms
+           ),
+         :ok <- bounded_changed_paths(captured) do
+      paths =
+        captured
+        |> Map.values()
+        |> Enum.flat_map(&String.split(&1, <<0>>, trim: true))
+        |> Enum.uniq()
+        |> Enum.sort()
+
+      {:ok, paths}
     end
+  end
+
+  defp changed_path_args(extra) do
+    ["diff", "--name-only", "--no-renames", "-z"] ++ extra ++ ["--", "."] ++ exclusions()
+  end
+
+  defp bounded_changed_paths(captured) do
+    Enum.reduce_while(captured, :ok, fn {label, value}, :ok ->
+      case bounded(value, "changed paths #{label}") do
+        :ok -> {:cont, :ok}
+        {:error, _reason} = error -> {:halt, error}
+      end
+    end)
   end
 
   defp status_args do

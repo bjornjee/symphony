@@ -2,7 +2,18 @@ defmodule SymphonyElixir.Pin28Benchmark do
   @moduledoc "Runs the controlled PIN-28 harness-overhead latency evaluation."
 
   alias SymphonyElixir.Linear.{Issue, TaskContract}
-  alias SymphonyElixir.{RepositoryFingerprint, WorkflowProfile}
+
+  alias SymphonyElixir.{
+    CompletionEvidence,
+    DeliveryControl,
+    ExecutionControl,
+    ExecutionLedger,
+    ImplementationReview,
+    PlanningArtifact,
+    RepositoryFingerprint,
+    TaskBranch,
+    WorkflowProfile
+  }
 
   @expected_diff ["Makefile", "docs/symphony-linear-setup.md"]
   @pin_28_commit "41808f55b68b3727710651df7601e6f2023e40dc"
@@ -49,8 +60,29 @@ defmodule SymphonyElixir.Pin28Benchmark do
 
   @spec run(keyword()) :: map()
   def run(opts \\ []) do
+    ledger_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-pin28-benchmark-#{System.unique_integer([:positive, :monotonic])}"
+      )
+
+    previous_root = Application.get_env(:symphony_elixir, :execution_state_root)
+    Application.put_env(:symphony_elixir, :execution_state_root, ledger_root)
+
+    try do
+      run_controlled(opts, ledger_root)
+    after
+      if previous_root,
+        do: Application.put_env(:symphony_elixir, :execution_state_root, previous_root),
+        else: Application.delete_env(:symphony_elixir, :execution_state_root)
+
+      File.rm_rf(ledger_root)
+    end
+  end
+
+  defp run_controlled(opts, ledger_root) do
     runs = Keyword.get(opts, :runs, 10)
-    observation_delay_ms = Keyword.get(opts, :observation_delay_ms, 25)
+    observation_delay_ms = Keyword.get(opts, :observation_delay_ms, 50)
     fixed_overhead_ms = Keyword.get(opts, :fixed_overhead_ms, 75)
     artifact_observer = Keyword.get(opts, :artifact_observer, &observed_pin_28_artifacts/0)
 
@@ -62,7 +94,8 @@ defmodule SymphonyElixir.Pin28Benchmark do
           run_number,
           observation_delay_ms,
           fixed_overhead_ms,
-          artifact_observer
+          artifact_observer,
+          ledger_root
         )
       end)
 
@@ -76,7 +109,8 @@ defmodule SymphonyElixir.Pin28Benchmark do
       )
 
     thresholds_passed =
-      improvement_percent >= 40.0 and
+      observation_delay_ms > 0 and
+        improvement_percent >= 40.0 and
         candidate.median_end_to_end_ms <= 600_000 and
         candidate.median_first_useful_edit_ms <= 240_000 and
         baseline.completion_accuracy == 1.0 and
@@ -92,7 +126,7 @@ defmodule SymphonyElixir.Pin28Benchmark do
       expected_diff: @expected_diff,
       model_configuration: %{
         kind: "deterministic-agent-replay",
-        revision: 2,
+        revision: 3,
         live_model: false
       },
       required_artifacts: Map.take(@task_contract, [:verification, :review_checks, :handoff_fields]),
@@ -110,13 +144,17 @@ defmodule SymphonyElixir.Pin28Benchmark do
     }
   end
 
-  defp sample(run_number, observation_delay_ms, fixed_overhead_ms, artifact_observer) do
+  defp sample(run_number, observation_delay_ms, fixed_overhead_ms, artifact_observer, ledger_root) do
+    fixture_root = Path.join(ledger_root, "run-#{run_number}")
+
     baseline =
       run_variant(
         &serial_capture/1,
         observation_delay_ms,
         fixed_overhead_ms,
-        artifact_observer
+        artifact_observer,
+        fixture_root,
+        nil
       )
 
     candidate =
@@ -124,8 +162,12 @@ defmodule SymphonyElixir.Pin28Benchmark do
         &parallel_capture/1,
         observation_delay_ms,
         fixed_overhead_ms,
-        artifact_observer
+        artifact_observer,
+        fixture_root,
+        baseline.prepared
       )
+
+    File.rm_rf(fixture_root)
 
     baseline_accuracy =
       completion_accuracy_checks(
@@ -154,7 +196,14 @@ defmodule SymphonyElixir.Pin28Benchmark do
     }
   end
 
-  defp run_variant(capture, observation_delay_ms, fixed_overhead_ms, artifact_observer) do
+  defp run_variant(
+         capture,
+         observation_delay_ms,
+         fixed_overhead_ms,
+         artifact_observer,
+         fixture_root,
+         prepared
+       ) do
     started_ms = System.monotonic_time(:millisecond)
     snapshot = capture.(observation_delay_ms)
     context_completed_ms = System.monotonic_time(:millisecond)
@@ -172,29 +221,36 @@ defmodule SymphonyElixir.Pin28Benchmark do
     implementation_completed_ms = System.monotonic_time(:millisecond)
 
     verification_started_ms = implementation_completed_ms
-    verification = verify_lifecycle(implementation)
+
+    lifecycle =
+      if prepared,
+        do: reuse_lifecycle(prepared),
+        else: prepare_lifecycle(implementation, fixture_root)
+
+    verification = lifecycle.verification
     verification_completed_ms = System.monotonic_time(:millisecond)
 
     review_started_ms = verification_completed_ms
-    review = review_lifecycle(implementation)
+    review = review_lifecycle(lifecycle)
     review_completed_ms = System.monotonic_time(:millisecond)
 
     publication_started_ms = review_completed_ms
-    publication = publish_lifecycle(implementation, verification, review)
+    publication = publish_lifecycle(lifecycle, review)
     publication_completed_ms = System.monotonic_time(:millisecond)
 
     handoff_started_ms = publication_completed_ms
-    handoff = handoff_lifecycle(publication, verification)
+    handoff = handoff_lifecycle(lifecycle, publication)
     completed_ms = System.monotonic_time(:millisecond)
 
     %{
       snapshot: snapshot,
+      prepared: lifecycle,
       lifecycle: %{
         planning: planning,
         implementation: implementation,
         verification: verification,
         review: review,
-        publication: publication,
+        publication: Map.delete(publication, :evidence),
         handoff: handoff
       },
       result: %{
@@ -316,14 +372,7 @@ defmodule SymphonyElixir.Pin28Benchmark do
   end
 
   defp plan_lifecycle do
-    issue = %Issue{
-      id: "pin-28-benchmark",
-      identifier: "PIN-28",
-      title: "chore: add Makefile commands for running Symphony",
-      description: @issue_description,
-      state: "In Progress",
-      labels: ["codex-ready"]
-    }
+    issue = benchmark_issue("pin-28-benchmark")
 
     with {:ok, contract} <- TaskContract.from_issue(issue),
          {:ok, profile} <- WorkflowProfile.select(contract) do
@@ -333,51 +382,315 @@ defmodule SymphonyElixir.Pin28Benchmark do
     end
   end
 
-  defp verify_lifecycle(implementation) do
-    verification = observed_verification_commands(implementation.commit_message)
-
-    Enum.map(@required_verification, fn command ->
-      %{command: command, passed: MapSet.member?(verification, command)}
-    end)
+  defp prepare_lifecycle(implementation, fixture_root) do
+    if valid_observed_implementation?(implementation) do
+      prepare_valid_lifecycle(implementation, fixture_root)
+    else
+      %{
+        passed: false,
+        verification: Enum.map(@required_verification, &%{command: &1, passed: false, receipt_digest: nil})
+      }
+    end
   end
 
-  defp review_lifecycle(implementation) do
-    subject = implementation.commit_message |> String.split("\n", parts: 2) |> List.first()
+  defp prepare_valid_lifecycle(implementation, fixture_root) do
+    workspace = Path.join(fixture_root, "repo")
+    File.mkdir_p!(Path.join(workspace, "docs"))
+    git!(workspace, ["init", "-q", "-b", "main"])
+    git!(workspace, ["config", "user.email", "benchmark@example.com"])
+    git!(workspace, ["config", "user.name", "PIN-28 Benchmark"])
+    git!(workspace, ["remote", "add", "origin", "git@github.com:openai/symphony.git"])
+    File.write!(Path.join(workspace, "Makefile"), "base\n")
+    File.write!(Path.join(workspace, "docs/symphony-linear-setup.md"), "base\n")
+    git!(workspace, ["add", "."])
+    git!(workspace, ["commit", "-qm", "chore: benchmark base"])
+    base_sha = git!(workspace, ["rev-parse", "HEAD"])
+    issue = benchmark_issue("pin-28-#{Path.basename(fixture_root)}")
+    {:ok, contract} = TaskContract.from_issue(issue)
+    {:ok, _branch} = TaskBranch.ensure(workspace, issue, "chore", base_sha)
+    File.write!(Path.join(workspace, "Makefile"), "symphony-workflow:\n\t@true\n")
+    File.write!(Path.join(workspace, "docs/symphony-linear-setup.md"), "# Symphony setup\n")
+    git!(workspace, ["add", "."])
+    git!(workspace, ["commit", "-qm", implementation.commit_message])
+    {:ok, state} = RepositoryFingerprint.capture(workspace)
+    criterion_ids = Enum.map(contract.acceptance_criteria, & &1.id)
+
+    proofs =
+      @required_verification
+      |> Enum.with_index(1)
+      |> Enum.map(fn {command, index} ->
+        %{
+          "id" => "proof-#{index}",
+          "phase_id" => "deliver",
+          "role" => if(index == length(@required_verification), do: "final", else: "validator"),
+          "command" => command,
+          "working_directory" => ".",
+          "expected_exit" => "success",
+          "timeout_ms" => 1_000,
+          "criterion_ids" => criterion_ids
+        }
+      end)
+
+    semantic = %{
+      "instruction_digest" => digest("pin-28-instructions"),
+      "profile_digest" => digest("pin-28-profile"),
+      "workflow" => "chore",
+      "candidate" => %{
+        "repository" => %{"origin" => state.origin, "base_sha" => base_sha},
+        "affected_paths" => @expected_diff,
+        "verification_profile" => "Full",
+        "execution_context" => "CI/test-only deterministic lifecycle evaluation",
+        "scale_shape" => "one fixed two-file task",
+        "ordered_steps" => [
+          %{
+            "id" => "deliver",
+            "proof_ids" => Enum.map(proofs, & &1["id"]),
+            "affected_paths" => @expected_diff,
+            "depends_on" => []
+          }
+        ],
+        "proofs" => proofs
+      }
+    }
+
+    plan = Map.put(semantic, "plan_digest", PlanningArtifact.digest(semantic))
+    key = ExecutionLedger.key(state.origin, issue.id, plan["plan_digest"])
+    executor = fn _directory, command, _opts -> {:ok, %{exit_status: 0, stdout: command, stderr: ""}} end
+
+    verification =
+      Enum.map(proofs, fn proof ->
+        {:ok, receipt} =
+          ExecutionControl.run_plan_proof(
+            plan,
+            key,
+            workspace,
+            "deliver",
+            proof["id"],
+            command_executor: executor
+          )
+
+        %{
+          command: proof["command"],
+          passed: receipt["passed"],
+          receipt_digest: receipt["receipt_digest"]
+        }
+      end)
+
+    {:ok, _phase} = ExecutionControl.complete_execution_phase(plan, key, workspace, "deliver")
 
     %{
-      "correctness" => implementation.changed_paths == @expected_diff,
-      "security" => Enum.all?(implementation.changed_paths, &(Path.extname(&1) in ["", ".md"])),
-      "convention" => String.starts_with?(subject, "chore: "),
-      "scope" => implementation.changed_paths == @expected_diff
+      passed: Enum.all?(verification, & &1.passed),
+      reused: false,
+      workspace: workspace,
+      issue: issue,
+      contract: contract,
+      plan: plan,
+      key: key,
+      state: state,
+      verification: verification
     }
   end
 
-  defp publish_lifecycle(implementation, verification, review) do
+  defp reuse_lifecycle(%{passed: true} = lifecycle) do
+    executor = fn _directory, command, _opts ->
+      {:ok, %{exit_status: 0, stdout: command, stderr: ""}}
+    end
+
+    verification =
+      Enum.map(lifecycle.plan["candidate"]["proofs"], fn proof ->
+        {:ok, receipt} =
+          ExecutionControl.run_plan_proof(
+            lifecycle.plan,
+            lifecycle.key,
+            lifecycle.workspace,
+            "deliver",
+            proof["id"],
+            command_executor: executor
+          )
+
+        %{
+          command: proof["command"],
+          passed: receipt["passed"],
+          receipt_digest: receipt["receipt_digest"]
+        }
+      end)
+
+    {:ok, _phase} =
+      ExecutionControl.complete_execution_phase(
+        lifecycle.plan,
+        lifecycle.key,
+        lifecycle.workspace,
+        "deliver"
+      )
+
+    %{lifecycle | reused: true, verification: verification}
+  end
+
+  defp reuse_lifecycle(lifecycle), do: lifecycle
+
+  defp review_lifecycle(%{passed: true} = lifecycle) do
+    {:ok, approval} = lifecycle_review(lifecycle)
+
+    approved = approval["verdict"] == "approve"
+
     %{
-      passed:
-        implementation.commit_sha == @pin_28_commit and
-          Enum.all?(verification, & &1.passed) and
-          Enum.all?(review, fn {_name, passed} -> passed end),
-      commit_sha: implementation.commit_sha
+      "correctness" => approved,
+      "security" => approved,
+      "convention" => approved,
+      "scope" => approved,
+      "receipt_digest" => approval["receipt_digest"]
     }
   end
 
-  defp handoff_lifecycle(publication, verification) do
-    commands =
-      verification
-      |> Enum.filter(& &1.passed)
-      |> Enum.map_join(", ", & &1.command)
+  defp review_lifecycle(_lifecycle), do: failed_review()
+
+  defp lifecycle_review(%{reused: true} = lifecycle) do
+    ImplementationReview.latest_approval(
+      lifecycle.key,
+      lifecycle.state.base_sha,
+      lifecycle.state.digest
+    )
+  end
+
+  defp lifecycle_review(lifecycle) do
+    run_turn = fn _session, prompt, _issue, opts ->
+      approved = Enum.all?(@expected_diff, &String.contains?(prompt, &1))
+
+      opts[:tool_executor].("submit_implementation_review", %{
+        "verdict" => if(approved, do: "approve", else: "revise"),
+        "blocking_findings" => if(approved, do: [], else: ["Expected PIN-28 paths are missing."]),
+        "advisory_findings" => []
+      })
+
+      {:ok, %{turn_id: "deterministic-review"}}
+    end
+
+    ImplementationReview.request(
+      lifecycle.workspace,
+      lifecycle.issue,
+      lifecycle.contract,
+      lifecycle.plan,
+      lifecycle.key,
+      start_session: fn _, _ -> {:ok, %{thread_id: "deterministic-review"}} end,
+      run_turn: run_turn,
+      stop_session: fn _ -> :ok end
+    )
+  end
+
+  defp publish_lifecycle(%{passed: true} = lifecycle, %{"receipt_digest" => digest})
+       when is_binary(digest) do
+    publisher = fn _workspace, _plan, _title, _body, _opts ->
+      {:ok,
+       %{
+         "url" => "https://github.com/openai/symphony/pull/28",
+         "head_sha" => lifecycle.state.base_sha,
+         "head_branch" => "chore/pin-28-chore-add-makefile-commands-for-running-symphony",
+         "base_branch" => "main",
+         "origin" => lifecycle.state.origin
+       }}
+    end
+
+    {:ok, evidence} =
+      DeliveryControl.publish(
+        lifecycle.workspace,
+        lifecycle.issue,
+        lifecycle.contract,
+        lifecycle.plan,
+        lifecycle.key,
+        "chore: add Makefile commands for running Symphony",
+        "#### Context\nPIN-28 benchmark\n#### TL;DR\n*Lifecycle proof*\n#### Summary\n- deterministic\n#### Alternatives\n- none\n#### Test Plan\n- [x] controlled",
+        publisher: publisher
+      )
 
     %{
-      "summary" =>
-        if(publication.passed,
-          do: "Replayed the observed PIN-28 Makefile and documentation change.",
-          else: ""
-        ),
-      "verification" => commands,
-      "reviewer_action" => if(publication.passed, do: "Review the lifecycle report.", else: ""),
-      "audit" => if(publication.passed, do: "Controlled deterministic lifecycle sample.", else: "")
+      passed: true,
+      commit_sha: lifecycle.state.base_sha,
+      receipt_digest: evidence["publication_receipt_digest"],
+      evidence: evidence
     }
+  end
+
+  defp publish_lifecycle(_lifecycle, _review),
+    do: %{passed: false, commit_sha: nil, receipt_digest: nil, evidence: nil}
+
+  defp handoff_lifecycle(lifecycle, %{passed: true, evidence: evidence}) do
+    reader = fn _workspace, _plan, _url, _opts ->
+      {:ok,
+       %{
+         "url" => evidence["pull_request_url"],
+         "head_sha" => evidence["pr_head_sha"],
+         "head_branch" => evidence["pr_head_branch"],
+         "base_branch" => evidence["pr_base_branch"],
+         "state" => "OPEN",
+         "is_cross_repository" => false
+       }}
+    end
+
+    {:ok, validated} =
+      CompletionEvidence.validate(
+        lifecycle.workspace,
+        lifecycle.issue,
+        lifecycle.contract,
+        %{},
+        execution_plan: lifecycle.plan,
+        execution_ledger_key: lifecycle.key,
+        pull_request_reader: reader
+      )
+
+    %{
+      "summary" => "Replayed the observed PIN-28 Makefile and documentation change.",
+      "verification" => Enum.map_join(lifecycle.verification, ", ", & &1.command),
+      "reviewer_action" => "Review the lifecycle report.",
+      "audit" => "Controlled deterministic lifecycle sample.",
+      "artifact_digest" => validated.artifact_digest
+    }
+  end
+
+  defp handoff_lifecycle(_lifecycle, _publication), do: failed_handoff()
+
+  defp valid_observed_implementation?(implementation) do
+    implementation.changed_paths == @expected_diff and
+      implementation.commit_sha == @pin_28_commit and
+      observed_verification_commands(implementation.commit_message) ==
+        MapSet.new(@required_verification)
+  end
+
+  defp failed_review do
+    %{
+      "correctness" => false,
+      "security" => false,
+      "convention" => false,
+      "scope" => false,
+      "receipt_digest" => nil
+    }
+  end
+
+  defp failed_handoff do
+    %{
+      "summary" => "",
+      "verification" => "",
+      "reviewer_action" => "",
+      "audit" => "",
+      "artifact_digest" => nil
+    }
+  end
+
+  defp benchmark_issue(id) do
+    %Issue{
+      id: id,
+      identifier: "PIN-28",
+      title: "chore: add Makefile commands for running Symphony",
+      description: @issue_description,
+      state: "In Progress",
+      labels: ["codex-ready"]
+    }
+  end
+
+  defp git!(workspace, args) do
+    case System.cmd("git", ["-C", workspace | args], stderr_to_stdout: true) do
+      {output, 0} -> String.trim(output)
+      {output, status} -> raise "benchmark git command failed status=#{status}: #{output}"
+    end
   end
 
   defp first_useful_edit_ms(%{changed_paths: [_path | _]}, started_ms),

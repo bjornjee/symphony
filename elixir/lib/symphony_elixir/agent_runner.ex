@@ -24,6 +24,7 @@ defmodule SymphonyElixir.AgentRunner do
   alias SymphonyElixir.RunAudit
   alias SymphonyElixir.TaskBranch
   alias SymphonyElixir.Tracker
+  alias SymphonyElixir.VerificationProfile
   alias SymphonyElixir.WorkflowProfile
   alias SymphonyElixir.Workspace
 
@@ -158,7 +159,13 @@ defmodule SymphonyElixir.AgentRunner do
               plan_digest: manifest["plan_digest"]
             })
 
-            send_worker_runtime_info(codex_update_recipient, issue, worker_host, workspace, RunAudit.paths(workspace))
+            send_worker_runtime_info(
+              codex_update_recipient,
+              issue,
+              worker_host,
+              workspace,
+              RunAudit.paths(workspace, issue)
+            )
 
             try do
               run_with_workspace(workspace, issue, codex_update_recipient, opts, worker_host)
@@ -1030,8 +1037,6 @@ defmodule SymphonyElixir.AgentRunner do
          authority,
          worker_host
        ) do
-    approved_paths = MapSet.new(execution_plan_affected_paths(plan))
-
     with :ok <- validate_registered_authority(plan, issue, session, authority),
          :ok <-
            TaskBranch.validate(
@@ -1041,14 +1046,17 @@ defmodule SymphonyElixir.AgentRunner do
              execution_plan_base_sha(plan),
              worker_host
            ),
-         {:ok, [_changed | _] = changed_paths} <-
+         {:ok, changed_paths} <-
            RepositoryFingerprint.changed_paths(
              workspace,
              execution_plan_base_sha(plan),
              worker_host
            ),
          true <-
-           MapSet.subset?(MapSet.new(changed_paths), approved_paths) ||
+           Enum.all?(
+             changed_paths,
+             &VerificationProfile.approved_path?(&1, execution_plan_affected_paths(plan))
+           ) ||
              {:error, :registered_execution_plan_scope_drift} do
       :ok
     end

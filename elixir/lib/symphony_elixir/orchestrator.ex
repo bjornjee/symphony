@@ -1110,7 +1110,6 @@ defmodule SymphonyElixir.Orchestrator do
     case Task.Supervisor.start_child(SymphonyElixir.TaskSupervisor, fn ->
            AgentRunner.run(issue, recipient,
              attempt: attempt,
-             dispatch_started_at: dispatch_started_at,
              dispatch_started_timing: dispatch_started_timing,
              worker_host: worker_host,
              task_contract: contract

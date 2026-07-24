@@ -306,6 +306,31 @@ defmodule SymphonyElixir.RunAuditTest do
     refute File.read!(RunAudit.paths(context.workspace).audit_events_path) =~ "SECRET"
   end
 
+  test "persists a dashboard-readable audit when the worker workspace is remote", context do
+    remote_workspace = "/remote/workspaces/#{context.task.identifier}"
+    RunAudit.start(remote_workspace, context.task, %{worker_host: "worker-a"})
+    RunAudit.append(remote_workspace, context.task, :workspace_prepared, %{status: "completed"})
+
+    paths = RunAudit.paths(remote_workspace, context.task)
+    assert File.exists?(paths.audit_events_path)
+    assert {:ok, %{verification_profile: nil}} = RunAudit.summary_path(paths.audit_events_path)
+
+    on_exit(fn -> File.rm_rf(Path.dirname(paths.audit_events_path)) end)
+  end
+
+  test "compacts noisy history before the audit exceeds its summary bound", context do
+    path = RunAudit.paths(context.workspace).audit_events_path
+    filler = Jason.encode!(%{"event" => "agent_message", "detail" => String.duplicate("x", 180)}) <> "\n"
+    File.write!(path, :binary.copy(filler, div(4_194_304, byte_size(filler))))
+
+    RunAudit.append(context.workspace, context.task, :verification_profile_selected, %{
+      verification_profile: "Full"
+    })
+
+    assert File.stat!(path).size <= 4_194_304
+    assert {:ok, %{verification_profile: "Full"}} = RunAudit.summary(context.workspace)
+  end
+
   defp events(workspace) do
     workspace
     |> RunAudit.paths()

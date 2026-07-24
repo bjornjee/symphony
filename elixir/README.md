@@ -227,6 +227,8 @@ The observability UI now runs on a minimal Phoenix stack:
   when startup capability diagnostics are available
 - Audit diagnostics show the selected verification profile, proof-cache hits and misses, slowest
   completed phase, and budget overruns during active runs and after final summary emission
+- Run audits compact noisy history before the bounded reader limit; remote-worker runs expose a
+  central audit mirror to the dashboard when their workspace path is not locally readable
 
 ## Project Layout
 

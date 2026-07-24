@@ -175,4 +175,34 @@ defmodule SymphonyElixir.RepositoryFingerprintTest do
 
     refute final.digest == initial.digest
   end
+
+  test "changed paths preserve spaces and newlines", %{workspace: workspace} do
+    {base_sha, 0} = System.cmd("git", ["-C", workspace, "rev-parse", "HEAD"])
+    spaced = "path with spaces.txt"
+    newline = "path\nwith-newline.txt"
+    File.write!(Path.join(workspace, spaced), "spaced\n")
+    File.write!(Path.join(workspace, newline), "newline\n")
+
+    assert {:ok, paths} = RepositoryFingerprint.changed_paths(workspace, String.trim(base_sha))
+    assert paths == Enum.sort([newline, spaced])
+  end
+
+  test "changed paths include both sides of a dirty rename", %{workspace: workspace} do
+    {base_sha, 0} = System.cmd("git", ["-C", workspace, "rev-parse", "HEAD"])
+    renamed = "renamed tracked.txt"
+    System.cmd("git", ["-C", workspace, "mv", "tracked.txt", renamed])
+
+    assert {:ok, paths} = RepositoryFingerprint.changed_paths(workspace, String.trim(base_sha))
+    assert paths == Enum.sort(["tracked.txt", renamed])
+  end
+
+  test "changed paths include both sides of a committed rename", %{workspace: workspace} do
+    {base_sha, 0} = System.cmd("git", ["-C", workspace, "rev-parse", "HEAD"])
+    renamed = "committed rename.txt"
+    System.cmd("git", ["-C", workspace, "mv", "tracked.txt", renamed])
+    System.cmd("git", ["-C", workspace, "commit", "-qm", "chore: rename tracked file"])
+
+    assert {:ok, paths} = RepositoryFingerprint.changed_paths(workspace, String.trim(base_sha))
+    assert paths == Enum.sort(["tracked.txt", renamed])
+  end
 end

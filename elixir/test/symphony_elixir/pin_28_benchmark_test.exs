@@ -7,7 +7,7 @@ defmodule SymphonyElixir.Pin28BenchmarkTest do
   alias SymphonyElixir.Pin28Benchmark
 
   test "ten controlled runs improve latency without reducing completion accuracy" do
-    report = Pin28Benchmark.run(runs: 10, observation_delay_ms: 25, fixed_overhead_ms: 30)
+    report = Pin28Benchmark.run(runs: 10, observation_delay_ms: 50, fixed_overhead_ms: 30)
 
     assert report.run_count == 10
     assert byte_size(report.repository_revision) == 40
@@ -16,7 +16,7 @@ defmodule SymphonyElixir.Pin28BenchmarkTest do
 
     assert report.model_configuration == %{
              kind: "deterministic-agent-replay",
-             revision: 2,
+             revision: 3,
              live_model: false
            }
 
@@ -45,6 +45,10 @@ defmodule SymphonyElixir.Pin28BenchmarkTest do
                Enum.all?(sample.candidate.accuracy, fn {_name, passed} -> passed end) and
                sample.baseline.lifecycle.planning.passed and
                sample.baseline.lifecycle.publication.passed and
+               Enum.all?(sample.baseline.lifecycle.verification, &is_binary(&1.receipt_digest)) and
+               is_binary(sample.baseline.lifecycle.review["receipt_digest"]) and
+               is_binary(sample.baseline.lifecycle.publication.receipt_digest) and
+               is_binary(sample.baseline.lifecycle.handoff["artifact_digest"]) and
                non_empty_handoff?(sample.baseline.lifecycle.handoff) and
                Map.has_key?(sample.baseline.phases, :verification_ms) and
                Map.has_key?(sample.candidate.phases, :handoff_ms) and

@@ -1600,7 +1600,9 @@ bootstrap, context loading, research/preflight, planning, implementation, verifi
 Git/PR publication, and handoff when those phases occur. External attribution MUST include a
 non-empty wait reason. The audit SHOULD record the first useful edit, selected and effective
 verification profiles, proof-cache outcome, and budget overrun. A compact finalized summary SHOULD
-identify the slowest phase without requiring log reconstruction.
+identify the slowest phase without requiring log reconstruction. Audit persistence MUST remain
+bounded; when a worker workspace is not locally readable, the orchestrator MUST expose a bounded
+central audit path to the dashboard instead of silently losing the worker's events.
 
 ### 13.7 OPTIONAL HTTP Server Extension
 

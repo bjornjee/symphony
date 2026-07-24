@@ -615,7 +615,13 @@ defmodule SymphonyElixir.ExecutionControl do
     with {:ok, changed_paths} <-
            RepositoryFingerprint.changed_paths(workspace, execution_base(plan), Keyword.get(opts, :worker_host)),
          true <-
-           Enum.all?(changed_paths, &approved_path?(&1, get_in(plan, ["candidate", "affected_paths"]))) ||
+           Enum.all?(
+             changed_paths,
+             &VerificationProfile.approved_path?(
+               &1,
+               get_in(plan, ["candidate", "affected_paths"])
+             )
+           ) ||
              {:error, :surgical_review_scope_drift} do
       receipt = %{
         "plan_digest" => plan["plan_digest"],
@@ -690,14 +696,14 @@ defmodule SymphonyElixir.ExecutionControl do
       |> Kernel.++([Enum.find(phases, &(&1["id"] == phase_id))])
       |> Enum.flat_map(& &1["affected_paths"])
 
-    case Enum.find(changed, &(not approved_path?(&1, allowed))) do
+    case Enum.find(changed, &(not VerificationProfile.approved_path?(&1, allowed))) do
       nil -> :ok
       path -> {:error, {:changed_path_outside_phase_scope, path}}
     end
   end
 
   defp paths_within_approved_scope(changed, allowed) do
-    case Enum.find(changed, &(not approved_path?(&1, allowed))) do
+    case Enum.find(changed, &(not VerificationProfile.approved_path?(&1, allowed))) do
       nil -> :ok
       path -> {:error, {:changed_path_outside_approved_scope, path}}
     end
@@ -706,12 +712,6 @@ defmodule SymphonyElixir.ExecutionControl do
   defp approved_paths(%{"candidate" => %{"affected_paths" => paths}}), do: paths
   defp approved_paths(%{"affected_paths" => paths}), do: paths
   defp approved_paths(_plan), do: []
-
-  defp approved_path?(changed_path, allowed) do
-    Enum.any?(allowed, fn path ->
-      changed_path == path or String.starts_with?(changed_path, String.trim_trailing(path, "/") <> "/")
-    end)
-  end
 
   defp proof_receipts_in_order(receipts) do
     timestamps = Enum.map(receipts, & &1["recorded_at"])

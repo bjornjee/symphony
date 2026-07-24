@@ -60,12 +60,13 @@ defmodule SymphonyElixir.VerificationProfile do
   defp approved_paths(%{"candidate" => %{"affected_paths" => paths}}) when is_list(paths), do: paths
   defp approved_paths(_plan), do: []
 
-  defp approved_path?(changed_path, allowed) when is_binary(changed_path) do
+  @spec approved_path?(String.t(), [String.t()]) :: boolean()
+  def approved_path?(changed_path, allowed) when is_binary(changed_path) and is_list(allowed) do
     Enum.any?(allowed, fn path ->
       changed_path == path or
         String.starts_with?(changed_path, String.trim_trailing(path, "/") <> "/")
     end)
   end
 
-  defp approved_path?(_changed_path, _allowed), do: false
+  def approved_path?(_changed_path, _allowed), do: false
 end
