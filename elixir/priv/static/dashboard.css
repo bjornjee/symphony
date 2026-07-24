@@ -19,6 +19,12 @@
   --stale-soft: #f5f0e5;
   --offline: #59605c;
   --offline-soft: #eceeec;
+  --log-surface: #171a18;
+  --log-border: #2d3230;
+  --log-ink: #e8ece9;
+  --log-muted: #aeb8b2;
+  --log-subtle: #929b96;
+  --log-line: rgb(255 255 255 / 6%);
   --shadow: 0 1px 2px rgba(20, 28, 23, 0.05);
 }
 
@@ -528,6 +534,98 @@ a {
 
 .detail-facts dd {
   font-size: 0.83rem;
+}
+
+.log-section {
+  padding: 0.95rem 0;
+  border-top: 1px solid var(--line);
+}
+
+.log-heading {
+  padding-bottom: 0.7rem;
+}
+
+.log-count {
+  display: flex;
+  gap: 0.55rem;
+  align-items: center;
+  color: var(--muted);
+  font-size: 0.72rem;
+  font-weight: 700;
+}
+
+.log-follow-state {
+  display: inline-flex;
+  gap: 0.35rem;
+  align-items: center;
+}
+
+.log-follow-state::before {
+  width: 0.42rem;
+  height: 0.42rem;
+  border-radius: 50%;
+  background: var(--running);
+  content: "";
+}
+
+.log-follow-state[data-log-follow-state="paused"]::before {
+  background: var(--muted);
+}
+
+.log-tail {
+  max-height: 15rem;
+  margin: 0;
+  padding: 0.35rem 0;
+  overflow: auto;
+  overscroll-behavior: contain;
+  border: 1px solid var(--log-border);
+  border-radius: 7px;
+  background: var(--log-surface);
+  color: var(--log-ink);
+  list-style: none;
+  scrollbar-gutter: stable;
+}
+
+.log-line {
+  display: grid;
+  grid-template-columns: 4.6rem 6.5rem minmax(0, 1fr);
+  gap: 0.65rem;
+  min-width: 0;
+  padding: 0.34rem 0.65rem;
+  font-family: var(--font-mono);
+  font-size: 0.72rem;
+  line-height: 1.45;
+}
+
+.log-line + .log-line {
+  border-top: 1px solid var(--log-line);
+}
+
+.log-time {
+  color: var(--log-subtle);
+}
+
+.log-event {
+  overflow: hidden;
+  color: var(--log-muted);
+  font-weight: 700;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.log-message {
+  min-width: 0;
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
+}
+
+.log-empty {
+  margin: 0;
+  padding: 1rem;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  color: var(--muted);
+  font-size: 0.84rem;
 }
 
 .timeline-section {

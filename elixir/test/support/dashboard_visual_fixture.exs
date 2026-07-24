@@ -13,27 +13,13 @@ defmodule SymphonyElixir.DashboardVisualFixture.Orchestrator do
 
   @impl true
   def init(:ok) do
-    audit_path =
-      Path.join(
-        System.tmp_dir!(),
-        "symphony-dashboard-visual-#{System.unique_integer([:positive])}.jsonl"
-      )
+    audit_paths = %{
+      running: write_audit_file!("running", "Streaming implementation output"),
+      retrying: write_audit_file!("retrying", "Previous attempt output"),
+      blocked: write_audit_file!("blocked", "Operator input context")
+    }
 
-    events =
-      Enum.map(1..60, fn index ->
-        Jason.encode!(%{
-          "event" => "agent_message",
-          "timestamp" =>
-            DateTime.utc_now()
-            |> DateTime.add(index - 90, :second)
-            |> DateTime.truncate(:second)
-            |> DateTime.to_iso8601(),
-          "detail" => "Completed bounded dashboard activity #{index}"
-        })
-      end)
-
-    File.write!(audit_path, Enum.join(events, "\n"))
-    {:ok, %{mode: :mixed, revision: 0, audit_path: audit_path}}
+    {:ok, %{mode: :mixed, revision: 0, audit_paths: audit_paths}}
   end
 
   @impl true
@@ -58,14 +44,49 @@ defmodule SymphonyElixir.DashboardVisualFixture.Orchestrator do
 
   def handle_call(:publish_update, _from, state) do
     next_state = %{state | revision: state.revision + 1}
+
+    File.write!(
+      state.audit_paths.running,
+      Jason.encode!(%{
+        "event" => "agent_message",
+        "timestamp" => DateTime.utc_now() |> DateTime.truncate(:second) |> DateTime.to_iso8601(),
+        "detail" => "Live output revision #{next_state.revision}: completed bounded dashboard update"
+      }) <> "\n",
+      [:append]
+    )
+
     :ok = SymphonyElixirWeb.ObservabilityPubSub.broadcast_update()
     {:reply, :ok, next_state}
   end
 
   @impl true
   def terminate(_reason, state) do
-    File.rm(state.audit_path)
+    Enum.each(state.audit_paths, fn {_status, path} -> File.rm(path) end)
     :ok
+  end
+
+  defp write_audit_file!(status, message) do
+    path =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-dashboard-visual-#{status}-#{System.unique_integer([:positive])}.jsonl"
+      )
+
+    events =
+      Enum.map(1..60, fn index ->
+        Jason.encode!(%{
+          "event" => "agent_message",
+          "timestamp" =>
+            DateTime.utc_now()
+            |> DateTime.add(index - 90, :second)
+            |> DateTime.truncate(:second)
+            |> DateTime.to_iso8601(),
+          "detail" => "#{message} #{index}"
+        })
+      end)
+
+    File.write!(path, Enum.join(events, "\n") <> "\n")
+    path
   end
 
   defp snapshot(:empty, _state), do: empty_snapshot()
@@ -100,7 +121,7 @@ defmodule SymphonyElixir.DashboardVisualFixture.Orchestrator do
       worker_host: "fixture-worker",
       workspace_path: "/tmp/symphony/PIN-RUNNING",
       audit_path: "/tmp/symphony/PIN-RUNNING/.symphony/run-audit.md",
-      audit_events_path: state.audit_path,
+      audit_events_path: state.audit_paths.running,
       capability_diagnostics: nil
     }
 
@@ -130,7 +151,7 @@ defmodule SymphonyElixir.DashboardVisualFixture.Orchestrator do
           worker_host: "fixture-worker",
           workspace_path: "/tmp/symphony/PIN-RETRYING",
           audit_path: nil,
-          audit_events_path: nil,
+          audit_events_path: state.audit_paths.retrying,
           capability_diagnostics: nil
         }
       ],
@@ -144,7 +165,7 @@ defmodule SymphonyElixir.DashboardVisualFixture.Orchestrator do
           worker_host: "fixture-worker",
           workspace_path: "/tmp/symphony/PIN-BLOCKED",
           audit_path: "/tmp/symphony/PIN-BLOCKED/.symphony/run-audit.md",
-          audit_events_path: nil,
+          audit_events_path: state.audit_paths.blocked,
           capability_diagnostics: nil,
           session_id: "fixture-blocked-session",
           blocked_at: DateTime.add(now, -45, :second),
@@ -193,7 +214,7 @@ defmodule SymphonyElixir.DashboardVisualFixture.Orchestrator do
       codex_output_tokens: 3_201,
       codex_total_tokens: 45_301 + state.revision,
       audit_path: "/tmp/symphony/#{Keyword.fetch!(opts, :identifier)}/.symphony/run-audit.md",
-      audit_events_path: state.audit_path,
+      audit_events_path: state.audit_paths.running,
       capability_diagnostics: %{
         browser_path: %{
           selected: "playwright_headless",

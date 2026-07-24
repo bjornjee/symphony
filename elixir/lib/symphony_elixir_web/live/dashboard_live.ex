@@ -47,7 +47,11 @@ defmodule SymphonyElixirWeb.DashboardLive do
   @impl true
   def handle_info(:runtime_tick, socket) do
     schedule_runtime_tick()
-    {:noreply, assign(socket, :now, DateTime.utc_now())}
+
+    {:noreply,
+     socket
+     |> refresh_selected_agent_detail()
+     |> assign(:now, DateTime.utc_now())}
   end
 
   @impl true
@@ -97,6 +101,7 @@ defmodule SymphonyElixirWeb.DashboardLive do
             <p class="message-kicker">Runtime unavailable</p>
             <h2>Snapshot unavailable</h2>
             <p><strong><%= @payload.error.code %>:</strong> <%= @payload.error.message %></p>
+            <p>Symphony retries automatically. Check the runtime process if this state persists.</p>
           </section>
         <% @agents == [] and is_nil(@selected_agent) -> %>
           <section class="dashboard-message dashboard-empty" role="status">
@@ -237,6 +242,7 @@ defmodule SymphonyElixirWeb.DashboardLive do
         <div class="attention-note attention-note-neutral" role="status">
           <strong>Agent unavailable</strong>
           <p>This agent is no longer present in the current runtime snapshot.</p>
+          <p><strong>Next action:</strong> <%= @agent.next_action %>.</p>
         </div>
       <% else %>
         <section class="current-activity" aria-labelledby="current-activity-title">
@@ -269,6 +275,45 @@ defmodule SymphonyElixirWeb.DashboardLive do
           </div>
         <% end %>
       <% end %>
+
+      <section class="log-section" aria-labelledby="log-title">
+        <div class="panel-heading log-heading">
+          <div>
+            <p class="panel-kicker">Selected session</p>
+            <h3 id="log-title">Live log tail</h3>
+          </div>
+          <span class="log-count">
+            <span
+              id="log-follow-state"
+              class="log-follow-state"
+              data-log-follow-state="following"
+              role="status"
+              aria-live="polite"
+            >Following</span>
+            <span class="numeric"><%= length(@agent.log_tail) %></span>
+          </span>
+        </div>
+
+        <ol
+          id="agent-detail-log"
+          class="log-tail"
+          role="log"
+          aria-labelledby="log-title"
+          aria-live="off"
+          tabindex="0"
+        >
+          <li :for={entry <- @agent.log_tail} class="log-line">
+            <time class="log-time mono" datetime={entry.at} title={entry.at}>
+              <%= log_time(entry.at) %>
+            </time>
+            <span class="log-event"><%= log_event(entry.event) %></span>
+            <span class="log-message"><%= entry.message %></span>
+          </li>
+        </ol>
+        <p :if={@agent.log_tail == []} class="log-empty">
+          No audit output is available for this session yet.
+        </p>
+      </section>
 
       <dl class="detail-facts">
         <div>
@@ -414,6 +459,15 @@ defmodule SymphonyElixirWeb.DashboardLive do
     |> Map.put(:next_action, "Wait for the runtime to report the agent again")
   end
 
+  defp refresh_selected_agent_detail(%{assigns: %{selected_agent_id: nil}} = socket), do: socket
+
+  defp refresh_selected_agent_detail(socket) do
+    case Enum.find(socket.assigns.agents, &(&1.id == socket.assigns.selected_agent_id)) do
+      nil -> socket
+      agent -> assign(socket, :selected_agent, Presenter.dashboard_detail(agent))
+    end
+  end
+
   defp dashboard_state(%{error: _error}, _agents), do: "error"
   defp dashboard_state(_payload, []), do: "empty"
   defp dashboard_state(_payload, _agents), do: "ready"
@@ -546,6 +600,24 @@ defmodule SymphonyElixirWeb.DashboardLive do
   defp rate_limit_summary(nil), do: "Not reported"
   defp rate_limit_summary(rate_limits) when map_size(rate_limits) == 0, do: "Not reported"
   defp rate_limit_summary(_rate_limits), do: "Available in the current runtime snapshot"
+
+  defp log_time(nil), do: "--:--:--"
+
+  defp log_time(timestamp) when is_binary(timestamp) do
+    case DateTime.from_iso8601(timestamp) do
+      {:ok, datetime, _offset} ->
+        datetime
+        |> DateTime.to_time()
+        |> Time.truncate(:second)
+        |> Time.to_iso8601()
+
+      _ ->
+        timestamp
+    end
+  end
+
+  defp log_event(event) when is_binary(event), do: String.replace(event, "_", " ")
+  defp log_event(_event), do: "activity"
 
   defp dom_id(id), do: String.replace(id, ":", "-")
 

@@ -17,6 +17,7 @@ const viewports = [
 
 const screenshotStates = [
   "running",
+  "live-log",
   "retrying",
   "blocked",
   "stale",
@@ -129,18 +130,30 @@ test("dashboard states and live interactions remain observable", async ({page, r
 
     await gotoReady(page, request);
     await expect(page.locator("#agent-issue-running")).toBeVisible();
+    await expect(page.locator("#agent-detail-log .log-line")).toHaveCount(50);
+    await expect(
+      page.locator("#agent-detail-log").getByText("Streaming implementation output 60")
+    ).toBeVisible();
     await expectNoHorizontalOverflow(page);
     await captureState(page, "running", viewport);
+    await page.locator("#agent-detail-log").scrollIntoViewIfNeeded();
+    await captureState(page, "live-log", viewport);
 
     await page.locator("#agent-issue-retrying").click();
     await expect(page.locator("#agent-detail")).toHaveAttribute("data-agent-status", "retrying");
     await expect(page.getByText("Retry attempt 3")).toBeVisible();
+    await expect(
+      page.locator("#agent-detail-log").getByText("Previous attempt output 60")
+    ).toBeVisible();
     await expectNoHorizontalOverflow(page);
     await captureState(page, "retrying", viewport);
 
     await page.locator("#agent-issue-blocked").click();
     await expect(page.locator("#agent-detail")).toHaveAttribute("data-agent-status", "blocked");
     await expect(page.getByText("Approval or input needed").last()).toBeVisible();
+    await expect(
+      page.locator("#agent-detail-log").getByText("Operator input context 60")
+    ).toBeVisible();
     await expectNoHorizontalOverflow(page);
     await captureState(page, "blocked", viewport);
 
@@ -212,30 +225,82 @@ test("dashboard states and live interactions remain observable", async ({page, r
 
   await page.goto("/", {waitUntil: "domcontentloaded"});
   await expect(page.locator("#dashboard-root")).toHaveAttribute("data-dashboard-state", "ready");
+  await tabTo(page, "agent-detail-log");
+
+  const logKeyboardStart = await page
+    .locator("#agent-detail-log")
+    .evaluate((element) => element.scrollTop);
+
+  await page.keyboard.press("PageUp");
+
+  await expect
+    .poll(() => page.locator("#agent-detail-log").evaluate((element) => element.scrollTop))
+    .toBeLessThan(logKeyboardStart);
+
+  await page.goto("/", {waitUntil: "domcontentloaded"});
+  await expect(page.locator("#dashboard-root")).toHaveAttribute("data-dashboard-state", "ready");
   await tabTo(page, "agent-issue-running");
   await page.keyboard.press("Enter");
 
   const timeline = page.locator("#agent-detail-timeline");
-  await expect(timeline.locator("li")).toHaveCount(50);
+  const logTail = page.locator("#agent-detail-log");
+  const logFollowState = page.locator("[data-log-follow-state]");
+  await expect(timeline.locator("li")).toHaveCount(8);
+  await expect(logTail.locator("li")).toHaveCount(50);
   await timeline.evaluate((element) => {
     element.scrollTop = 140;
   });
+  await logTail.evaluate((element) => {
+    element.scrollTop = element.scrollHeight;
+  });
+  await expect(logFollowState).toHaveText("Following");
 
   const beforeUpdate = await page.evaluate(() => ({
     activeElementId: document.activeElement?.id,
-    scrollTop: document.querySelector("#agent-detail-timeline")?.scrollTop
+    scrollTop: document.querySelector("#agent-detail-timeline")?.scrollTop,
+    logDistanceFromBottom: (() => {
+      const log = document.querySelector("#agent-detail-log");
+      return log ? log.scrollHeight - log.clientHeight - log.scrollTop : null;
+    })()
   }));
 
   await publishFixtureUpdate(request);
   await expect(page.locator("#current-activity-title")).toContainText("revision 1");
+  await expect(logTail.locator(".log-line").last()).toContainText(
+    "Live output revision 1: completed bounded dashboard update"
+  );
 
   const afterUpdate = await page.evaluate(() => ({
     activeElementId: document.activeElement?.id,
-    scrollTop: document.querySelector("#agent-detail-timeline")?.scrollTop
+    scrollTop: document.querySelector("#agent-detail-timeline")?.scrollTop,
+    logDistanceFromBottom: (() => {
+      const log = document.querySelector("#agent-detail-log");
+      return log ? log.scrollHeight - log.clientHeight - log.scrollTop : null;
+    })()
   }));
 
   expect(afterUpdate.activeElementId).toBe(beforeUpdate.activeElementId);
   expect(afterUpdate.scrollTop).toBe(beforeUpdate.scrollTop);
+  expect(afterUpdate.logDistanceFromBottom).toBeLessThanOrEqual(24);
+
+  await logTail.evaluate((element) => {
+    element.scrollTop = 60;
+  });
+  const pausedLogScrollTop = await logTail.evaluate((element) => element.scrollTop);
+  await expect(logFollowState).toHaveText("Paused");
+
+  await publishFixtureUpdate(request);
+  await expect(page.locator("#current-activity-title")).toContainText("revision 2");
+  await expect(logTail.locator(".log-line").last()).toContainText(
+    "Live output revision 2: completed bounded dashboard update"
+  );
+  expect(await logTail.evaluate((element) => element.scrollTop)).toBe(pausedLogScrollTop);
+  await expect(logFollowState).toHaveText("Paused");
+
+  await page.locator("#agent-issue-retrying").click();
+  await expect(logTail.locator(".log-line").last()).toBeInViewport();
+  await expect(logFollowState).toHaveText("Following");
+  await page.locator("#agent-issue-running").click();
 
   await setFixtureState(request, "transitioned");
   await expect(page.locator("#agent-detail")).toHaveAttribute("data-agent-status", "retrying");
@@ -284,11 +349,15 @@ Preservation gate state: PASS
 | Narrow render 390x844 | PASS | All nine named states rendered within the viewport. |
 | Keyboard-only selection | PASS | Tab reached retrying agent and Enter selected it. |
 | Visible focus | PASS | Computed focus outline was ${focusStyle.width} ${focusStyle.style} ${focusStyle.color}. |
+| Keyboard log reading | PASS | Tab focused the named log region and Page Up scrolled older output. |
 | PubSub selection preservation | PASS | Selected ID remained agent-issue-running. |
 | Focus identity preservation | PASS | activeElement remained ${afterUpdate.activeElementId}. |
 | Status transition preservation | PASS | Selected issue and focus survived running → retrying. |
 | Clipboard outcomes | PASS | Successful and rejected writes produced visible guidance without moving focus. |
 | Reading position preservation | PASS | timeline scrollTop remained ${afterUpdate.scrollTop}. |
+| Live log selection | PASS | Running, retrying, and blocked agents exposed their own bounded audit tail. |
+| Live log following | PASS | A newly appended line appeared without navigation and the tail followed while at the bottom. |
+| Paused log reading | PASS | scrollTop remained ${pausedLogScrollTop} after the operator scrolled up and another line arrived. |
 | Live/offline indicator | PASS | Disconnect showed Offline; reconnect restored Live. |
 | Console and page errors | PASS | No console, page, request, or HTTP resource errors. |
 | Named states | PASS | ${screenshotStates.join(", ")} captured at both viewports. |

@@ -7,6 +7,10 @@ defmodule SymphonyElixirWeb.Presenter do
 
   @audit_tail_bytes 64 * 1_024
   @audit_event_limit 50
+  @timeline_event_limit 8
+  @authorization_header ~r/\b(authorization\s*:\s*)(?:(?:bearer|basic)\s+)?[^\s,;]+/i
+  @bearer_token ~r/\b(bearer\s+)[A-Za-z0-9._~+\/=-]+/i
+  @secret_assignment ~r/\b((?:[A-Za-z0-9_-]*(?:api[_-]?key|token|secret|password|signature)[A-Za-z0-9_-]*)\s*[=:]\s*)(?:"[^"]*"|'[^']*'|[^\s&;,]+)/i
 
   @spec state_payload(GenServer.name(), timeout()) :: map()
   def state_payload(orchestrator, snapshot_timeout_ms) do
@@ -93,17 +97,18 @@ defmodule SymphonyElixirWeb.Presenter do
   end
 
   @doc """
-  Adds a bounded recent-event timeline to one selected dashboard agent.
+  Adds bounded recent activity and log output to one selected dashboard agent.
   """
   @spec dashboard_detail(map()) :: map()
   def dashboard_detail(agent) when is_map(agent) do
-    timeline =
+    audit_events =
       agent
       |> Map.get(:audit_events_path)
-      |> read_audit_timeline()
-      |> fallback_timeline(agent)
+      |> read_audit_events()
 
-    Map.put(agent, :timeline, timeline)
+    agent
+    |> Map.put(:timeline, audit_events |> Enum.take(-@timeline_event_limit) |> fallback_timeline(agent))
+    |> Map.put(:log_tail, audit_events)
   end
 
   defp issue_payload_body(issue_identifier, running, retry, blocked) do
@@ -217,7 +222,7 @@ defmodule SymphonyElixirWeb.Presenter do
     }
   end
 
-  defp read_audit_timeline(path) when is_binary(path) and path != "" do
+  defp read_audit_events(path) when is_binary(path) and path != "" do
     with {:ok, %{size: size}} <- File.stat(path),
          {:ok, data} <- read_audit_tail(path, size) do
       offset = max(size - @audit_tail_bytes, 0)
@@ -233,7 +238,7 @@ defmodule SymphonyElixirWeb.Presenter do
     end
   end
 
-  defp read_audit_timeline(_path), do: []
+  defp read_audit_events(_path), do: []
 
   defp read_audit_tail(path, size) do
     offset = max(size - @audit_tail_bytes, 0)
@@ -269,8 +274,14 @@ defmodule SymphonyElixirWeb.Presenter do
     case Jason.decode(line) do
       {:ok, %{} = event} ->
         at = first_binary(event, ["timestamp", "recorded_at", "at"])
-        kind = first_binary(event, ["event", "type", "method"]) || "activity"
-        message = first_binary(event, ["detail", "message", "summary"]) || kind
+        kind = first_binary(event, ["phase", "event", "type", "method"]) || "activity"
+
+        message =
+          event
+          |> first_binary(["detail", "message", "summary", "command", "method"])
+          |> redact_sensitive()
+          |> append_exit_code(Map.get(event, "exit_code"))
+          |> Kernel.||(kind)
 
         [%{at: at, event: kind, message: message}]
 
@@ -287,6 +298,20 @@ defmodule SymphonyElixirWeb.Presenter do
       end
     end)
   end
+
+  defp append_exit_code(message, exit_code) when is_binary(message) and is_integer(exit_code),
+    do: "#{message} · exit #{exit_code}"
+
+  defp append_exit_code(message, _exit_code), do: message
+
+  defp redact_sensitive(message) when is_binary(message) do
+    message
+    |> String.replace(@authorization_header, "\\1[REDACTED]")
+    |> String.replace(@bearer_token, "\\1[REDACTED]")
+    |> String.replace(@secret_assignment, "\\1[REDACTED]")
+  end
+
+  defp redact_sensitive(message), do: message
 
   defp fallback_timeline([], %{activity_at: at, activity: message, status: status})
        when is_binary(at) and is_binary(message) do

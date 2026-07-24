@@ -63,10 +63,52 @@ defmodule SymphonyElixirWeb.Layouts do
                 };
 
                 this.el.addEventListener("click", this.copyHandler);
+
+                this.updateLogFollowState = function () {
+                  var log = this.el.querySelector("#agent-detail-log");
+                  var indicator = this.el.querySelector("[data-log-follow-state]");
+                  if (!log || !indicator) return;
+
+                  var following =
+                    log.scrollHeight - log.clientHeight - log.scrollTop <= 24;
+                  indicator.dataset.logFollowState = following ? "following" : "paused";
+                  indicator.textContent = following ? "Following" : "Paused";
+                }.bind(this);
+
+                this.logScrollHandler = this.updateLogFollowState;
+                this.bindLogScroll = function () {
+                  var log = this.el.querySelector("#agent-detail-log");
+                  if (this.logElement === log) return;
+
+                  if (this.logElement) {
+                    this.logElement.removeEventListener("scroll", this.logScrollHandler);
+                  }
+
+                  this.logElement = log;
+                  if (this.logElement) {
+                    this.logElement.addEventListener("scroll", this.logScrollHandler, {
+                      passive: true
+                    });
+                  }
+                }.bind(this);
+
+                this.bindLogScroll();
+                var log = this.el.querySelector("#agent-detail-log");
+                if (log) log.scrollTop = log.scrollHeight;
+                this.updateLogFollowState();
+                var detail = this.el.querySelector("#agent-detail");
+                this.selectedAgentId = detail ? detail.dataset.selectedAgent : null;
               },
               beforeUpdate: function () {
                 var timeline = this.el.querySelector("#agent-detail-timeline");
+                var log = this.el.querySelector("#agent-detail-log");
+                var detail = this.el.querySelector("#agent-detail");
                 this.timelineScrollTop = timeline ? timeline.scrollTop : null;
+                this.logScrollTop = log ? log.scrollTop : null;
+                this.logShouldFollow = log
+                  ? log.scrollHeight - log.clientHeight - log.scrollTop <= 24
+                  : false;
+                this.selectedAgentId = detail ? detail.dataset.selectedAgent : null;
                 this.focusedId =
                   this.el.contains(document.activeElement) && document.activeElement.id
                     ? document.activeElement.id
@@ -74,6 +116,8 @@ defmodule SymphonyElixirWeb.Layouts do
               },
               updated: function () {
                 var timelineScrollTop = this.timelineScrollTop;
+                var logScrollTop = this.logScrollTop;
+                var logShouldFollow = this.logShouldFollow;
                 var focusedId = this.focusedId;
 
                 window.requestAnimationFrame(function () {
@@ -82,14 +126,29 @@ defmodule SymphonyElixirWeb.Layouts do
                     timeline.scrollTop = timelineScrollTop;
                   }
 
+                  var log = document.querySelector("#agent-detail-log");
+                  var detail = document.querySelector("#agent-detail");
+                  var selectedAgentId = detail ? detail.dataset.selectedAgent : null;
+                  if (log && logScrollTop !== null) {
+                    log.scrollTop =
+                      logShouldFollow || selectedAgentId !== this.selectedAgentId
+                        ? log.scrollHeight
+                        : logScrollTop;
+                  }
+                  this.bindLogScroll();
+                  this.updateLogFollowState();
+
                   var focused = focusedId ? document.getElementById(focusedId) : null;
                   if (focused && document.activeElement !== focused) {
                     focused.focus({preventScroll: true});
                   }
-                });
+                }.bind(this));
               },
               destroyed: function () {
                 this.el.removeEventListener("click", this.copyHandler);
+                if (this.logElement) {
+                  this.logElement.removeEventListener("scroll", this.logScrollHandler);
+                }
               }
             };
 

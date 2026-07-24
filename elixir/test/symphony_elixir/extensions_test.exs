@@ -695,7 +695,7 @@ defmodule SymphonyElixir.ExtensionsTest do
   end
 
   @tag :dashboard_detail
-  test "dashboard detail keeps the newest bounded audit events in chronological order" do
+  test "dashboard detail keeps a compact newest-event summary in chronological order" do
     audit_events_path = write_dashboard_audit_events!()
 
     detail =
@@ -705,14 +705,142 @@ defmodule SymphonyElixir.ExtensionsTest do
         audit_events_path: audit_events_path
       })
 
-    assert length(detail.timeline) == 50
-    assert hd(detail.timeline).message == "event 7"
+    assert length(detail.timeline) == 8
+    assert hd(detail.timeline).message == "event 49"
     assert List.last(detail.timeline).message == "event 56"
 
     timestamps = Enum.map(detail.timeline, & &1.at)
     assert timestamps == Enum.sort(timestamps)
     refute inspect(detail.timeline) =~ "discarded-prefix"
     refute inspect(detail.timeline) =~ "malformed-event"
+  end
+
+  @tag :dashboard_detail
+  test "dashboard detail exposes a bounded human-readable log tail" do
+    audit_events_path = write_dashboard_audit_events!()
+
+    detail =
+      Presenter.dashboard_detail(%{
+        issue_id: "issue-http",
+        issue_identifier: "MT-HTTP",
+        audit_events_path: audit_events_path
+      })
+
+    assert length(detail.log_tail) == 50
+    assert hd(detail.log_tail) == %{at: "2026-07-23T12:00:07Z", event: "agent_message", message: "event 7"}
+    assert List.last(detail.log_tail).message == "event 56"
+    refute inspect(detail.log_tail) =~ "discarded-prefix"
+    refute inspect(detail.log_tail) =~ "malformed-event"
+  end
+
+  @tag :dashboard_detail
+  test "dashboard log tail formats command completion output" do
+    audit_events_path =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-dashboard-command-#{System.unique_integer([:positive])}.jsonl"
+      )
+
+    File.write!(
+      audit_events_path,
+      Jason.encode!(%{
+        "event" => "codex_update",
+        "timestamp" => "2026-07-23T12:00:00Z",
+        "phase" => "command",
+        "command" => "mise exec -- make all",
+        "exit_code" => 0
+      }) <> "\n"
+    )
+
+    on_exit(fn -> File.rm(audit_events_path) end)
+
+    detail = Presenter.dashboard_detail(%{audit_events_path: audit_events_path})
+
+    assert detail.log_tail == [
+             %{
+               at: "2026-07-23T12:00:00Z",
+               event: "command",
+               message: "mise exec -- make all · exit 0"
+             }
+           ]
+  end
+
+  @tag :dashboard_detail
+  test "dashboard log tail redacts credential-shaped values before rendering" do
+    audit_events_path =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-dashboard-redaction-#{System.unique_integer([:positive])}.jsonl"
+      )
+
+    File.write!(
+      audit_events_path,
+      Jason.encode!(%{
+        "event" => "codex_update",
+        "timestamp" => "2026-07-23T12:00:00Z",
+        "detail" =>
+          "Authorization: Bearer auth-secret LINEAR_API_KEY=key-secret " <>
+            "https://example.test/result?token=query-secret&x-amz-signature=signed-secret"
+      }) <> "\n"
+    )
+
+    on_exit(fn -> File.rm(audit_events_path) end)
+
+    message = Presenter.dashboard_detail(%{audit_events_path: audit_events_path}).log_tail |> hd() |> Map.fetch!(:message)
+
+    assert message ==
+             "Authorization: [REDACTED] LINEAR_API_KEY=[REDACTED] " <>
+               "https://example.test/result?token=[REDACTED]&x-amz-signature=[REDACTED]"
+
+    refute message =~ "auth-secret"
+    refute message =~ "key-secret"
+    refute message =~ "query-secret"
+    refute message =~ "signed-secret"
+  end
+
+  @tag :dashboard_detail
+  test "dashboard runtime tick reads newly appended output for the selected agent" do
+    audit_events_path = write_dashboard_audit_events!()
+
+    snapshot =
+      update_in(static_snapshot().running, fn [running] ->
+        [%{running | audit_events_path: audit_events_path}]
+      end)
+
+    orchestrator_name = Module.concat(__MODULE__, :DashboardLiveTailOrchestrator)
+
+    {:ok, _pid} =
+      StaticOrchestrator.start_link(
+        name: orchestrator_name,
+        snapshot: snapshot,
+        refresh: :unavailable
+      )
+
+    start_test_endpoint(orchestrator: orchestrator_name, snapshot_timeout_ms: 50)
+    {:ok, view, html} = live(build_conn(), "/")
+
+    assert html =~ ~s(id="agent-detail-log")
+    assert html =~ ~s(aria-labelledby="log-title")
+    assert html =~ ~s(tabindex="0")
+    assert html =~ ~s(data-log-follow-state="following")
+    refute html =~ "streamed after mount"
+
+    File.write!(
+      audit_events_path,
+      "\n" <>
+        Jason.encode!(%{
+          "event" => "agent_message",
+          "timestamp" => "2026-07-23T12:01:30Z",
+          "detail" => "streamed after mount"
+        }) <> "\n",
+      [:append]
+    )
+
+    send(view.pid, :runtime_tick)
+
+    assert_eventually(fn ->
+      render(view) =~ "streamed after mount"
+    end)
   end
 
   @tag :dashboard_detail
