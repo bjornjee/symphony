@@ -2285,19 +2285,21 @@ defmodule SymphonyElixir.CoreTest do
                )
 
       assert {:ok, workspace} = SymphonyElixir.PathSafety.canonicalize(Path.join(workspace_root, "MT-AUDIT"))
-      audit_jsonl = Path.join([workspace, ".symphony", "run-audit.jsonl"])
-      audit_markdown = Path.join([workspace, ".symphony", "run-audit.md"])
+      local_audit_paths = SymphonyElixir.RunAudit.paths(workspace)
 
       assert_receive {:worker_runtime_info, "issue-audit",
                       %{
                         workspace_path: ^workspace,
-                        audit_path: ^audit_markdown,
-                        audit_events_path: ^audit_jsonl
+                        audit_path: audit_markdown,
+                        audit_events_path: audit_jsonl
                       }},
                      500
 
+      refute String.starts_with?(audit_jsonl, workspace)
       assert File.exists?(audit_jsonl)
       assert File.exists?(audit_markdown)
+      assert File.exists?(local_audit_paths.audit_events_path)
+      assert File.exists?(local_audit_paths.audit_path)
 
       audit_events =
         audit_jsonl
