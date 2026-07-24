@@ -33,22 +33,46 @@ make symphony-workflow-check
 
 ## Run
 
-Start Symphony in the foreground against the generated dogfood workflow:
+Start Symphony as a managed background service against the generated dogfood
+workflow:
 
 ```bash
-make symphony-run
+make symphony-up
+make symphony-status
 ```
 
-The dashboard is available at `http://127.0.0.1:4000`. Stop the runner with
-Ctrl-C. Override the port or CA bundle without editing the Makefile:
+The dashboard is available at `http://127.0.0.1:4000`. `symphony-up` is
+idempotent and waits for the observability API before returning. It finds
+`.env` in the current linked worktree or its primary checkout, so agents do not
+need to copy credentials into each worktree.
+
+Operate the managed service with:
 
 ```bash
-make symphony-run PORT=4001 CA_BUNDLE=/path/to/cert.pem
+make symphony-status
+make symphony-logs
+make symphony-restart
+make symphony-down
 ```
 
-The target loads `.env` without printing its contents and passes the CA bundle
+`symphony-status` reports running, retrying, and blocked agent counts.
+`symphony-logs` follows Symphony's rotating log; use
+`FOLLOW=0 make symphony-logs` for a bounded snapshot. `symphony-down` validates
+the recorded process identity before sending a termination signal and refuses
+to stop a foreground or otherwise external instance.
+
+Override the port, CA bundle, or environment file without editing the
+Makefile:
+
+```bash
+make symphony-up PORT=4001 CA_BUNDLE=/path/to/cert.pem
+SYMPHONY_ENV_FILE=/path/to/.env make symphony-up
+```
+
+For foreground debugging, use `make symphony-run` and stop it with Ctrl-C. Both
+launch modes load `.env` without printing its contents and pass the CA bundle
 to Erlang through `ERL_AFLAGS`. If startup still reports a CA trust-store
-failure, this is the core expanded launch command for troubleshooting:
+failure, inspect `make symphony-logs` before using the expanded command:
 
 ```bash
 (
