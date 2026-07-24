@@ -2316,8 +2316,10 @@ Unless otherwise noted, Sections 17.1 through 17.7 are `Core Conformance`. Bulle
   p95 phase/end-to-end latency plus expected diff, verification, review, and handoff accuracy
 - CI MAY use one fixed deterministic-agent lifecycle fixture for both variants to isolate
   engine-controlled overhead, but it MUST exercise planning, observed diff handling, proof receipts,
-  review, publication evidence, and handoff validation; identify that configuration; require 100%
-  completion accuracy; and MUST NOT represent it as live provider latency
+  review, publication evidence, and handoff validation. Each variant MUST perform its own observable
+  fixture edit before first-useful-edit is recorded, and expected-diff/review accuracy MUST be bound
+  to the evaluated workspace content rather than path constants alone. Identify that configuration,
+  require 100% completion accuracy, and MUST NOT represent it as live provider latency
 - Cache invalidation tests independently cover base revision, instructions, workflow, manifests,
   lockfiles, and toolchain configuration
 - Token/rate-limit aggregation remains correct across repeated agent updates

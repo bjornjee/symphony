@@ -13,13 +13,14 @@ defmodule SymphonyElixir.RunAuditTest do
 
     task = issue()
     File.mkdir_p!(workspace)
+    RunAudit.start(workspace, task)
+    central_base = central_audit_base(RunAudit.paths(workspace, task))
 
     on_exit(fn ->
       File.rm_rf(workspace)
-      File.rm_rf(Path.dirname(RunAudit.paths(workspace, task).audit_events_path))
+      File.rm_rf(central_base)
     end)
 
-    RunAudit.start(workspace, task)
     %{workspace: workspace, task: task}
   end
 
@@ -186,6 +187,56 @@ defmodule SymphonyElixir.RunAuditTest do
     assert summary.budget_overruns == [%{phase: "planning", budget_overrun_ms: 1_000}]
   end
 
+  test "aggregates repeated timing slices before selecting the slowest phase and budget overrun",
+       context do
+    utc = ~U[2026-07-24 00:00:00Z]
+
+    assert :ok =
+             RunAudit.record_phase(
+               context.workspace,
+               context.task,
+               "verification",
+               time_point(utc, 0),
+               time_point(DateTime.add(utc, 200, :second), 200_000),
+               "tool"
+             )
+
+    assert :ok =
+             RunAudit.record_phase(
+               context.workspace,
+               context.task,
+               "verification",
+               time_point(DateTime.add(utc, 200, :second), 200_000),
+               time_point(DateTime.add(utc, 400, :second), 400_000),
+               "subprocess"
+             )
+
+    assert :ok =
+             RunAudit.record_phase(
+               context.workspace,
+               context.task,
+               "implementation",
+               time_point(utc, 0),
+               time_point(DateTime.add(utc, 300, :second), 300_000),
+               "model"
+             )
+
+    assert {:ok, summary} = RunAudit.summary(context.workspace)
+    assert summary.slowest_phase == %{phase: "verification", duration_ms: 400_000}
+
+    verification = Enum.find(summary.phases, &(&1["phase"] == "verification"))
+    assert verification["attribution_ms"] == %{"subprocess" => 200_000, "tool" => 200_000}
+    assert verification["slice_count"] == 2
+    refute Map.has_key?(verification, "attribution")
+    refute Map.has_key?(verification, "started_at")
+    refute Map.has_key?(verification, "ended_at")
+
+    assert summary.budget_overruns == [
+             %{phase: "implementation", budget_overrun_ms: 60_000},
+             %{phase: "verification", budget_overrun_ms: 100_000}
+           ]
+  end
+
   test "records the first completed file change as the first useful edit", context do
     started = %{
       event: :notification,
@@ -322,7 +373,198 @@ defmodule SymphonyElixir.RunAuditTest do
     assert File.exists?(paths.audit_events_path)
     assert {:ok, %{verification_profile: nil}} = RunAudit.summary_path(paths.audit_events_path)
 
-    on_exit(fn -> File.rm_rf(Path.dirname(paths.audit_events_path)) end)
+    on_exit(fn -> File.rm_rf(central_audit_base(paths)) end)
+  end
+
+  test "preserves central audits across worker attempts", context do
+    remote_workspace = Path.join(context.workspace, "shared-remote-workspace")
+    File.mkdir_p!(remote_workspace)
+
+    RunAudit.start(remote_workspace, context.task, %{worker_host: "worker-a"})
+    RunAudit.append(remote_workspace, context.task, :worker_a_sentinel)
+    worker_a_paths = RunAudit.paths(remote_workspace, context.task)
+
+    RunAudit.start(remote_workspace, context.task, %{worker_host: "worker-b"})
+    worker_b_paths = RunAudit.paths(remote_workspace, context.task)
+
+    refute worker_a_paths.audit_events_path == worker_b_paths.audit_events_path
+    assert File.read!(worker_a_paths.audit_events_path) =~ "worker_a_sentinel"
+    assert File.exists?(worker_b_paths.audit_events_path)
+
+    on_exit(fn ->
+      File.rm_rf(central_audit_base(worker_a_paths))
+    end)
+  end
+
+  test "retains only the five most recent central audit attempts", context do
+    remote_workspace = Path.join(context.workspace, "retained-remote-workspace")
+    File.mkdir_p!(remote_workspace)
+
+    attempts =
+      Enum.map(1..7, fn attempt ->
+        RunAudit.start(remote_workspace, context.task, %{worker_host: "worker-#{attempt}"})
+        path = RunAudit.paths(remote_workspace, context.task).audit_events_path
+        RunAudit.finish(remote_workspace, context.task)
+        path
+      end)
+
+    assert Enum.all?(Enum.take(attempts, -5), &File.exists?/1)
+    refute Enum.any?(Enum.take(attempts, 2), &File.exists?/1)
+
+    on_exit(fn ->
+      attempts
+      |> List.last()
+      |> then(&central_audit_base(%{audit_events_path: &1}))
+      |> File.rm_rf()
+    end)
+  end
+
+  test "serializes retention across concurrent central audit attempts", context do
+    suffix = Base.url_encode64(:crypto.strong_rand_bytes(8), padding: false)
+    remote_workspace = Path.join(context.workspace, "concurrent-remote-workspace-#{suffix}")
+    File.mkdir_p!(remote_workspace)
+
+    paths =
+      1..40
+      |> Task.async_stream(
+        fn attempt ->
+          RunAudit.start(remote_workspace, context.task, %{worker_host: "worker-#{attempt}"})
+          paths = RunAudit.paths(remote_workspace, context.task)
+          RunAudit.finish(remote_workspace, context.task)
+          paths
+        end,
+        max_concurrency: 40,
+        ordered: false,
+        timeout: 30_000
+      )
+      |> Enum.map(fn {:ok, path} -> path end)
+
+    base = paths |> hd() |> central_audit_base()
+    on_exit(fn -> File.rm_rf(base) end)
+
+    attempts = base |> Path.join("attempts") |> File.ls!() |> MapSet.new()
+    manifest = base |> Path.join("attempts.json") |> File.read!() |> Jason.decode!() |> MapSet.new()
+
+    assert MapSet.size(attempts) <= 5
+    assert attempts == manifest
+  end
+
+  test "keeps an active attempt listed while newer attempts finish", context do
+    suffix = Base.url_encode64(:crypto.strong_rand_bytes(8), padding: false)
+    remote_workspace = Path.join(context.workspace, "active-remote-workspace-#{suffix}")
+    File.mkdir_p!(remote_workspace)
+    parent = self()
+
+    active =
+      Task.async(fn ->
+        RunAudit.start(remote_workspace, context.task, %{worker_host: "active-worker"})
+        paths = RunAudit.paths(remote_workspace, context.task)
+        send(parent, {:active_started, paths})
+
+        receive do
+          :append -> RunAudit.append(remote_workspace, context.task, :active_sentinel)
+        end
+
+        send(parent, :active_appended)
+
+        receive do
+          :finish -> RunAudit.finish(remote_workspace, context.task)
+        end
+      end)
+
+    assert_receive {:active_started, active_paths}
+    base = central_audit_base(active_paths)
+    on_exit(fn -> File.rm_rf(base) end)
+
+    Enum.each(1..5, fn attempt ->
+      RunAudit.start(remote_workspace, context.task, %{worker_host: "newer-#{attempt}"})
+      RunAudit.finish(remote_workspace, context.task)
+    end)
+
+    manifest = base |> Path.join("attempts.json") |> File.read!() |> Jason.decode!()
+    active_id = active_paths.audit_events_path |> Path.dirname() |> Path.basename()
+    assert File.exists?(active_paths.audit_events_path)
+    assert active_id in manifest
+
+    send(active.pid, :append)
+    assert_receive :active_appended
+    assert File.read!(active_paths.audit_events_path) =~ "active_sentinel"
+
+    send(active.pid, :finish)
+    Task.await(active)
+  end
+
+  test "never evicts active attempts when more than five overlap", context do
+    suffix = Base.url_encode64(:crypto.strong_rand_bytes(8), padding: false)
+    remote_workspace = Path.join(context.workspace, "overlapping-remote-workspace-#{suffix}")
+    File.mkdir_p!(remote_workspace)
+
+    paths =
+      Enum.map(1..6, fn attempt ->
+        RunAudit.start(remote_workspace, context.task, %{worker_host: "worker-#{attempt}"})
+        RunAudit.paths(remote_workspace, context.task)
+      end)
+
+    base = paths |> hd() |> central_audit_base()
+    on_exit(fn -> File.rm_rf(base) end)
+
+    manifest = base |> Path.join("attempts.json") |> File.read!() |> Jason.decode!()
+    active_ids = Enum.map(paths, &(&1.audit_events_path |> Path.dirname() |> Path.basename()))
+
+    assert Enum.all?(paths, &File.exists?(&1.audit_events_path))
+    assert Enum.all?(active_ids, &(&1 in manifest))
+  end
+
+  test "reconciles safe on-disk attempts when the manifest is malformed", context do
+    suffix = Base.url_encode64(:crypto.strong_rand_bytes(8), padding: false)
+    remote_workspace = Path.join(context.workspace, "reconciled-remote-workspace-#{suffix}")
+    File.mkdir_p!(remote_workspace)
+
+    RunAudit.start(remote_workspace, context.task, %{worker_host: "worker-a"})
+    paths = RunAudit.paths(remote_workspace, context.task)
+    base = central_audit_base(paths)
+    orphan_id = "safe_orphan_attempt"
+    orphan = Path.join([base, "attempts", orphan_id])
+    File.mkdir_p!(orphan)
+    File.write!(Path.join(orphan, "run-audit.jsonl"), "{}\n")
+    File.write!(Path.join(base, "attempts.json"), "{not-json")
+
+    RunAudit.start(remote_workspace, context.task, %{worker_host: "worker-b"})
+
+    on_exit(fn -> File.rm_rf(base) end)
+
+    manifest = base |> Path.join("attempts.json") |> File.read!() |> Jason.decode!()
+    assert orphan_id in manifest
+    assert File.exists?(Path.join(orphan, "run-audit.jsonl"))
+  end
+
+  test "treats markers without a live registered owner as completed attempts", context do
+    suffix = Base.url_encode64(:crypto.strong_rand_bytes(8), padding: false)
+    remote_workspace = Path.join(context.workspace, "stale-remote-workspace-#{suffix}")
+    File.mkdir_p!(remote_workspace)
+
+    RunAudit.start(remote_workspace, context.task, %{worker_host: "live-worker"})
+    paths = RunAudit.paths(remote_workspace, context.task)
+    base = central_audit_base(paths)
+
+    stale_ids =
+      Enum.map(1..6, fn attempt ->
+        id = "stale_attempt_#{attempt}"
+        directory = Path.join([base, "attempts", id])
+        File.mkdir_p!(directory)
+        File.touch!(Path.join(directory, ".active"))
+        File.write!(Path.join(directory, "run-audit.jsonl"), "{}\n")
+        id
+      end)
+
+    File.write!(Path.join(base, "attempts.json"), Jason.encode!(stale_ids))
+    RunAudit.start(remote_workspace, context.task, %{worker_host: "next-live-worker"})
+
+    on_exit(fn -> File.rm_rf(base) end)
+
+    manifest = base |> Path.join("attempts.json") |> File.read!() |> Jason.decode!()
+    assert length(Enum.filter(stale_ids, &(&1 in manifest))) == 5
+    refute File.exists?(Path.join([base, "attempts", hd(stale_ids)]))
   end
 
   test "compacts noisy history before the audit exceeds its summary bound", context do
@@ -417,4 +659,11 @@ defmodule SymphonyElixir.RunAuditTest do
   end
 
   defp time_point(utc, monotonic_ms), do: %{utc: utc, monotonic_ms: monotonic_ms}
+
+  defp central_audit_base(paths) do
+    paths.audit_events_path
+    |> Path.dirname()
+    |> Path.dirname()
+    |> Path.dirname()
+  end
 end

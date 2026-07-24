@@ -16,7 +16,7 @@ defmodule SymphonyElixir.Pin28BenchmarkTest do
 
     assert report.model_configuration == %{
              kind: "deterministic-agent-replay",
-             revision: 4,
+             revision: 5,
              live_model: false
            }
 
@@ -29,9 +29,12 @@ defmodule SymphonyElixir.Pin28BenchmarkTest do
     assert report.required_artifacts.review_checks == ["correctness", "security", "convention", "scope"]
     assert report.required_artifacts.handoff_fields == ["summary", "verification", "reviewer_action", "audit"]
     assert report.expected_diff == ["Makefile", "docs/symphony-linear-setup.md"]
-    assert report.evidence.expected_diff == "PIN-28 commit 41808f55"
+
+    assert report.evidence.expected_diff ==
+             "content-addressed two-file fixture derived from PIN-28 task shape"
+
     assert report.evidence.verification == "real fixture commands with deterministic lifecycle proof receipts"
-    assert report.evidence.review == "deterministic lifecycle review"
+    assert report.evidence.review == "deterministic review of the observed fixture content digest"
     assert report.evidence.handoff == "validated lifecycle publication and handoff"
     assert report.baseline.median_end_to_end_ms > report.candidate.median_end_to_end_ms
     assert report.improvement_percent >= 40.0
@@ -53,9 +56,24 @@ defmodule SymphonyElixir.Pin28BenchmarkTest do
                is_binary(sample.candidate.lifecycle.publication.receipt_digest) and
                is_binary(sample.baseline.lifecycle.handoff["artifact_digest"]) and
                is_binary(sample.candidate.lifecycle.handoff["artifact_digest"]) and
+               sample.baseline.lifecycle.implementation.changed_paths == report.expected_diff and
+               sample.candidate.lifecycle.implementation.changed_paths == report.expected_diff and
+               sample.baseline.lifecycle.workspace_id != sample.candidate.lifecycle.workspace_id and
+               not sample.baseline.lifecycle.proofs_reused and
+               sample.candidate.lifecycle.proofs_reused and
+               Enum.all?(sample.baseline.lifecycle.verification, &(&1.cache_status == "miss")) and
+               Enum.all?(sample.candidate.lifecycle.verification, &(&1.cache_status == "hit")) and
                non_empty_handoff?(sample.baseline.lifecycle.handoff) and
                Map.has_key?(sample.baseline.phases, :verification_ms) and
                Map.has_key?(sample.candidate.phases, :handoff_ms) and
+               sample.baseline.first_useful_edit_ms >=
+                 sample.baseline.phases.workspace_bootstrap_ms +
+                   sample.baseline.phases.context_loading_ms +
+                   sample.baseline.phases.planning_ms and
+               sample.candidate.first_useful_edit_ms >=
+                 sample.candidate.phases.workspace_bootstrap_ms +
+                   sample.candidate.phases.context_loading_ms +
+                   sample.candidate.phases.planning_ms and
                sample.baseline.end_to_end_ms >=
                  Enum.sum(Map.values(sample.baseline.phases)) and
                sample.candidate.end_to_end_ms >=
@@ -81,6 +99,53 @@ defmodule SymphonyElixir.Pin28BenchmarkTest do
 
     assert report.baseline.completion_accuracy == 0.0
     assert report.candidate.completion_accuracy == 0.0
+    refute report.thresholds_passed
+  end
+
+  test "does not report a first useful edit when the implementation writer makes no change" do
+    report =
+      Pin28Benchmark.run(
+        runs: 10,
+        observation_delay_ms: 1,
+        fixed_overhead_ms: 1,
+        implementation_writer: fn _workspace -> :ok end
+      )
+
+    assert report.baseline.median_first_useful_edit_ms == 600_001
+    assert report.candidate.median_first_useful_edit_ms == 600_001
+    assert report.baseline.completion_accuracy == 0.0
+    assert report.candidate.completion_accuracy == 0.0
+    refute report.thresholds_passed
+  end
+
+  test "fails expected diff and review accuracy when fixture content changes on the approved paths" do
+    mutator = fn workspace ->
+      File.write!(
+        Path.join(workspace, "docs/symphony-linear-setup.md"),
+        "\nUnrelated same-path content.\n",
+        [:append]
+      )
+    end
+
+    report =
+      Pin28Benchmark.run(
+        runs: 10,
+        observation_delay_ms: 1,
+        fixed_overhead_ms: 1,
+        implementation_mutator: mutator
+      )
+
+    assert report.baseline.completion_accuracy == 0.0
+    assert report.candidate.completion_accuracy == 0.0
+
+    assert Enum.all?(report.samples, fn sample ->
+             refute sample.baseline.accuracy.expected_diff
+             refute sample.baseline.accuracy.review
+             refute sample.candidate.accuracy.expected_diff
+             refute sample.candidate.accuracy.review
+             true
+           end)
+
     refute report.thresholds_passed
   end
 
@@ -113,6 +178,20 @@ defmodule SymphonyElixir.Pin28BenchmarkTest do
         observation_delay_ms: 1,
         fixed_overhead_ms: 1,
         lifecycle_mutator: mutator
+      )
+
+    assert report.baseline.completion_accuracy == 0.0
+    assert report.candidate.completion_accuracy == 0.0
+    refute report.thresholds_passed
+  end
+
+  test "reports review adapter failures as failed accuracy instead of crashing" do
+    report =
+      Pin28Benchmark.run(
+        runs: 10,
+        observation_delay_ms: 1,
+        fixed_overhead_ms: 1,
+        review_requester: fn _lifecycle -> {:error, :forced_review_failure} end
       )
 
     assert report.baseline.completion_accuracy == 0.0
@@ -163,6 +242,40 @@ defmodule SymphonyElixir.Pin28BenchmarkTest do
     assert_raise ArgumentError, ~r/at least 10/, fn ->
       Pin28Benchmark.run(runs: 9, observation_delay_ms: 0)
     end
+  end
+
+  test "retries atomic temporary directory creation after a stale-name collision" do
+    parent =
+      Path.join(
+        System.tmp_dir!(),
+        "pin28-root-test-#{System.unique_integer([:positive, :monotonic])}"
+      )
+
+    File.mkdir_p!(Path.join(parent, "collision"))
+    File.write!(Path.join(parent, "collision/sentinel"), "preserve")
+    {:ok, names} = Agent.start_link(fn -> ["collision", "fresh"] end)
+
+    name_generator = fn ->
+      Agent.get_and_update(names, fn [name | rest] -> {name, rest} end)
+    end
+
+    on_exit(fn ->
+      if Process.alive?(names), do: Agent.stop(names)
+      File.rm_rf(parent)
+    end)
+
+    report =
+      Pin28Benchmark.run(
+        runs: 10,
+        observation_delay_ms: 1,
+        fixed_overhead_ms: 1,
+        temporary_root_parent: parent,
+        root_name_generator: name_generator
+      )
+
+    assert report.thresholds_passed
+    assert File.read!(Path.join(parent, "collision/sentinel")) == "preserve"
+    assert Agent.get(names, & &1) == []
   end
 
   test "Mix task prints the machine-readable benchmark report" do

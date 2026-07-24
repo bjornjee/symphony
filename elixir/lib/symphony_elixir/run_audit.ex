@@ -11,6 +11,10 @@ defmodule SymphonyElixir.RunAudit do
   @jsonl_file "run-audit.jsonl"
   @markdown_file "run-audit.md"
   @first_edit_marker "first-useful-edit"
+  @attempt_manifest "attempts.json"
+  @active_attempt_marker ".active"
+  @active_attempt_guard_timeout_ms 5_000
+  @retained_central_attempts 5
   @max_preview_chars 160
   @max_summary_bytes 4_194_304
   @compact_tail_events 50
@@ -107,6 +111,9 @@ defmodule SymphonyElixir.RunAudit do
 
   @spec start(Path.t(), Issue.t(), map()) :: :ok
   def start(workspace, %Issue{} = issue, attrs \\ %{}) when is_binary(workspace) and is_map(attrs) do
+    run_id = bind_central_audit_attempt(workspace, issue)
+    attrs = Map.put(attrs, :run_id, run_id)
+
     Enum.each(audit_targets(workspace, issue), fn directory ->
       with_audit_guard(workspace, fn ->
         File.mkdir_p!(directory)
@@ -269,6 +276,8 @@ defmodule SymphonyElixir.RunAudit do
         budget_overrun_count: length(overruns),
         max_budget_overrun_ms: max_budget_overrun(overruns)
       })
+
+      complete_central_audit_attempt(workspace, issue)
     end
   end
 
@@ -555,22 +564,22 @@ defmodule SymphonyElixir.RunAudit do
 
   defp summarize_events(events) do
     {compacted, current} = split_compacted_summary(events)
-    phases = compacted_phases(compacted) ++ Enum.filter(current, &(&1["event"] == "phase_timing"))
+
+    phases =
+      compacted
+      |> compacted_phases()
+      |> Kernel.++(Enum.filter(current, &(&1["event"] == "phase_timing")))
+      |> aggregate_phase_slices()
+
     cache = merge_cache(compacted_cache(compacted), cache_summary(current))
-    current_slowest = slowest_phase(phases)
-    compacted_slowest = compacted_slowest_phase(compacted)
 
     %{
       verification_profile:
         latest_value(current, "verification_profile") ||
           compacted_value(compacted, "verification_profile"),
       cache: cache,
-      slowest_phase: slower_phase(compacted_slowest, current_slowest),
-      budget_overruns:
-        compacted
-        |> compacted_budget_overruns()
-        |> Kernel.++(budget_overruns(phases))
-        |> compact_budget_overruns(),
+      slowest_phase: slowest_phase(phases),
+      budget_overruns: budget_overruns(phases),
       phases: phases
     }
   end
@@ -598,19 +607,6 @@ defmodule SymphonyElixir.RunAudit do
   defp compacted_phases(%{"phases" => phases}) when is_list(phases), do: phases
   defp compacted_phases(_summary), do: []
 
-  defp compacted_budget_overruns(%{"budget_overruns" => overruns}) when is_list(overruns) do
-    Enum.flat_map(overruns, fn
-      %{"phase" => phase, "budget_overrun_ms" => overrun}
-      when is_binary(phase) and is_integer(overrun) and overrun > 0 ->
-        [%{phase: phase, budget_overrun_ms: overrun}]
-
-      _invalid ->
-        []
-    end)
-  end
-
-  defp compacted_budget_overruns(_summary), do: []
-
   defp compacted_cache(nil), do: empty_cache()
 
   defp compacted_cache(summary) do
@@ -626,15 +622,6 @@ defmodule SymphonyElixir.RunAudit do
     }
   end
 
-  defp compacted_slowest_phase(%{
-         "slowest_phase" => phase,
-         "slowest_phase_duration_ms" => duration
-       })
-       when is_binary(phase) and is_integer(duration) and duration >= 0,
-       do: %{phase: phase, duration_ms: duration}
-
-  defp compacted_slowest_phase(_summary), do: nil
-
   defp non_negative_integer(value) when is_integer(value) and value >= 0, do: value
   defp non_negative_integer(_value), do: 0
 
@@ -649,13 +636,6 @@ defmodule SymphonyElixir.RunAudit do
         misses: left.proof.misses + right.proof.misses
       }
     }
-  end
-
-  defp slower_phase(nil, right), do: right
-  defp slower_phase(left, nil), do: left
-
-  defp slower_phase(left, right) do
-    if left.duration_ms >= right.duration_ms, do: left, else: right
   end
 
   defp cache_summary(events) do
@@ -702,21 +682,71 @@ defmodule SymphonyElixir.RunAudit do
           []
       end
     end)
-  end
-
-  defp compact_budget_overruns(overruns) do
-    overruns
-    |> Enum.group_by(& &1.phase, & &1.budget_overrun_ms)
-    |> Enum.map(fn {phase, values} -> %{phase: phase, budget_overrun_ms: Enum.max(values)} end)
     |> Enum.sort_by(& &1.phase)
   end
 
-  defp compact_phases(phases) do
+  defp aggregate_phase_slices(phases) do
     phases
+    |> Enum.filter(&(is_binary(&1["phase"]) and is_integer(&1["duration_ms"])))
     |> Enum.group_by(& &1["phase"])
-    |> Enum.map(fn {_phase, values} -> Enum.max_by(values, & &1["duration_ms"]) end)
+    |> Enum.map(fn {_phase, values} -> aggregate_phase(values) end)
     |> Enum.sort_by(& &1["phase"])
   end
+
+  defp aggregate_phase([first | _] = values) do
+    duration_ms = Enum.sum(Enum.map(values, & &1["duration_ms"]))
+
+    budget_ms =
+      values
+      |> Enum.map(& &1["budget_ms"])
+      |> Enum.filter(&(is_integer(&1) and &1 >= 0))
+      |> Enum.min(fn -> nil end)
+
+    recorded_overrun_ms =
+      values
+      |> Enum.map(& &1["budget_overrun_ms"])
+      |> Enum.filter(&(is_integer(&1) and &1 > 0))
+      |> Enum.max(fn -> nil end)
+
+    attribution_ms =
+      Enum.reduce(values, %{}, fn value, totals ->
+        value
+        |> phase_attribution_ms()
+        |> Map.merge(totals, fn _attribution, duration, total -> duration + total end)
+      end)
+
+    slice_count = Enum.sum(Enum.map(values, &non_negative_integer(&1["slice_count"] || 1)))
+
+    first
+    |> Map.drop(["attribution", "started_at", "ended_at", "status", "timestamp"])
+    |> Map.put("event", "phase_timing_summary")
+    |> Map.put("duration_ms", duration_ms)
+    |> Map.put("budget_ms", budget_ms)
+    |> Map.put("attribution_ms", attribution_ms)
+    |> Map.put("slice_count", slice_count)
+    |> Map.put(
+      "budget_overrun_ms",
+      if(
+        is_integer(budget_ms) and duration_ms > budget_ms,
+        do: duration_ms - budget_ms,
+        else: recorded_overrun_ms
+      )
+    )
+  end
+
+  defp phase_attribution_ms(%{"attribution_ms" => totals}) when is_map(totals) do
+    Map.filter(totals, fn {attribution, duration} ->
+      attribution in @attributions and is_integer(duration) and duration >= 0
+    end)
+  end
+
+  defp phase_attribution_ms(%{"attribution" => attribution, "duration_ms" => duration})
+       when attribution in @attributions and is_integer(duration) and duration >= 0,
+       do: %{attribution => duration}
+
+  defp phase_attribution_ms(_phase), do: %{}
+
+  defp compact_phases(phases), do: aggregate_phase_slices(phases)
 
   defp max_budget_overrun([]), do: 0
   defp max_budget_overrun(overruns), do: overruns |> Enum.map(& &1.budget_overrun_ms) |> Enum.max()
@@ -903,6 +933,212 @@ defmodule SymphonyElixir.RunAudit do
   end
 
   defp central_audit_dir(workspace, issue) do
+    Process.get(central_audit_context_key(workspace, issue)) ||
+      central_audit_base_dir(workspace, issue)
+  end
+
+  defp bind_central_audit_attempt(workspace, issue) do
+    run_id = Base.url_encode64(:crypto.strong_rand_bytes(18), padding: false)
+    base = central_audit_base_dir(workspace, issue)
+    attempts = Path.join(base, "attempts")
+    directory = Path.join(attempts, run_id)
+    active_name = active_attempt_name(base, run_id)
+
+    start_active_attempt_guardian!(active_name)
+    register_central_audit_attempt!(base, attempts, directory, run_id, active_name)
+    Process.put(central_audit_context_key(workspace, issue), directory)
+    run_id
+  end
+
+  defp register_central_audit_attempt!(base, attempts, directory, run_id, active_name) do
+    case :global.trans(
+           {{__MODULE__, :central_audit_retention, base}, self()},
+           fn ->
+             File.mkdir_p!(directory)
+             File.touch!(Path.join(directory, @active_attempt_marker))
+             retain_central_audit_attempts(base, attempts, run_id)
+           end
+         ) do
+      :ok -> :ok
+      {:aborted, reason} -> raise "central run-audit registration aborted: #{inspect(reason)}"
+      other -> raise "central run-audit registration failed: #{inspect(other)}"
+    end
+  rescue
+    error ->
+      stop_active_attempt_guardian(active_name)
+      reraise error, __STACKTRACE__
+  catch
+    kind, reason ->
+      stop_active_attempt_guardian(active_name)
+      :erlang.raise(kind, reason, __STACKTRACE__)
+  end
+
+  defp retain_central_audit_attempts(base, attempts, run_id) do
+    manifest_path = Path.join(base, @attempt_manifest)
+    retained = read_attempt_manifest(manifest_path)
+    current = List.wrap(run_id)
+
+    discovered =
+      attempts
+      |> attempt_ids_on_disk()
+      |> Kernel.--(retained)
+      |> Kernel.--(current)
+      |> Enum.sort_by(&attempt_recency(attempts, &1))
+
+    candidates = Enum.uniq(retained ++ discovered ++ current)
+
+    {active, completed} =
+      Enum.split_with(candidates, fn attempt ->
+        active_attempt?(base, attempts, attempt)
+      end)
+
+    keep_set =
+      active
+      |> Kernel.++(Enum.take(completed, -@retained_central_attempts))
+      |> MapSet.new()
+
+    keep = Enum.filter(candidates, &MapSet.member?(keep_set, &1))
+
+    candidates
+    |> Kernel.--(keep)
+    |> Enum.each(&File.rm_rf!(Path.join(attempts, &1)))
+
+    write_attempt_manifest(manifest_path, keep)
+  end
+
+  defp attempt_ids_on_disk(attempts) do
+    attempts
+    |> File.ls!()
+    |> Enum.filter(fn attempt ->
+      safe_attempt_id?(attempt) and File.dir?(Path.join(attempts, attempt))
+    end)
+  end
+
+  defp attempt_recency(attempts, attempt) do
+    case File.stat(Path.join(attempts, attempt), time: :posix) do
+      {:ok, %{mtime: modified_at}} -> {modified_at, attempt}
+      {:error, _reason} -> {0, attempt}
+    end
+  end
+
+  defp active_attempt?(base, attempts, attempt) do
+    File.exists?(Path.join([attempts, attempt, @active_attempt_marker])) and
+      :global.whereis_name(active_attempt_name(base, attempt)) != :undefined
+  end
+
+  defp active_attempt_name(base, run_id),
+    do: {__MODULE__, :central_audit_attempt, base, run_id}
+
+  defp start_active_attempt_guardian!(active_name) do
+    owner = self()
+    ready_ref = make_ref()
+
+    guardian =
+      spawn(fn ->
+        owner_monitor = Process.monitor(owner)
+        registration = :global.register_name(active_name, self())
+        send(owner, {ready_ref, registration})
+
+        if registration == :yes do
+          guard_active_attempt(owner, owner_monitor, active_name)
+        end
+      end)
+
+    receive do
+      {^ready_ref, :yes} ->
+        guardian
+
+      {^ready_ref, :no} ->
+        raise "central run-audit owner registration failed"
+    after
+      @active_attempt_guard_timeout_ms ->
+        Process.exit(guardian, :kill)
+        raise "central run-audit owner registration timed out"
+    end
+  end
+
+  defp guard_active_attempt(owner, owner_monitor, active_name) do
+    receive do
+      {:stop, recipient, stop_ref} ->
+        :global.unregister_name(active_name)
+        send(recipient, {stop_ref, :stopped})
+
+      {:DOWN, ^owner_monitor, :process, ^owner, _reason} ->
+        :global.unregister_name(active_name)
+    end
+  end
+
+  defp stop_active_attempt_guardian(active_name) do
+    case :global.whereis_name(active_name) do
+      :undefined ->
+        :ok
+
+      guardian ->
+        stop_ref = make_ref()
+        send(guardian, {:stop, self(), stop_ref})
+
+        receive do
+          {^stop_ref, :stopped} -> :ok
+        after
+          @active_attempt_guard_timeout_ms ->
+            {:error, :central_run_audit_owner_stop_timeout}
+        end
+    end
+  end
+
+  defp complete_central_audit_attempt(workspace, issue) do
+    base = central_audit_base_dir(workspace, issue)
+    attempts = Path.join(base, "attempts")
+    directory = central_audit_dir(workspace, issue)
+    run_id = Path.basename(directory)
+    active_name = active_attempt_name(base, run_id)
+
+    with :ok <- stop_active_attempt_guardian(active_name) do
+      finalize_central_audit_attempt(base, attempts, directory)
+    end
+  end
+
+  defp finalize_central_audit_attempt(base, attempts, directory) do
+    result =
+      :global.trans(
+        {{__MODULE__, :central_audit_retention, base}, self()},
+        fn ->
+          File.rm(Path.join(directory, @active_attempt_marker))
+          retain_central_audit_attempts(base, attempts, nil)
+        end
+      )
+
+    case result do
+      :ok -> :ok
+      {:aborted, reason} -> {:error, {:central_run_audit_completion_aborted, reason}}
+      other -> {:error, {:central_run_audit_completion_failed, other}}
+    end
+  end
+
+  defp read_attempt_manifest(path) do
+    with {:ok, payload} <- File.read(path),
+         {:ok, attempts} when is_list(attempts) <- Jason.decode(payload) do
+      Enum.filter(attempts, &safe_attempt_id?/1)
+    else
+      _missing_or_invalid -> []
+    end
+  end
+
+  defp write_attempt_manifest(path, attempts) do
+    temporary = path <> "." <> Base.url_encode64(:crypto.strong_rand_bytes(8), padding: false)
+    File.write!(temporary, Jason.encode!(attempts))
+    File.rename!(temporary, path)
+  end
+
+  defp safe_attempt_id?(attempt) when is_binary(attempt),
+    do: Regex.match?(~r/^[A-Za-z0-9_-]+$/, attempt)
+
+  defp safe_attempt_id?(_attempt), do: false
+
+  defp central_audit_context_key(workspace, issue),
+    do: {__MODULE__, :central_audit_dir, workspace, issue.id || issue.identifier || "unknown"}
+
+  defp central_audit_base_dir(workspace, issue) do
     root =
       Application.get_env(:symphony_elixir, :execution_state_root) ||
         :filename.basedir(:user_data, "symphony") |> to_string() |> Path.join("execution")

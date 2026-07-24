@@ -227,8 +227,10 @@ The observability UI now runs on a minimal Phoenix stack:
   when startup capability diagnostics are available
 - Audit diagnostics show the selected verification profile, proof-cache hits and misses, slowest
   completed phase, and budget overruns during active runs and after final summary emission
-- Run audits compact noisy history before the bounded reader limit; remote-worker runs expose a
-  central audit mirror to the dashboard even if the same workspace path also exists locally
+- Run audits compact noisy history into per-phase and per-attribution totals before the bounded
+  reader limit; remote-worker runs expose a per-attempt central mirror to the dashboard, retain every
+  active attempt plus the five most recent completed attempts, and reconcile safe on-disk attempts
+  if the manifest is interrupted, even if the same workspace path also exists locally
 
 ## Project Layout
 
@@ -250,13 +252,14 @@ make benchmark-pin28
 ```
 
 The benchmark executes ten controlled baseline/candidate samples against the checked-out revision,
-records the environment and task-contract digest, verifies the historical PIN-28 expected diff and
-commit evidence, and fails when median latency improvement is below 40%, median end-to-end latency
-exceeds ten minutes, first useful edit exceeds four minutes, either variant is not 100% accurate, or
-completion accuracy differs. Each sample runs a deterministic lifecycle fixture through task
-contract/profile planning, observed diff handling, the three real fixture verification commands,
-proof receipts, review, publication evidence, and handoff validation. The same fixture is used for
-both variants so CI measures Symphony-controlled harness overhead without model-provider variance;
+records the environment and task-contract digest, and pins the task shape to the historical PIN-28
+paths, verification commands, and commit evidence. Each variant starts at controlled dispatch,
+creates its own workspace, performs the two-file edit, and binds expected-diff and review accuracy
+to the observed fixture content digest before running the three real fixture verification commands,
+proof receipts, publication evidence, and handoff validation. It fails when median latency
+improvement is below 40%, median end-to-end latency exceeds ten minutes, first useful edit exceeds
+four minutes, either variant is not 100% accurate, or completion accuracy differs. The fixture is
+deterministic so CI measures Symphony-controlled harness overhead without model-provider variance;
 it is not a live provider benchmark. CI runs the same target after `make all`.
 
 Run the real external end-to-end test only when you want Symphony to create disposable Linear
