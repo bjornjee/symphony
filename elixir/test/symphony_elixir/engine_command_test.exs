@@ -41,9 +41,9 @@ defmodule SymphonyElixir.EngineCommandTest do
            stdout: "passed",
            stderr: "",
            browser_path: "playwright_headless",
-           browser_provenance: "npm_playwright_offline",
+           browser_provenance: "mcpServer/tool/call",
            browser_selection_provenance: "codex_global_mcp",
-           browser_version: "1.59.1"
+           browser_evidence_hash: String.duplicate("d", 64)
          }}
       )
 
@@ -57,12 +57,12 @@ defmodule SymphonyElixir.EngineCommandTest do
              :browser_path,
              :browser_provenance,
              :browser_selection_provenance,
-             :browser_version
+             :browser_evidence_hash
            ]) == %{
              browser_path: "playwright_headless",
-             browser_provenance: "npm_playwright_offline",
+             browser_provenance: "mcpServer/tool/call",
              browser_selection_provenance: "codex_global_mcp",
-             browser_version: "1.59.1"
+             browser_evidence_hash: String.duplicate("d", 64)
            }
   end
 
@@ -76,9 +76,11 @@ defmodule SymphonyElixir.EngineCommandTest do
 
   test "preserves selected browser provenance when the browser runner fails" do
     error = %{
-      reason: "playwright cache unavailable",
+      reason: "browser capability unavailable",
       browser_path: "playwright_headless",
-      browser_selection_provenance: "codex_global_mcp"
+      browser_selection_provenance: "codex_global_mcp",
+      browser_failure_stage: "capability",
+      browser_failure_code: "browser_capability_unavailable"
     }
 
     assert {:error, result} =
@@ -87,9 +89,11 @@ defmodule SymphonyElixir.EngineCommandTest do
                executor: executor({:error, error})
              )
 
-    assert result.reason == "playwright cache unavailable"
+    assert result.reason == "browser capability unavailable"
     assert result.browser_path == "playwright_headless"
     assert result.browser_selection_provenance == "codex_global_mcp"
+    assert result.browser_failure_stage == "capability"
+    assert result.browser_failure_code == "browser_capability_unavailable"
   end
 
   test "rejects oversized combined sandbox output" do

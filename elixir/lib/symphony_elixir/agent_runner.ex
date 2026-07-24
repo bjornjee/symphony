@@ -1009,10 +1009,14 @@ defmodule SymphonyElixir.AgentRunner do
             arguments,
             worker_host: runtime.worker_host,
             command_executor: fn directory, command, command_opts ->
-              AppServer.run_command(
+              AppServer.run_command(app_session, directory, command, command_opts)
+            end,
+            browser_executor: fn directory, command, browser, command_opts ->
+              AppServer.run_browser_proof(
                 app_session,
                 directory,
                 command,
+                browser,
                 Keyword.put(command_opts, :browser_path, browser_path)
               )
             end
@@ -1041,7 +1045,9 @@ defmodule SymphonyElixir.AgentRunner do
       browser_path: payload["browser_path"],
       browser_provenance: payload["browser_provenance"],
       browser_selection_provenance: payload["browser_selection_provenance"],
-      browser_version: payload["browser_version"],
+      browser_evidence_hash: payload["browser_evidence_hash"],
+      browser_failure_stage: payload["browser_failure_stage"],
+      browser_failure_code: payload["browser_failure_code"],
       repository_head_sha: payload["head_sha"] || payload["repository_head_sha"],
       pull_request_url: payload["pull_request_url"]
     }

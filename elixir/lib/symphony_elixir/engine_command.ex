@@ -58,7 +58,9 @@ defmodule SymphonyElixir.EngineCommand do
       :browser_path,
       :browser_provenance,
       :browser_selection_provenance,
-      :browser_version
+      :browser_evidence_hash,
+      :browser_failure_stage,
+      :browser_failure_code
     ])
   end
 

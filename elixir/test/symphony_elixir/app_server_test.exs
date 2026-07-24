@@ -43,7 +43,7 @@ defmodule SymphonyElixir.AppServerTest do
         1) printf '%s\\n' '{"id":1,"result":{}}' ;;
         3) printf '%s\\n' '{"id":2,"result":{"thread":{"id":"thread-capabilities"},"instructionSources":[]}}' ;;
         4) printf '%s\\n' '{"id":7,"result":{"marketplaces":[{"name":"openai-bundled","plugins":[{"id":"browser@openai-bundled","name":"browser","installed":true,"enabled":true},{"id":"computer-use@openai-bundled","name":"computer-use","installed":true,"enabled":true}]}]}}' ;;
-        5) printf '%s\\n' '{"id":8,"result":{"data":[{"name":"node_repl","authStatus":"unsupported","tools":{"js":{"name":"js","inputSchema":{}}},"resources":[],"resourceTemplates":[]},{"name":"playwright","authStatus":"unsupported","tools":{"browser_tabs":{"name":"browser_tabs","inputSchema":{}},"browser_navigate":{"name":"browser_navigate","inputSchema":{}},"browser_snapshot":{"name":"browser_snapshot","inputSchema":{}},"browser_take_screenshot":{"name":"browser_take_screenshot","inputSchema":{}}},"resources":[],"resourceTemplates":[]}],"nextCursor":null}}' ;;
+        5) printf '%s\\n' '{"id":8,"result":{"data":[{"name":"node_repl","authStatus":"unsupported","tools":{"js":{"name":"js","inputSchema":{}}},"resources":[],"resourceTemplates":[]},{"name":"playwright","authStatus":"unsupported","tools":{"browser_close":{"name":"browser_close","inputSchema":{}},"browser_console_messages":{"name":"browser_console_messages","inputSchema":{}},"browser_tabs":{"name":"browser_tabs","inputSchema":{}},"browser_navigate":{"name":"browser_navigate","inputSchema":{}},"browser_network_requests":{"name":"browser_network_requests","inputSchema":{}},"browser_snapshot":{"name":"browser_snapshot","inputSchema":{}},"browser_take_screenshot":{"name":"browser_take_screenshot","inputSchema":{}},"browser_wait_for":{"name":"browser_wait_for","inputSchema":{}}},"resources":[],"resourceTemplates":[]}],"nextCursor":null}}' ;;
         6) printf '%s\\n' '{"id":9,"result":{"content":[{"type":"text","text":"{\\"browser_loaded\\":false,\\"browser_backend_count\\":0,\\"computer_use_initialized\\":false,\\"computer_use_app_count\\":0}"}],"isError":false}}' ;;
         7) printf '%s\\n' '{"id":9,"result":{"content":[{"type":"text","text":"{\\"browser_loaded\\":true,\\"browser_backend_count\\":0,\\"computer_use_initialized\\":true,\\"computer_use_app_count\\":24}"}],"isError":false}}' ;;
         8) printf '%s\\n' '{"id":10,"result":{"content":[{"type":"text","text":"### Result\\n- 0: (current) [](about:blank)"}],"isError":false}}' ;;
@@ -156,14 +156,18 @@ defmodule SymphonyElixir.AppServerTest do
            }
   end
 
-  test "app server connects Playwright proofs to a bounded headless server without exposing its endpoint" do
-    test_root = test_root("playwright-command-exec")
+  test "app server runs typed browser proofs through fixed Playwright MCP operations" do
+    test_root = test_root("typed-browser-proof")
     workspace_root = Path.join(test_root, "workspaces")
     workspace = Path.join(workspace_root, "PIN-27")
     codex_binary = Path.join(test_root, "fake-codex")
-    trace_file = Path.join(test_root, "playwright-command-exec.trace")
-    endpoint = "ws://127.0.0.1:43127/symphony-test-endpoint"
+    trace_file = Path.join(test_root, "typed-browser-proof.trace")
     File.mkdir_p!(workspace)
+
+    png =
+      "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII="
+      |> Base.decode64!()
+      |> Base.encode64()
 
     File.write!(codex_binary, """
     #!/bin/sh
@@ -174,7 +178,19 @@ defmodule SymphonyElixir.AppServerTest do
       case "$count" in
         1) printf '%s\\n' '{"id":1,"result":{}}' ;;
         3) printf '%s\\n' '{"id":2,"result":{"thread":{"id":"thread-playwright-command"},"instructionSources":[]}}' ;;
-        4) printf '%s\\n' '{"id":6,"result":{"exitCode":0,"stdout":"connected #{endpoint}","stderr":""}}' ;;
+        4) printf '%s\\n' '{"method":"command/exec/outputDelta","params":{"processId":"symphony-browser-proof","stream":"stdout","deltaBase64":"UlVOTklORwo=","capReached":false}}' ;;
+        5) printf '%s\\n' '{"id":13,"result":{"content":[{"type":"text","text":"navigated"}],"isError":false}}' ;;
+        6) printf '%s\\n' '{"id":12,"result":{"content":[{"type":"text","text":"Agent dashboard visible"}],"isError":false}}' ;;
+        7) printf '%s\\n' '{"id":14,"result":{"content":[{"type":"text","text":"### Page\\n- Page URL: http://127.0.0.1:43127/dashboard\\nAgent dashboard\\nRunning"}],"isError":false}}' ;;
+        8) printf '%s\\n' '{"id":15,"result":{"content":[{"type":"image","mimeType":"image/png","data":"#{png}"}],"isError":false}}' ;;
+        9) printf '%s\\n' '{"id":18,"result":{"content":[{"type":"text","text":"GET http://127.0.0.1:43127/dashboard 200\\nWS ws://127.0.0.1:43127/live/websocket"}],"isError":false}}' ;;
+        10) printf '%s\\n' '{"id":19,"result":{"content":[{"type":"text","text":"Total messages: 0 (Errors: 0, Warnings: 0)"}],"isError":false}}' ;;
+        11) printf '%s\\n' '{"id":20,"result":{"content":[{"type":"text","text":"- 0: (current) [Dashboard](http://127.0.0.1:43127/dashboard)"}],"isError":false}}' ;;
+        12) printf '%s\\n' '{"id":16,"result":{"content":[{"type":"text","text":"closed"}],"isError":false}}' ;;
+        13)
+          printf '%s\\n' '{"id":17,"result":{}}'
+          printf '%s\\n' '{"id":11,"result":{"exitCode":143,"stdout":"","stderr":""}}'
+          ;;
       esac
     done
     """)
@@ -188,48 +204,131 @@ defmodule SymphonyElixir.AppServerTest do
 
     on_exit(fn -> File.rm_rf(test_root) end)
 
-    browser_server = fn _workspace, _directory, _worker_host, callback ->
-      callback.(%{
-        endpoint: endpoint,
-        path: "playwright_headless",
-        provenance: "npm_playwright_offline",
-        selection_provenance: "codex_global_mcp",
-        version: "1.59.1"
-      })
-    end
-
     assert {:ok, session} = AppServer.start_session(workspace)
 
     assert {:ok, result} =
-             AppServer.run_command(session, workspace, "npm test",
+             AppServer.run_browser_proof(
+               session,
+               workspace,
+               "mix phx.server",
+               %{
+                 "url" => "http://127.0.0.1:43127/dashboard",
+                 "ready_text" => "RUNNING",
+                 "snapshot_contains" => ["Agent dashboard", "Running"]
+               },
                timeout_ms: 15_000,
                output_bytes_cap: 1_048_576,
-               browser_path: %{selected: "playwright_headless", provenance: "codex_global_mcp"},
-               playwright_server: browser_server
+               process_id: "symphony-browser-proof",
+               browser_path: %{selected: "playwright_headless", provenance: "codex_global_mcp"}
              )
 
-    assert result == %{
-             exit_status: 0,
-             stdout: "connected [REDACTED_PLAYWRIGHT_ENDPOINT]",
-             stderr: "",
-             browser_path: "playwright_headless",
-             browser_provenance: "npm_playwright_offline",
-             browser_selection_provenance: "codex_global_mcp",
-             browser_version: "1.59.1"
-           }
+    assert result.exit_status == 0
+    assert result.stdout == "browser proof completed: navigate, snapshot, screenshot\n"
+    assert result.stderr == ""
+    assert result.browser_path == "playwright_headless"
+    assert result.browser_provenance == "mcpServer/tool/call"
+    assert result.browser_selection_provenance == "codex_global_mcp"
+    assert byte_size(result.browser_evidence_hash) == 64
 
     assert :ok = AppServer.stop_session(session)
 
-    request =
+    requests =
       trace_file
       |> File.read!()
       |> String.split("\n", trim: true)
       |> Enum.map(&Jason.decode!/1)
-      |> Enum.find(&(&1["method"] == "command/exec"))
 
-    assert request["params"]["command"] == ["sh", "-c", "npm test"]
-    assert request["params"]["env"]["PW_TEST_CONNECT_WS_ENDPOINT"] == endpoint
-    assert request["params"]["env"]["GITHUB_TOKEN"] == nil
+    fixture = Enum.find(requests, &(&1["method"] == "command/exec"))
+    assert fixture["id"] == 11
+
+    assert fixture["params"]["command"] == [
+             "/bin/sh",
+             "-c",
+             ~S|exec /usr/bin/env -i HOME="$HOME" PATH="$PATH" TMPDIR="${TMPDIR:-/tmp}" /bin/sh -c "$1"|,
+             "symphony-browser-fixture",
+             "mix phx.server"
+           ]
+
+    assert fixture["params"]["streamStdoutStderr"]
+    assert fixture["params"]["sandboxPolicy"]["networkAccess"] == true
+    refute Map.has_key?(fixture["params"], "env")
+
+    tools =
+      requests
+      |> Enum.filter(&(&1["method"] == "mcpServer/tool/call"))
+      |> Enum.map(&get_in(&1, ["params", "tool"]))
+
+    assert tools == [
+             "browser_navigate",
+             "browser_wait_for",
+             "browser_snapshot",
+             "browser_take_screenshot",
+             "browser_network_requests",
+             "browser_console_messages",
+             "browser_tabs",
+             "browser_close"
+           ]
+
+    refute Enum.any?(requests, &(get_in(&1, ["params", "tool"]) == "browser_run_code_unsafe"))
+
+    terminate = Enum.find(requests, &(&1["method"] == "command/exec/terminate"))
+    assert terminate["params"]["processId"] == fixture["params"]["processId"]
+  end
+
+  test "app server fails a typed browser proof before fixture launch when fallback is unavailable" do
+    test_root = test_root("typed-browser-unavailable")
+    workspace_root = Path.join(test_root, "workspaces")
+    workspace = Path.join(workspace_root, "PIN-27")
+    codex_binary = Path.join(test_root, "fake-codex")
+    trace_file = Path.join(test_root, "typed-browser-unavailable.trace")
+    File.mkdir_p!(workspace)
+
+    File.write!(codex_binary, """
+    #!/bin/sh
+    count=0
+    while IFS= read -r line; do
+      count=$((count + 1))
+      printf '%s\\n' "$line" >> "#{trace_file}"
+      case "$count" in
+        1) printf '%s\\n' '{"id":1,"result":{}}' ;;
+        3) printf '%s\\n' '{"id":2,"result":{"thread":{"id":"thread-browser-unavailable"},"instructionSources":[]}}' ;;
+      esac
+    done
+    """)
+
+    File.chmod!(codex_binary, 0o755)
+
+    write_workflow_file!(Workflow.workflow_file_path(),
+      workspace_root: workspace_root,
+      codex_command: "#{codex_binary} app-server"
+    )
+
+    on_exit(fn -> File.rm_rf(test_root) end)
+
+    assert {:ok, session} = AppServer.start_session(workspace)
+
+    assert {:error, failure} =
+             AppServer.run_browser_proof(
+               session,
+               workspace,
+               "mix phx.server",
+               %{
+                 "url" => "http://127.0.0.1:43127/",
+                 "ready_text" => "RUNNING",
+                 "snapshot_contains" => ["Dashboard"]
+               },
+               timeout_ms: 1_000,
+               output_bytes_cap: 1_048_576,
+               browser_path: %{selected: "unavailable", provenance: "capability_diagnostics"}
+             )
+
+    assert failure.browser_failure_stage == "capability"
+    assert failure.browser_failure_code == "browser_capability_unavailable"
+    assert :ok = AppServer.stop_session(session)
+
+    refute trace_file
+           |> File.read!()
+           |> String.contains?(~s("method":"command/exec"))
   end
 
   test "app server resumes the exact persisted thread without starting a replacement" do

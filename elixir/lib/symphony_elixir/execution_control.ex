@@ -68,7 +68,7 @@ defmodule SymphonyElixir.ExecutionControl do
          command_result <-
            EngineCommand.run(proof_directory, proof["command"],
              timeout_ms: min(proof["timeout_ms"], 1_800_000),
-             executor: Keyword.get(opts, :command_executor)
+             executor: proof_executor(proof, opts)
            ),
          {:ok, after_state} <- RepositoryFingerprint.capture(workspace, Keyword.get(opts, :worker_host)) do
       {result, runner_error} = normalize_command_result(command_result)
@@ -101,7 +101,7 @@ defmodule SymphonyElixir.ExecutionControl do
           "head_sha" => after_state.base_sha,
           "recorded_at" => DateTime.utc_now() |> DateTime.to_iso8601()
         }
-        |> Map.merge(browser_receipt_metadata(result))
+        |> Map.merge(browser_receipt_metadata(proof, result))
 
       case ExecutionLedger.create(
              ledger_key,
@@ -697,12 +697,14 @@ defmodule SymphonyElixir.ExecutionControl do
     {%{exit_status: nil, output_bytes: 0, output_hash: PlanningArtifact.digest(""), output_tail: ""}, inspect(reason)}
   end
 
-  defp browser_receipt_metadata(result) do
+  defp browser_receipt_metadata(%{"type" => "browser"}, result) do
     [
       browser_path: "browser_path",
       browser_provenance: "browser_provenance",
       browser_selection_provenance: "browser_selection_provenance",
-      browser_version: "browser_version"
+      browser_evidence_hash: "browser_evidence_hash",
+      browser_failure_stage: "browser_failure_stage",
+      browser_failure_code: "browser_failure_code"
     ]
     |> Enum.reduce(%{}, fn {source, destination}, metadata ->
       case Map.get(result, source) do
@@ -711,6 +713,22 @@ defmodule SymphonyElixir.ExecutionControl do
       end
     end)
   end
+
+  defp browser_receipt_metadata(_proof, _result), do: %{}
+
+  defp proof_executor(%{"type" => "browser", "browser" => browser}, opts) do
+    case Keyword.get(opts, :browser_executor) do
+      executor when is_function(executor, 4) ->
+        fn directory, command, command_opts ->
+          executor.(directory, command, browser, command_opts)
+        end
+
+      _other ->
+        nil
+    end
+  end
+
+  defp proof_executor(_proof, opts), do: Keyword.get(opts, :command_executor)
 
   defp require_role(plan, key, role) do
     proof_ids =

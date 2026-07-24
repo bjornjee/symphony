@@ -5,6 +5,8 @@ defmodule SymphonyElixir.ProofContract do
   @expected_exits ~w(success failure)
   @max_timeout_ms 1_800_000
   @fields ~w(id phase_id role command working_directory expected_exit timeout_ms criterion_ids)
+  @browser_fields @fields ++ ~w(type browser)
+  @max_browser_assertions 32
   @unsafe ~r/\bgit(?:\s+-C\s+\S+)?\s+(?:add|am|apply|checkout|clean|commit|config|fetch|merge|mv|pull|push|rebase|reset|restore|revert|rm|switch|tag)\b|\bgit(?:\s+-C\s+\S+)?\s+worktree\s+(?:add|lock|move|prune|remove|repair|unlock)\b|\bgh\s+pr\b|\brm\s+(?:-[^\s]*r[^\s]*f|-[^\s]*f[^\s]*r)\b|\b(?:dropdb|mix\s+ecto\.drop|rails\s+db:drop|tmux\s+send-keys|screen\s+-X\s+stuff)\b|\b(?:psql|mysql)\b.*\bDROP\b/i
 
   @spec validate([map()], [map()], [String.t()], [String.t()], keyword()) :: :ok | {:error, term()}
@@ -70,7 +72,7 @@ defmodule SymphonyElixir.ProofContract do
 
       error =
         cond do
-          Enum.sort(Map.keys(proof)) != Enum.sort(@fields) ->
+          not valid_proof_fields?(proof) ->
             {:invalid_proof_fields, id}
 
           not valid_id?(id) or MapSet.member?(ids, id) ->
@@ -101,6 +103,9 @@ defmodule SymphonyElixir.ProofContract do
               not Enum.all?(proof["criterion_ids"], &MapSet.member?(criterion_ids, &1)) ->
             {:invalid_proof_criteria, id}
 
+          not valid_browser_proof?(proof) ->
+            {:invalid_browser_proof, id}
+
           true ->
             nil
         end
@@ -114,6 +119,53 @@ defmodule SymphonyElixir.ProofContract do
   end
 
   defp validate_proofs(_proofs, _phase_ids, _criterion_ids), do: {:error, :proofs_required}
+
+  defp valid_proof_fields?(%{"type" => "browser"} = proof),
+    do: Enum.sort(Map.keys(proof)) == Enum.sort(@browser_fields)
+
+  defp valid_proof_fields?(proof), do: Enum.sort(Map.keys(proof)) == Enum.sort(@fields)
+
+  defp valid_browser_proof?(%{"type" => "browser", "browser" => browser}) when is_map(browser) do
+    Enum.sort(Map.keys(browser)) == ~w(ready_text snapshot_contains url) and
+      valid_loopback_url?(browser["url"]) and
+      valid_browser_literal?(browser["ready_text"], 256) and
+      valid_snapshot_assertions?(browser["snapshot_contains"])
+  end
+
+  defp valid_browser_proof?(proof), do: not Map.has_key?(proof, "browser") and not Map.has_key?(proof, "type")
+
+  defp valid_loopback_url?(url) when is_binary(url) and byte_size(url) <= 2_048 do
+    case URI.parse(url) do
+      %URI{
+        scheme: "http",
+        host: "127.0.0.1",
+        port: port,
+        userinfo: nil,
+        fragment: nil
+      }
+      when is_integer(port) and port in 1024..65_535 ->
+        true
+
+      _other ->
+        false
+    end
+  end
+
+  defp valid_loopback_url?(_url), do: false
+
+  defp valid_snapshot_assertions?(assertions)
+       when is_list(assertions) and assertions != [] and length(assertions) <= @max_browser_assertions do
+    Enum.uniq(assertions) == assertions and Enum.all?(assertions, &valid_browser_literal?(&1, 512))
+  end
+
+  defp valid_snapshot_assertions?(_assertions), do: false
+
+  defp valid_browser_literal?(value, max_bytes) when is_binary(value) do
+    byte_size(value) in 1..max_bytes and
+      not String.contains?(value, [<<0>>, "\n", "\r"])
+  end
+
+  defp valid_browser_literal?(_value, _max_bytes), do: false
 
   defp validate_references(proofs, phases) do
     proofs_by_id = Map.new(proofs, &{&1["id"], &1})

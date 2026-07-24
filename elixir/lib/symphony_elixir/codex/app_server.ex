@@ -6,9 +6,9 @@ defmodule SymphonyElixir.Codex.AppServer do
   require Logger
 
   alias SymphonyElixir.{
+    Codex.BrowserProofRunner,
     Codex.CapabilityDiagnostics,
     Codex.DynamicTool,
-    Codex.PlaywrightProofServer,
     Config,
     PathSafety,
     SSH
@@ -26,10 +26,14 @@ defmodule SymphonyElixir.Codex.AppServer do
   @playwright_runtime_probe_id 10
   @capability_probe_timeout_ms 30_000
   @required_playwright_tools ~w(
+    browser_close
+    browser_console_messages
     browser_navigate
+    browser_network_requests
     browser_snapshot
     browser_tabs
     browser_take_screenshot
+    browser_wait_for
   )
   @goal_statuses ~w(active blocked complete)
   @port_line_bytes 1_048_576
@@ -203,53 +207,60 @@ defmodule SymphonyElixir.Codex.AppServer do
   def run_command(%{port: port, workspace: workspace, worker_host: worker_host}, directory, command, opts)
       when is_binary(directory) and is_binary(command) do
     with {:ok, command_directory} <- validate_command_directory(workspace, directory, worker_host) do
-      browser_path = Keyword.get(opts, :browser_path)
-
-      if browser_path[:selected] == "playwright_headless" do
-        run_playwright_command(
-          port,
-          workspace,
-          command_directory,
-          command,
-          opts,
-          worker_host,
-          browser_path
-        )
-      else
-        do_run_command(port, workspace, command_directory, command, opts, nil, nil)
-      end
+      do_run_command(port, workspace, command_directory, command, opts)
     end
   end
 
-  defp run_playwright_command(port, workspace, directory, command, opts, worker_host, browser_path) do
-    playwright_server = Keyword.get(opts, :playwright_server, &PlaywrightProofServer.with_endpoint/4)
+  @spec run_browser_proof(session(), Path.t(), String.t(), map(), keyword()) ::
+          {:ok, map()} | {:error, map()}
+  def run_browser_proof(
+        %{
+          port: port,
+          thread_id: thread_id,
+          workspace: workspace,
+          worker_host: worker_host
+        },
+        directory,
+        command,
+        browser,
+        opts
+      )
+      when is_binary(directory) and is_binary(command) and is_map(browser) do
+    browser_path = Keyword.get(opts, :browser_path, %{})
 
-    case playwright_server.(
-           workspace,
-           directory,
-           worker_host,
-           &do_run_command(port, workspace, directory, command, opts, browser_path, &1)
-         ) do
-      {:error, %{reason: _reason}} = error ->
-        error
-
-      {:error, reason} ->
-        {:error,
-         browser_selection_metadata(browser_path)
-         |> Map.put(:reason, inspect(reason))}
-
-      result ->
-        result
+    with true <-
+           (browser_path[:selected] == "playwright_headless" and
+              browser_path[:provenance] == "codex_global_mcp") or
+             browser_unavailable(browser_path),
+         {:ok, command_directory} <- validate_command_directory(workspace, directory, worker_host) do
+      BrowserProofRunner.run(
+        port,
+        thread_id,
+        workspace,
+        command_directory,
+        command,
+        browser,
+        opts
+      )
     end
   end
 
-  defp do_run_command(port, workspace, command_directory, command, opts, browser_path, browser_server) do
+  defp browser_unavailable(browser_path) do
+    {:error,
+     %{
+       reason: "browser_capability_unavailable",
+       browser_path: browser_path[:selected] || "unavailable",
+       browser_selection_provenance: browser_path[:provenance] || "capability_diagnostics",
+       browser_failure_stage: "capability",
+       browser_failure_code: "browser_capability_unavailable"
+     }}
+  end
+
+  defp do_run_command(port, workspace, command_directory, command, opts) do
     timeout_ms = Keyword.fetch!(opts, :timeout_ms)
     output_bytes_cap = Keyword.fetch!(opts, :output_bytes_cap)
 
-    environment =
-      Map.put(Map.new(@proof_secret_env, &{&1, nil}), "PATH", System.get_env("PATH"))
-      |> maybe_put_browser_endpoint(browser_server)
+    environment = Map.put(Map.new(@proof_secret_env, &{&1, nil}), "PATH", System.get_env("PATH"))
 
     send_message(port, %{
       "method" => "command/exec",
@@ -273,68 +284,15 @@ defmodule SymphonyElixir.Codex.AppServer do
     case await_response(port, @command_exec_id, timeout_ms + 5_000) do
       {:ok, %{"exitCode" => status, "stdout" => stdout, "stderr" => stderr}}
       when is_integer(status) and is_binary(stdout) and is_binary(stderr) ->
-        result = %{
-          exit_status: status,
-          stdout: redact_browser_endpoint(stdout, browser_server),
-          stderr: redact_browser_endpoint(stderr, browser_server)
-        }
-
-        {:ok, Map.merge(result, browser_metadata(browser_path, browser_server))}
+        {:ok, %{exit_status: status, stdout: stdout, stderr: stderr}}
 
       {:ok, payload} ->
-        reason = {:invalid_command_exec_response, redact_browser_endpoint(payload, browser_server)}
-        {:error, browser_failure(reason, browser_path, browser_server)}
+        {:error, {:invalid_command_exec_response, payload}}
 
       {:error, reason} ->
-        {:error, browser_failure(reason, browser_path, browser_server)}
+        {:error, reason}
     end
   end
-
-  defp maybe_put_browser_endpoint(environment, %{endpoint: endpoint}) when is_binary(endpoint),
-    do: Map.put(environment, "PW_TEST_CONNECT_WS_ENDPOINT", endpoint)
-
-  defp maybe_put_browser_endpoint(environment, _browser_server), do: environment
-
-  defp browser_metadata(%{provenance: selection_provenance}, %{
-         path: path,
-         provenance: provenance,
-         version: version
-       })
-       when is_binary(path) and is_binary(provenance) and is_binary(selection_provenance) and
-              is_binary(version) do
-    %{
-      browser_path: path,
-      browser_provenance: provenance,
-      browser_selection_provenance: selection_provenance,
-      browser_version: version
-    }
-  end
-
-  defp browser_metadata(_browser_path, _browser_server), do: %{}
-
-  defp browser_selection_metadata(%{selected: path, provenance: provenance})
-       when is_binary(path) and is_binary(provenance) do
-    %{browser_path: path, browser_selection_provenance: provenance}
-  end
-
-  defp browser_selection_metadata(_browser_path), do: %{}
-
-  defp browser_failure(reason, browser_path, browser_server) do
-    browser_path
-    |> browser_metadata(browser_server)
-    |> Map.put(:reason, inspect(reason))
-  end
-
-  defp redact_browser_endpoint(value, %{endpoint: endpoint}) when is_binary(value) and is_binary(endpoint),
-    do: String.replace(value, endpoint, "[REDACTED_PLAYWRIGHT_ENDPOINT]")
-
-  defp redact_browser_endpoint(value, %{endpoint: endpoint}) when is_map(value) and is_binary(endpoint),
-    do: Map.new(value, fn {key, item} -> {key, redact_browser_endpoint(item, %{endpoint: endpoint})} end)
-
-  defp redact_browser_endpoint(value, %{endpoint: endpoint}) when is_list(value) and is_binary(endpoint),
-    do: Enum.map(value, &redact_browser_endpoint(&1, %{endpoint: endpoint}))
-
-  defp redact_browser_endpoint(value, _browser_server), do: value
 
   @spec set_goal(session(), String.t(), keyword()) :: :ok | {:error, term()}
   def set_goal(%{port: port, thread_id: thread_id}, objective, opts \\ [])
