@@ -112,6 +112,96 @@ defmodule SymphonyElixir.ExecutionControlTest do
     assert green["passed"]
   end
 
+  test "does not record browser provenance for an ordinary command proof", ctx do
+    command_executor = fn _directory, _command, _opts ->
+      {:ok,
+       %{
+         exit_status: 2,
+         stdout: "expected failure",
+         stderr: "",
+         browser_path: "playwright_headless",
+         browser_provenance: "mcpServer/tool/call",
+         browser_selection_provenance: "codex_global_mcp",
+         browser_evidence_hash: String.duplicate("d", 64)
+       }}
+    end
+
+    assert {:ok, receipt} =
+             SymphonyElixir.ExecutionControl.run_plan_proof(
+               ctx.plan,
+               ctx.key,
+               ctx.workspace,
+               "reproduce",
+               "red",
+               command_executor: command_executor
+             )
+
+    refute Map.has_key?(receipt, "browser_path")
+    refute Map.has_key?(receipt, "browser_evidence_hash")
+  end
+
+  test "routes only an explicitly typed browser proof and records safe evidence", ctx do
+    browser = %{
+      "url" => "http://127.0.0.1:43127/",
+      "ready_text" => "ready",
+      "snapshot_contains" => ["Dashboard"]
+    }
+
+    plan =
+      update_in(ctx.plan, ["candidate", "proofs"], fn proofs ->
+        Enum.map(proofs, fn
+          %{"id" => "red"} = proof ->
+            proof
+            |> Map.put("type", "browser")
+            |> Map.put("browser", browser)
+
+          proof ->
+            proof
+        end)
+      end)
+
+    browser_executor = fn directory, command, received_browser, opts ->
+      send(self(), {:browser_proof, directory, command, received_browser, opts})
+
+      {:ok,
+       %{
+         exit_status: 2,
+         stdout: "expected failure",
+         stderr: "",
+         browser_path: "playwright_headless",
+         browser_provenance: "mcpServer/tool/call",
+         browser_selection_provenance: "codex_global_mcp",
+         browser_evidence_hash: String.duplicate("d", 64)
+       }}
+    end
+
+    assert {:ok, receipt} =
+             ExecutionControl.run_plan_proof(
+               plan,
+               ctx.key,
+               ctx.workspace,
+               "reproduce",
+               "red",
+               browser_executor: browser_executor
+             )
+
+    assert_receive {:browser_proof, _directory, "exit 2", ^browser, opts}
+    assert Keyword.fetch!(opts, :timeout_ms) == 1_000
+    assert receipt["passed"]
+
+    assert Map.take(receipt, [
+             "browser_path",
+             "browser_provenance",
+             "browser_selection_provenance",
+             "browser_evidence_hash"
+           ]) == %{
+             "browser_path" => "playwright_headless",
+             "browser_provenance" => "mcpServer/tool/call",
+             "browser_selection_provenance" => "codex_global_mcp",
+             "browser_evidence_hash" => String.duplicate("d", 64)
+           }
+  end
+
   test "limits every proof to three attempts", ctx do
     for remaining <- [2, 1, 0] do
       assert {:ok, %{"attempts_remaining" => ^remaining}} =

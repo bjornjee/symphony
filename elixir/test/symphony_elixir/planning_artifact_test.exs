@@ -86,6 +86,44 @@ defmodule SymphonyElixir.PlanningArtifactTest do
              PlanningArtifact.persist_candidate(workspace, 1, changed, context, native_plan)
   end
 
+  test "persists an explicitly typed browser proof without changing command proofs", %{
+    workspace: workspace,
+    context: context,
+    candidate: candidate
+  } do
+    browser = %{
+      "url" => "http://127.0.0.1:43127/",
+      "ready_text" => "visual fixture ready",
+      "snapshot_contains" => ["Agent dashboard", "Running"]
+    }
+
+    candidate =
+      update_in(candidate, ["proofs"], fn proofs ->
+        Enum.map(proofs, fn
+          %{"id" => "final"} = proof ->
+            proof
+            |> Map.put("command", "mix run --no-start test/support/dashboard_visual_fixture.exs")
+            |> Map.put("type", "browser")
+            |> Map.put("browser", browser)
+
+          proof ->
+            proof
+        end)
+      end)
+
+    assert {:ok, persisted} =
+             PlanningArtifact.persist_candidate(
+               workspace,
+               1,
+               candidate,
+               context,
+               candidate["ordered_steps"]
+             )
+
+    assert get_in(persisted, ["proofs", Access.at(0), "type"]) == nil
+    assert get_in(persisted, ["proofs", Access.at(1), "browser"]) == browser
+  end
+
   test "allows a read-only phase with no affected paths", %{
     workspace: workspace,
     context: context,

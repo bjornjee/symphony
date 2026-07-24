@@ -107,6 +107,54 @@ defmodule SymphonyElixir.ProofContractTest do
              )
   end
 
+  test "accepts a bounded typed browser proof" do
+    phases = [phase("final", [], ["browser-proof"])]
+
+    browser_proof =
+      proof("browser-proof", "final", "final", "success", ["criterion-1"])
+      |> Map.put("command", "mix phx.server")
+      |> Map.put("type", "browser")
+      |> Map.put("browser", %{
+        "url" => "http://127.0.0.1:43127/dashboard",
+        "ready_text" => "Running SymphonyWeb.Endpoint",
+        "snapshot_contains" => ["Agent dashboard", "Running"]
+      })
+
+    assert :ok = ProofContract.validate([browser_proof], phases, ["criterion-1"], ["lib/example.ex"])
+  end
+
+  test "rejects browser proofs that can navigate outside the sealed loopback origin" do
+    phases = [phase("final", [], ["browser-proof"])]
+
+    browser_proof =
+      proof("browser-proof", "final", "final", "success", ["criterion-1"])
+      |> Map.put("type", "browser")
+      |> Map.put("browser", %{
+        "url" => "https://example.com/dashboard",
+        "ready_text" => "ready",
+        "snapshot_contains" => ["Dashboard"]
+      })
+
+    assert {:error, {:invalid_browser_proof, "browser-proof"}} =
+             ProofContract.validate([browser_proof], phases, ["criterion-1"], ["lib/example.ex"])
+  end
+
+  test "rejects browser proofs without accessibility assertions" do
+    phases = [phase("final", [], ["browser-proof"])]
+
+    browser_proof =
+      proof("browser-proof", "final", "final", "success", ["criterion-1"])
+      |> Map.put("type", "browser")
+      |> Map.put("browser", %{
+        "url" => "http://127.0.0.1:43127/",
+        "ready_text" => "ready",
+        "snapshot_contains" => []
+      })
+
+    assert {:error, {:invalid_browser_proof, "browser-proof"}} =
+             ProofContract.validate([browser_proof], phases, ["criterion-1"], ["lib/example.ex"])
+  end
+
   test "requires RED for a fix workflow" do
     final_phase = [phase("final", [], ["final-proof"])]
     final = proof("final-proof", "final", "final", "success", ["criterion-1"])

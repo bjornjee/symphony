@@ -659,7 +659,7 @@ defmodule SymphonyElixir.PlanningLifecycle do
     Inspect only the bounded repository context needed to plan. Use the native plan tool and finish with one final plan update.
     Then call `submit_execution_plan` exactly once. Its ordered_steps must exactly match that final native plan update by step text and order.
     Treat every ordered step as an independently verifiable execution phase. Give it a stable id, only prior-phase dependencies, affected paths, verification profile, proof IDs, criterion IDs, invariants, stop conditions, and evidence requirements.
-    Define every proof as a typed contract with id, phase_id, role, exact command, safe repository-relative working_directory, expected_exit, timeout_ms, and criterion_ids. Every criterion must be covered. Set red_policy to required or waived; waived requires a concrete red_waiver_rationale.
+    Define every command proof with exactly id, phase_id, role, exact command, safe repository-relative working_directory, expected_exit, timeout_ms, and criterion_ids. For a local browser-rendering proof, add type `browser` and browser `{url, ready_text, snapshot_contains}`: command starts only the fixture, url must be an explicit `http://127.0.0.1:<nonprivileged-port>/...` target, ready_text is its literal readiness marker, and snapshot_contains lists the literal accessibility-snapshot assertions. Do not put browser transports, tool names, JavaScript, filenames, or session identifiers in a proof. Every criterion must be covered. Set red_policy to required or waived; waived requires a concrete red_waiver_rationale.
 
     #{revision_guidance}
 

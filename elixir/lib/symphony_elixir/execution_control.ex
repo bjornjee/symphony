@@ -68,38 +68,40 @@ defmodule SymphonyElixir.ExecutionControl do
          command_result <-
            EngineCommand.run(proof_directory, proof["command"],
              timeout_ms: min(proof["timeout_ms"], 1_800_000),
-             executor: Keyword.get(opts, :command_executor)
+             executor: proof_executor(proof, opts)
            ),
          {:ok, after_state} <- RepositoryFingerprint.capture(workspace, Keyword.get(opts, :worker_host)) do
       {result, runner_error} = normalize_command_result(command_result)
       freshness_error = proof_freshness_error(proof, before, after_state, execution_base(plan))
       passed = is_nil(runner_error) and is_nil(freshness_error) and expected_exit?(proof["expected_exit"], result.exit_status)
 
-      receipt = %{
-        "plan_digest" => plan["plan_digest"],
-        "instruction_digest" => plan["instruction_digest"],
-        "profile_digest" => plan["profile_digest"],
-        "proof_id" => proof_id,
-        "proof_digest" => PlanningArtifact.digest(proof),
-        "phase_id" => phase_id,
-        "role" => proof["role"],
-        "criterion_ids" => proof["criterion_ids"],
-        "generation" => generation,
-        "attempt" => attempt,
-        "attempts_remaining" => 3 - attempt,
-        "expected_exit" => proof["expected_exit"],
-        "exit_status" => result.exit_status,
-        "passed" => passed,
-        "runner_error" => runner_error,
-        "freshness_error" => freshness_error,
-        "output_bytes" => result.output_bytes,
-        "output_hash" => result.output_hash,
-        "diagnostic_tail" => result.output_tail,
-        "before_state_digest" => before.digest,
-        "after_state_digest" => after_state.digest,
-        "head_sha" => after_state.base_sha,
-        "recorded_at" => DateTime.utc_now() |> DateTime.to_iso8601()
-      }
+      receipt =
+        %{
+          "plan_digest" => plan["plan_digest"],
+          "instruction_digest" => plan["instruction_digest"],
+          "profile_digest" => plan["profile_digest"],
+          "proof_id" => proof_id,
+          "proof_digest" => PlanningArtifact.digest(proof),
+          "phase_id" => phase_id,
+          "role" => proof["role"],
+          "criterion_ids" => proof["criterion_ids"],
+          "generation" => generation,
+          "attempt" => attempt,
+          "attempts_remaining" => 3 - attempt,
+          "expected_exit" => proof["expected_exit"],
+          "exit_status" => result.exit_status,
+          "passed" => passed,
+          "runner_error" => runner_error,
+          "freshness_error" => freshness_error,
+          "output_bytes" => result.output_bytes,
+          "output_hash" => result.output_hash,
+          "diagnostic_tail" => result.output_tail,
+          "before_state_digest" => before.digest,
+          "after_state_digest" => after_state.digest,
+          "head_sha" => after_state.base_sha,
+          "recorded_at" => DateTime.utc_now() |> DateTime.to_iso8601()
+        }
+        |> Map.merge(browser_receipt_metadata(proof, result))
 
       case ExecutionLedger.create(
              ledger_key,
@@ -694,6 +696,39 @@ defmodule SymphonyElixir.ExecutionControl do
   defp normalize_command_result({:error, reason}) do
     {%{exit_status: nil, output_bytes: 0, output_hash: PlanningArtifact.digest(""), output_tail: ""}, inspect(reason)}
   end
+
+  defp browser_receipt_metadata(%{"type" => "browser"}, result) do
+    [
+      browser_path: "browser_path",
+      browser_provenance: "browser_provenance",
+      browser_selection_provenance: "browser_selection_provenance",
+      browser_evidence_hash: "browser_evidence_hash",
+      browser_failure_stage: "browser_failure_stage",
+      browser_failure_code: "browser_failure_code"
+    ]
+    |> Enum.reduce(%{}, fn {source, destination}, metadata ->
+      case Map.get(result, source) do
+        value when is_binary(value) -> Map.put(metadata, destination, value)
+        _ -> metadata
+      end
+    end)
+  end
+
+  defp browser_receipt_metadata(_proof, _result), do: %{}
+
+  defp proof_executor(%{"type" => "browser", "browser" => browser}, opts) do
+    case Keyword.get(opts, :browser_executor) do
+      executor when is_function(executor, 4) ->
+        fn directory, command, command_opts ->
+          executor.(directory, command, browser, command_opts)
+        end
+
+      _other ->
+        nil
+    end
+  end
+
+  defp proof_executor(_proof, opts), do: Keyword.get(opts, :command_executor)
 
   defp require_role(plan, key, role) do
     proof_ids =

@@ -1089,6 +1089,20 @@ client to:
   - prefer a runtime-bound Codex Browser backend when available
   - otherwise select a responsive inherited headless Playwright MCP for automated rendering,
     inspection, screenshots, and behavior checks
+  - execute only explicitly sealed browser proofs through a fixed engine-owned sequence over the
+    inherited Playwright MCP; the sandboxed command starts the local fixture with a clean
+    allowlisted environment whose `HOME`, `PATH`, and `TMPDIR` values are resolved on the
+    app-server worker before all other variables are cleared, and only the platform's required
+    network boolean for its loopback bind,
+    and receives no browser endpoint, transport, tool name,
+    executable JavaScript, process identifier, or session identifier
+  - wait for an approved literal, require accessibility-snapshot assertions plus a complete
+    CRC-valid rendered PNG, require the final page and at least one recorded HTTP request to remain
+    on the sealed origin, reject any recorded HTTP/WebSocket request outside that origin, require
+    zero console errors, hash bounded observations, and terminate the fixture within one monotonic
+    deadline
+  - record capability-selection provenance separately from the actual proof browser runtime
+    provenance, without endpoints or session identifiers
   - report an actionable unavailable state when neither browser path responds
 - Browser plugin enablement MUST NOT be treated as evidence that a Browser backend is bound to the
   app-server session. Implementations MUST NOT attach to undocumented Desktop transports or copy
@@ -1299,6 +1313,18 @@ single-path eligible `feature` or `chore` workflow with one criterion and one ex
     attempts. Three failed receipts publish one deterministic read-back-verified blocker, move the
     issue to Human Review, mark the goal blocked, and return a terminal non-retryable completion.
     No unsandboxed fallback exists, and agent shell events never satisfy proof contracts.
+    Browser proofs are an explicit additive plan variant. Their command starts only a local fixture
+    through streaming `command/exec` with worker-local `HOME`, `PATH`, and `TMPDIR`, after which all
+    other environment variables are cleared. The current app-server sandbox
+    requires its network boolean for loopback binds, so the engine rejects recorded browser traffic
+    if it observes no HTTP request or any HTTP/WebSocket request outside the sealed origin. The engine
+    performs fixed navigate, wait, bounded accessibility snapshot, structurally valid full-page
+    screenshot, final-origin/HTTP/WebSocket/console audit, and close operations through the inherited
+    Playwright MCP.
+    Receipts record selection and execution provenance plus observation hashes or stable failure
+    stage/code fields, never raw page content, screenshots, endpoints, process IDs, session IDs, or
+    secrets. Existing command proofs are never inferred to be browser proofs. Missing capabilities,
+    malformed observations, timeouts, and cleanup failures fail closed.
 13. For `planned`, preserve native-plan identity for visibility while immutable external proof,
     diagnosis, and phase receipts authoritatively gate ordered progress. Fixes require RED then a
     grounded diagnosis before GREEN; refactors require a clean baseline and preservation proofs.

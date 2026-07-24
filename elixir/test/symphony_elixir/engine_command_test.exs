@@ -32,12 +32,68 @@ defmodule SymphonyElixir.EngineCommandTest do
     assert failed.exit_status == 7
   end
 
+  test "preserves safe browser execution provenance from the sandbox executor" do
+    executor =
+      executor(
+        {:ok,
+         %{
+           exit_status: 0,
+           stdout: "passed",
+           stderr: "",
+           browser_path: "playwright_headless",
+           browser_provenance: "mcpServer/tool/call",
+           browser_selection_provenance: "codex_global_mcp",
+           browser_evidence_hash: String.duplicate("d", 64)
+         }}
+      )
+
+    assert {:ok, result} =
+             EngineCommand.run(System.tmp_dir!(), "npm test",
+               timeout_ms: 1_000,
+               executor: executor
+             )
+
+    assert Map.take(result, [
+             :browser_path,
+             :browser_provenance,
+             :browser_selection_provenance,
+             :browser_evidence_hash
+           ]) == %{
+             browser_path: "playwright_headless",
+             browser_provenance: "mcpServer/tool/call",
+             browser_selection_provenance: "codex_global_mcp",
+             browser_evidence_hash: String.duplicate("d", 64)
+           }
+  end
+
   test "reports a sandbox timeout" do
     assert {:error, %{reason: :timeout}} =
              EngineCommand.run(System.tmp_dir!(), "sleep 1",
                timeout_ms: 20,
                executor: executor({:error, :timeout})
              )
+  end
+
+  test "preserves selected browser provenance when the browser runner fails" do
+    error = %{
+      reason: "browser capability unavailable",
+      browser_path: "playwright_headless",
+      browser_selection_provenance: "codex_global_mcp",
+      browser_failure_stage: "capability",
+      browser_failure_code: "browser_capability_unavailable"
+    }
+
+    assert {:error, result} =
+             EngineCommand.run(System.tmp_dir!(), "npm test",
+               timeout_ms: 20,
+               executor: executor({:error, error})
+             )
+
+    assert result.reason == "browser capability unavailable"
+    assert result.browser_path == "playwright_headless"
+    assert result.browser_selection_provenance == "codex_global_mcp"
+    assert result.browser_failure_stage == "capability"
+    assert result.browser_failure_code == "browser_capability_unavailable"
   end
 
   test "rejects oversized combined sandbox output" do

@@ -597,20 +597,65 @@ defmodule SymphonyElixir.PlanningArtifact do
   defp proof_schema(string, string_array) do
     fields = ~w(id phase_id role command working_directory expected_exit timeout_ms criterion_ids)
 
+    properties = %{
+      "id" => %{"type" => "string", "pattern" => "^[a-z][a-z0-9_-]{0,63}$"},
+      "phase_id" => %{"type" => "string", "pattern" => "^[a-z][a-z0-9_-]{0,63}$"},
+      "role" => %{"type" => "string", "enum" => ~w(red green baseline phase final validator)},
+      "command" => string,
+      "working_directory" => string,
+      "expected_exit" => %{"type" => "string", "enum" => ~w(success failure)},
+      "timeout_ms" => %{"type" => "integer", "minimum" => 1, "maximum" => 1_800_000},
+      "criterion_ids" => string_array
+    }
+
     %{
-      "type" => "object",
-      "additionalProperties" => false,
-      "required" => fields,
-      "properties" => %{
-        "id" => %{"type" => "string", "pattern" => "^[a-z][a-z0-9_-]{0,63}$"},
-        "phase_id" => %{"type" => "string", "pattern" => "^[a-z][a-z0-9_-]{0,63}$"},
-        "role" => %{"type" => "string", "enum" => ~w(red green baseline phase final validator)},
-        "command" => string,
-        "working_directory" => string,
-        "expected_exit" => %{"type" => "string", "enum" => ~w(success failure)},
-        "timeout_ms" => %{"type" => "integer", "minimum" => 1, "maximum" => 1_800_000},
-        "criterion_ids" => string_array
-      }
+      "oneOf" => [
+        %{
+          "type" => "object",
+          "additionalProperties" => false,
+          "required" => fields,
+          "properties" => properties
+        },
+        %{
+          "type" => "object",
+          "additionalProperties" => false,
+          "required" => fields ++ ~w(type browser),
+          "properties" =>
+            Map.merge(properties, %{
+              "type" => %{"type" => "string", "enum" => ["browser"]},
+              "browser" => %{
+                "type" => "object",
+                "additionalProperties" => false,
+                "required" => ~w(url ready_text snapshot_contains),
+                "properties" => %{
+                  "url" => %{
+                    "type" => "string",
+                    "maxLength" => 2_048,
+                    "pattern" => "^http://127\\.0\\.0\\.1:[0-9]{4,5}(?:/[^#]*)?$"
+                  },
+                  "ready_text" => %{
+                    "type" => "string",
+                    "minLength" => 1,
+                    "maxLength" => 256,
+                    "pattern" => "^[^\\u0000\\r\\n]+$"
+                  },
+                  "snapshot_contains" => %{
+                    "type" => "array",
+                    "minItems" => 1,
+                    "maxItems" => 32,
+                    "uniqueItems" => true,
+                    "items" => %{
+                      "type" => "string",
+                      "minLength" => 1,
+                      "maxLength" => 512,
+                      "pattern" => "^[^\\u0000\\r\\n]+$"
+                    }
+                  }
+                }
+              }
+            })
+        }
+      ]
     }
   end
 

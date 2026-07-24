@@ -4,7 +4,15 @@ defmodule SymphonyElixir.Codex.AppServer do
   """
 
   require Logger
-  alias SymphonyElixir.{Codex.CapabilityDiagnostics, Codex.DynamicTool, Config, PathSafety, SSH}
+
+  alias SymphonyElixir.{
+    Codex.BrowserProofRunner,
+    Codex.CapabilityDiagnostics,
+    Codex.DynamicTool,
+    Config,
+    PathSafety,
+    SSH
+  }
 
   @initialize_id 1
   @thread_start_id 2
@@ -18,10 +26,14 @@ defmodule SymphonyElixir.Codex.AppServer do
   @playwright_runtime_probe_id 10
   @capability_probe_timeout_ms 30_000
   @required_playwright_tools ~w(
+    browser_close
+    browser_console_messages
     browser_navigate
+    browser_network_requests
     browser_snapshot
     browser_tabs
     browser_take_screenshot
+    browser_wait_for
   )
   @goal_statuses ~w(active blocked complete)
   @port_line_bytes 1_048_576
@@ -194,40 +206,91 @@ defmodule SymphonyElixir.Codex.AppServer do
           {:ok, %{exit_status: integer(), stdout: String.t(), stderr: String.t()}} | {:error, term()}
   def run_command(%{port: port, workspace: workspace, worker_host: worker_host}, directory, command, opts)
       when is_binary(directory) and is_binary(command) do
+    with {:ok, command_directory} <- validate_command_directory(workspace, directory, worker_host) do
+      do_run_command(port, workspace, command_directory, command, opts)
+    end
+  end
+
+  @spec run_browser_proof(session(), Path.t(), String.t(), map(), keyword()) ::
+          {:ok, map()} | {:error, map()}
+  def run_browser_proof(
+        %{
+          port: port,
+          thread_id: thread_id,
+          workspace: workspace,
+          worker_host: worker_host
+        },
+        directory,
+        command,
+        browser,
+        opts
+      )
+      when is_binary(directory) and is_binary(command) and is_map(browser) do
+    browser_path = Keyword.get(opts, :browser_path, %{})
+
+    with true <-
+           (browser_path[:selected] == "playwright_headless" and
+              browser_path[:provenance] == "codex_global_mcp") or
+             browser_unavailable(browser_path),
+         {:ok, command_directory} <- validate_command_directory(workspace, directory, worker_host) do
+      BrowserProofRunner.run(
+        port,
+        thread_id,
+        workspace,
+        command_directory,
+        command,
+        browser,
+        opts
+      )
+    end
+  end
+
+  defp browser_unavailable(browser_path) do
+    {:error,
+     %{
+       reason: "browser_capability_unavailable",
+       browser_path: browser_path[:selected] || "unavailable",
+       browser_selection_provenance: browser_path[:provenance] || "capability_diagnostics",
+       browser_failure_stage: "capability",
+       browser_failure_code: "browser_capability_unavailable"
+     }}
+  end
+
+  defp do_run_command(port, workspace, command_directory, command, opts) do
     timeout_ms = Keyword.fetch!(opts, :timeout_ms)
     output_bytes_cap = Keyword.fetch!(opts, :output_bytes_cap)
 
-    with {:ok, command_directory} <- validate_command_directory(workspace, directory, worker_host) do
-      send_message(port, %{
-        "method" => "command/exec",
-        "id" => @command_exec_id,
-        "params" => %{
-          "command" => ["sh", "-c", command],
-          "cwd" => command_directory,
-          "timeoutMs" => timeout_ms,
-          "outputBytesCap" => output_bytes_cap,
-          "env" => Map.put(Map.new(@proof_secret_env, &{&1, nil}), "PATH", System.get_env("PATH")),
-          "sandboxPolicy" => %{
-            "type" => "workspaceWrite",
-            "writableRoots" => [workspace],
-            "networkAccess" => true,
-            "excludeSlashTmp" => false,
-            "excludeTmpdirEnvVar" => false
-          }
+    environment = Map.put(Map.new(@proof_secret_env, &{&1, nil}), "PATH", System.get_env("PATH"))
+
+    send_message(port, %{
+      "method" => "command/exec",
+      "id" => @command_exec_id,
+      "params" => %{
+        "command" => ["sh", "-c", command],
+        "cwd" => command_directory,
+        "timeoutMs" => timeout_ms,
+        "outputBytesCap" => output_bytes_cap,
+        "env" => environment,
+        "sandboxPolicy" => %{
+          "type" => "workspaceWrite",
+          "writableRoots" => [workspace],
+          "networkAccess" => true,
+          "excludeSlashTmp" => false,
+          "excludeTmpdirEnvVar" => false
         }
-      })
+      }
+    })
 
-      case await_response(port, @command_exec_id, timeout_ms + 5_000) do
-        {:ok, %{"exitCode" => status, "stdout" => stdout, "stderr" => stderr}}
-        when is_integer(status) and is_binary(stdout) and is_binary(stderr) ->
-          {:ok, %{exit_status: status, stdout: stdout, stderr: stderr}}
+    case await_response(port, @command_exec_id, timeout_ms + 5_000) do
+      {:ok, %{"exitCode" => status, "stdout" => stdout, "stderr" => stderr}}
+      when is_integer(status) and is_binary(stdout) and is_binary(stderr) ->
+        {:ok, %{exit_status: status, stdout: stdout, stderr: stderr}}
 
-        {:ok, payload} ->
-          {:error, {:invalid_command_exec_response, payload}}
+      {:ok, payload} ->
+        {:error, {:invalid_command_exec_response, payload}}
 
-        {:error, _reason} = error ->
-          error
-      end
+      {:error, reason} ->
+        {:error, reason}
     end
   end
 
