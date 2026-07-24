@@ -56,6 +56,11 @@ defmodule SymphonyElixir.VerificationProfileTest do
              )
   end
 
+  test "directory descendants require an explicit directory scope" do
+    refute VerificationProfile.approved_path?("Makefile/evil", ["Makefile"])
+    assert VerificationProfile.approved_path?("docs/guide.md", ["docs/"])
+  end
+
   defp plan(profile, affected_paths) do
     %{
       "execution_mode" => "simple",

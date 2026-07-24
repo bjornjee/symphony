@@ -92,10 +92,7 @@ defmodule SymphonyElixir.RunAudit do
 
   @spec paths(Path.t(), Issue.t()) :: %{audit_path: Path.t(), audit_events_path: Path.t()}
   def paths(workspace, %Issue{} = issue) when is_binary(workspace) do
-    directory =
-      if File.dir?(workspace),
-        do: audit_dir(workspace),
-        else: central_audit_dir(workspace, issue)
+    directory = central_audit_dir(workspace, issue)
 
     %{
       audit_path: Path.join(directory, @markdown_file),
@@ -249,16 +246,7 @@ defmodule SymphonyElixir.RunAudit do
   @spec summary_path(Path.t()) :: {:ok, map()} | {:error, term()}
   def summary_path(path) when is_binary(path) do
     with {:ok, events} <- read_events_path(path) do
-      phases = Enum.filter(events, &(&1["event"] == "phase_timing"))
-
-      {:ok,
-       %{
-         verification_profile: latest_value(events, "verification_profile"),
-         cache: cache_summary(events),
-         slowest_phase: slowest_phase(phases),
-         budget_overruns: budget_overruns(phases),
-         phases: phases
-       }}
+      {:ok, summarize_events(events)}
     end
   end
 
@@ -565,13 +553,113 @@ defmodule SymphonyElixir.RunAudit do
     |> Enum.find_value(&Map.get(&1, key))
   end
 
-  defp cache_summary(events) do
-    initial = %{
-      context: %{hits: 0, misses: 0},
-      proof: %{hits: 0, misses: 0}
-    }
+  defp summarize_events(events) do
+    {compacted, current} = split_compacted_summary(events)
+    phases = compacted_phases(compacted) ++ Enum.filter(current, &(&1["event"] == "phase_timing"))
+    cache = merge_cache(compacted_cache(compacted), cache_summary(current))
+    current_slowest = slowest_phase(phases)
+    compacted_slowest = compacted_slowest_phase(compacted)
 
-    Enum.reduce(events, initial, fn
+    %{
+      verification_profile:
+        latest_value(current, "verification_profile") ||
+          compacted_value(compacted, "verification_profile"),
+      cache: cache,
+      slowest_phase: slower_phase(compacted_slowest, current_slowest),
+      budget_overruns:
+        compacted
+        |> compacted_budget_overruns()
+        |> Kernel.++(budget_overruns(phases))
+        |> compact_budget_overruns(),
+      phases: phases
+    }
+  end
+
+  defp split_compacted_summary(events) do
+    index =
+      events
+      |> Enum.with_index()
+      |> Enum.reverse()
+      |> Enum.find_value(fn
+        {%{"event" => "run_summary", "compacted" => true}, index} -> index
+        _event -> nil
+      end)
+
+    if is_integer(index) do
+      {Enum.at(events, index), Enum.drop(events, index + 1)}
+    else
+      {nil, events}
+    end
+  end
+
+  defp compacted_value(nil, _key), do: nil
+  defp compacted_value(summary, key), do: summary[key]
+
+  defp compacted_phases(%{"phases" => phases}) when is_list(phases), do: phases
+  defp compacted_phases(_summary), do: []
+
+  defp compacted_budget_overruns(%{"budget_overruns" => overruns}) when is_list(overruns) do
+    Enum.flat_map(overruns, fn
+      %{"phase" => phase, "budget_overrun_ms" => overrun}
+      when is_binary(phase) and is_integer(overrun) and overrun > 0 ->
+        [%{phase: phase, budget_overrun_ms: overrun}]
+
+      _invalid ->
+        []
+    end)
+  end
+
+  defp compacted_budget_overruns(_summary), do: []
+
+  defp compacted_cache(nil), do: empty_cache()
+
+  defp compacted_cache(summary) do
+    %{
+      context: %{
+        hits: non_negative_integer(summary["context_cache_hits"]),
+        misses: non_negative_integer(summary["context_cache_misses"])
+      },
+      proof: %{
+        hits: non_negative_integer(summary["proof_cache_hits"]),
+        misses: non_negative_integer(summary["proof_cache_misses"])
+      }
+    }
+  end
+
+  defp compacted_slowest_phase(%{
+         "slowest_phase" => phase,
+         "slowest_phase_duration_ms" => duration
+       })
+       when is_binary(phase) and is_integer(duration) and duration >= 0,
+       do: %{phase: phase, duration_ms: duration}
+
+  defp compacted_slowest_phase(_summary), do: nil
+
+  defp non_negative_integer(value) when is_integer(value) and value >= 0, do: value
+  defp non_negative_integer(_value), do: 0
+
+  defp merge_cache(left, right) do
+    %{
+      context: %{
+        hits: left.context.hits + right.context.hits,
+        misses: left.context.misses + right.context.misses
+      },
+      proof: %{
+        hits: left.proof.hits + right.proof.hits,
+        misses: left.proof.misses + right.proof.misses
+      }
+    }
+  end
+
+  defp slower_phase(nil, right), do: right
+  defp slower_phase(left, nil), do: left
+
+  defp slower_phase(left, right) do
+    if left.duration_ms >= right.duration_ms, do: left, else: right
+  end
+
+  defp cache_summary(events) do
+    Enum.reduce(events, empty_cache(), fn
       %{"cache" => cache, "cache_status" => status}, counts
       when cache in ["context", "execution_context"] and status in ["hit", "miss"] ->
         update_in(counts, [:context, cache_count_key(status)], &(&1 + 1))
@@ -583,6 +671,13 @@ defmodule SymphonyElixir.RunAudit do
       _event, counts ->
         counts
     end)
+  end
+
+  defp empty_cache do
+    %{
+      context: %{hits: 0, misses: 0},
+      proof: %{hits: 0, misses: 0}
+    }
   end
 
   defp cache_count_key("hit"), do: :hits
@@ -607,6 +702,20 @@ defmodule SymphonyElixir.RunAudit do
           []
       end
     end)
+  end
+
+  defp compact_budget_overruns(overruns) do
+    overruns
+    |> Enum.group_by(& &1.phase, & &1.budget_overrun_ms)
+    |> Enum.map(fn {phase, values} -> %{phase: phase, budget_overrun_ms: Enum.max(values)} end)
+    |> Enum.sort_by(& &1.phase)
+  end
+
+  defp compact_phases(phases) do
+    phases
+    |> Enum.group_by(& &1["phase"])
+    |> Enum.map(fn {_phase, values} -> Enum.max_by(values, & &1["duration_ms"]) end)
+    |> Enum.sort_by(& &1["phase"])
   end
 
   defp max_budget_overrun([]), do: 0
@@ -640,44 +749,54 @@ defmodule SymphonyElixir.RunAudit do
       end
 
     events = existing ++ [event]
-    tail = Enum.take(events, -@compact_tail_events)
+    summary = compacted_summary_event(events)
+    run_started = Enum.find(events, &(&1["event"] == "run_started"))
+    first_useful_edit = Enum.find(events, &(&1["event"] == "first_useful_edit"))
 
-    compacted =
+    tail =
       events
-      |> Enum.filter(&retain_compacted_event?/1)
-      |> Kernel.++(tail)
-      |> Enum.uniq()
-      |> encode_events()
+      |> Enum.reject(&summary_owned_event?/1)
+      |> Enum.take(-@compact_tail_events)
 
-    payload =
-      if byte_size(compacted) <= @max_summary_bytes do
-        compacted
-      else
-        tail
-        |> bounded_event_tail(@max_summary_bytes)
-        |> encode_events()
-      end
+    fixed = [run_started, first_useful_edit, summary] |> Enum.reject(&is_nil/1) |> Enum.uniq()
+    remaining_bytes = max(@max_summary_bytes - byte_size(encode_events(fixed)), 0)
+    payload = encode_events(fixed ++ bounded_event_tail(tail, remaining_bytes))
 
     File.write!(path, payload)
   end
 
-  defp retain_compacted_event?(%{"event" => event} = item) do
+  defp compacted_summary_event(events) do
+    summary = summarize_events(events)
+
+    %{
+      "event" => "run_summary",
+      "compacted" => true,
+      "timestamp" => latest_value(events, "timestamp"),
+      "verification_profile" => summary.verification_profile,
+      "context_cache_hits" => summary.cache.context.hits,
+      "context_cache_misses" => summary.cache.context.misses,
+      "proof_cache_hits" => summary.cache.proof.hits,
+      "proof_cache_misses" => summary.cache.proof.misses,
+      "slowest_phase" => summary.slowest_phase && summary.slowest_phase.phase,
+      "slowest_phase_duration_ms" => summary.slowest_phase && summary.slowest_phase.duration_ms,
+      "budget_overruns" => summary.budget_overruns,
+      "phases" => compact_phases(summary.phases)
+    }
+    |> drop_nil_values()
+  end
+
+  defp summary_owned_event?(%{"event" => event}) do
     event in [
-      "run_started",
       "phase_timing",
-      "first_useful_edit",
       "verification_profile_selected",
       "execution_plan_approved",
       "context_cache_result",
       "proof_cache_result",
-      "proof_completed",
       "run_summary"
-    ] or
-      String.starts_with?(event, "handoff_") or
-      (event == "codex_update" and is_integer(item["exit_code"]))
+    ]
   end
 
-  defp retain_compacted_event?(_event), do: false
+  defp summary_owned_event?(_event), do: false
 
   defp encode_events(events), do: Enum.map_join(events, "", &(Jason.encode!(&1) <> "\n"))
 
@@ -779,7 +898,8 @@ defmodule SymphonyElixir.RunAudit do
     do: Path.join(Path.dirname(paths(workspace, issue).audit_events_path), @first_edit_marker)
 
   defp audit_targets(workspace, issue) do
-    if File.dir?(workspace), do: [audit_dir(workspace)], else: [central_audit_dir(workspace, issue)]
+    local = if File.dir?(workspace), do: [audit_dir(workspace)], else: []
+    Enum.uniq([central_audit_dir(workspace, issue) | local])
   end
 
   defp central_audit_dir(workspace, issue) do

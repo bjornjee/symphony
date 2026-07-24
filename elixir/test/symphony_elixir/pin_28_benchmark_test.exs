@@ -16,7 +16,7 @@ defmodule SymphonyElixir.Pin28BenchmarkTest do
 
     assert report.model_configuration == %{
              kind: "deterministic-agent-replay",
-             revision: 3,
+             revision: 4,
              live_model: false
            }
 
@@ -30,7 +30,7 @@ defmodule SymphonyElixir.Pin28BenchmarkTest do
     assert report.required_artifacts.handoff_fields == ["summary", "verification", "reviewer_action", "audit"]
     assert report.expected_diff == ["Makefile", "docs/symphony-linear-setup.md"]
     assert report.evidence.expected_diff == "PIN-28 commit 41808f55"
-    assert report.evidence.verification == "deterministic lifecycle proof receipts"
+    assert report.evidence.verification == "real fixture commands with deterministic lifecycle proof receipts"
     assert report.evidence.review == "deterministic lifecycle review"
     assert report.evidence.handoff == "validated lifecycle publication and handoff"
     assert report.baseline.median_end_to_end_ms > report.candidate.median_end_to_end_ms
@@ -46,9 +46,13 @@ defmodule SymphonyElixir.Pin28BenchmarkTest do
                sample.baseline.lifecycle.planning.passed and
                sample.baseline.lifecycle.publication.passed and
                Enum.all?(sample.baseline.lifecycle.verification, &is_binary(&1.receipt_digest)) and
+               Enum.all?(sample.candidate.lifecycle.verification, &is_binary(&1.receipt_digest)) and
                is_binary(sample.baseline.lifecycle.review["receipt_digest"]) and
+               is_binary(sample.candidate.lifecycle.review["receipt_digest"]) and
                is_binary(sample.baseline.lifecycle.publication.receipt_digest) and
+               is_binary(sample.candidate.lifecycle.publication.receipt_digest) and
                is_binary(sample.baseline.lifecycle.handoff["artifact_digest"]) and
+               is_binary(sample.candidate.lifecycle.handoff["artifact_digest"]) and
                non_empty_handoff?(sample.baseline.lifecycle.handoff) and
                Map.has_key?(sample.baseline.phases, :verification_ms) and
                Map.has_key?(sample.candidate.phases, :handoff_ms) and
@@ -73,6 +77,81 @@ defmodule SymphonyElixir.Pin28BenchmarkTest do
         observation_delay_ms: 1,
         fixed_overhead_ms: 1,
         artifact_observer: observer
+      )
+
+    assert report.baseline.completion_accuracy == 0.0
+    assert report.candidate.completion_accuracy == 0.0
+    refute report.thresholds_passed
+  end
+
+  test "fails closed when required verification commands fail" do
+    executor = fn _directory, _command, _opts ->
+      {:ok, %{exit_status: 1, stdout: "", stderr: "failed"}}
+    end
+
+    report =
+      Pin28Benchmark.run(
+        runs: 10,
+        observation_delay_ms: 1,
+        fixed_overhead_ms: 1,
+        command_executor: executor
+      )
+
+    assert report.baseline.completion_accuracy == 0.0
+    assert report.candidate.completion_accuracy == 0.0
+    refute report.thresholds_passed
+  end
+
+  test "fails closed when immutable lifecycle evidence is missing" do
+    mutator = fn lifecycle ->
+      update_in(lifecycle, [:review], &Map.drop(&1, ["security"]))
+    end
+
+    report =
+      Pin28Benchmark.run(
+        runs: 10,
+        observation_delay_ms: 1,
+        fixed_overhead_ms: 1,
+        lifecycle_mutator: mutator
+      )
+
+    assert report.baseline.completion_accuracy == 0.0
+    assert report.candidate.completion_accuracy == 0.0
+    refute report.thresholds_passed
+  end
+
+  test "fails closed when validated handoff evidence is missing" do
+    mutator = fn lifecycle ->
+      update_in(lifecycle, [:handoff], &Map.delete(&1, "artifact_digest"))
+    end
+
+    report =
+      Pin28Benchmark.run(
+        runs: 10,
+        observation_delay_ms: 1,
+        fixed_overhead_ms: 1,
+        lifecycle_mutator: mutator
+      )
+
+    assert report.baseline.completion_accuracy == 0.0
+    assert report.candidate.completion_accuracy == 0.0
+    refute report.thresholds_passed
+  end
+
+  test "fails closed when lifecycle digests are not bound to trusted evidence" do
+    mutator = fn lifecycle ->
+      lifecycle
+      |> put_in([:review, "receipt_digest"], String.duplicate("0", 64))
+      |> put_in([:publication, :receipt_digest], String.duplicate("1", 64))
+      |> put_in([:handoff, "artifact_digest"], String.duplicate("2", 64))
+    end
+
+    report =
+      Pin28Benchmark.run(
+        runs: 10,
+        observation_delay_ms: 1,
+        fixed_overhead_ms: 1,
+        lifecycle_mutator: mutator
       )
 
     assert report.baseline.completion_accuracy == 0.0

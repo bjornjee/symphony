@@ -85,6 +85,8 @@ defmodule SymphonyElixir.Pin28Benchmark do
     observation_delay_ms = Keyword.get(opts, :observation_delay_ms, 50)
     fixed_overhead_ms = Keyword.get(opts, :fixed_overhead_ms, 75)
     artifact_observer = Keyword.get(opts, :artifact_observer, &observed_pin_28_artifacts/0)
+    command_executor = Keyword.get(opts, :command_executor, &execute_benchmark_command/3)
+    lifecycle_mutator = Keyword.get(opts, :lifecycle_mutator, &Function.identity/1)
 
     if runs < 10, do: raise(ArgumentError, "PIN-28 benchmark requires at least 10 controlled runs")
 
@@ -95,7 +97,9 @@ defmodule SymphonyElixir.Pin28Benchmark do
           observation_delay_ms,
           fixed_overhead_ms,
           artifact_observer,
-          ledger_root
+          ledger_root,
+          command_executor,
+          lifecycle_mutator
         )
       end)
 
@@ -126,13 +130,13 @@ defmodule SymphonyElixir.Pin28Benchmark do
       expected_diff: @expected_diff,
       model_configuration: %{
         kind: "deterministic-agent-replay",
-        revision: 3,
+        revision: 4,
         live_model: false
       },
       required_artifacts: Map.take(@task_contract, [:verification, :review_checks, :handoff_fields]),
       evidence: %{
         expected_diff: "PIN-28 commit 41808f55",
-        verification: "deterministic lifecycle proof receipts",
+        verification: "real fixture commands with deterministic lifecycle proof receipts",
         review: "deterministic lifecycle review",
         handoff: "validated lifecycle publication and handoff"
       },
@@ -144,7 +148,15 @@ defmodule SymphonyElixir.Pin28Benchmark do
     }
   end
 
-  defp sample(run_number, observation_delay_ms, fixed_overhead_ms, artifact_observer, ledger_root) do
+  defp sample(
+         run_number,
+         observation_delay_ms,
+         fixed_overhead_ms,
+         artifact_observer,
+         ledger_root,
+         command_executor,
+         lifecycle_mutator
+       ) do
     fixture_root = Path.join(ledger_root, "run-#{run_number}")
 
     baseline =
@@ -154,7 +166,8 @@ defmodule SymphonyElixir.Pin28Benchmark do
         fixed_overhead_ms,
         artifact_observer,
         fixture_root,
-        nil
+        nil,
+        command_executor
       )
 
     candidate =
@@ -164,15 +177,20 @@ defmodule SymphonyElixir.Pin28Benchmark do
         fixed_overhead_ms,
         artifact_observer,
         fixture_root,
-        baseline.prepared
+        baseline.prepared,
+        command_executor
       )
 
     File.rm_rf(fixture_root)
+
+    baseline_lifecycle = lifecycle_mutator.(baseline.lifecycle)
+    candidate_lifecycle = lifecycle_mutator.(candidate.lifecycle)
 
     baseline_accuracy =
       completion_accuracy_checks(
         baseline.snapshot,
         candidate.snapshot,
+        baseline_lifecycle,
         baseline.lifecycle
       )
 
@@ -180,6 +198,7 @@ defmodule SymphonyElixir.Pin28Benchmark do
       completion_accuracy_checks(
         baseline.snapshot,
         candidate.snapshot,
+        candidate_lifecycle,
         candidate.lifecycle
       )
 
@@ -188,11 +207,11 @@ defmodule SymphonyElixir.Pin28Benchmark do
       baseline:
         baseline.result
         |> Map.put(:accuracy, baseline_accuracy)
-        |> Map.put(:lifecycle, baseline.lifecycle),
+        |> Map.put(:lifecycle, baseline_lifecycle),
       candidate:
         candidate.result
         |> Map.put(:accuracy, candidate_accuracy)
-        |> Map.put(:lifecycle, candidate.lifecycle)
+        |> Map.put(:lifecycle, candidate_lifecycle)
     }
   end
 
@@ -202,7 +221,8 @@ defmodule SymphonyElixir.Pin28Benchmark do
          fixed_overhead_ms,
          artifact_observer,
          fixture_root,
-         prepared
+         prepared,
+         command_executor
        ) do
     started_ms = System.monotonic_time(:millisecond)
     snapshot = capture.(observation_delay_ms)
@@ -224,8 +244,8 @@ defmodule SymphonyElixir.Pin28Benchmark do
 
     lifecycle =
       if prepared,
-        do: reuse_lifecycle(prepared),
-        else: prepare_lifecycle(implementation, fixture_root)
+        do: reuse_lifecycle(prepared, command_executor),
+        else: prepare_lifecycle(implementation, fixture_root, command_executor)
 
     verification = lifecycle.verification
     verification_completed_ms = System.monotonic_time(:millisecond)
@@ -348,28 +368,96 @@ defmodule SymphonyElixir.Pin28Benchmark do
 
   defp percentage_improvement(_baseline, _candidate), do: 0.0
 
-  defp completion_accuracy_checks(baseline_snapshot, candidate_snapshot, lifecycle) do
+  defp completion_accuracy_checks(
+         baseline_snapshot,
+         candidate_snapshot,
+         lifecycle,
+         trusted_lifecycle
+       ) do
     %{
       expected_diff:
         lifecycle.planning.passed and
           lifecycle.implementation.changed_paths == @expected_diff,
       verification:
         baseline_snapshot == candidate_snapshot and
-          Enum.all?(lifecycle.verification, & &1.passed),
-      review:
-        lifecycle.review
-        |> Map.take(@task_contract.review_checks)
-        |> Map.values()
-        |> Enum.all?(),
+          valid_verification_evidence?(
+            lifecycle.verification,
+            trusted_lifecycle.verification
+          ),
+      review: valid_review_evidence?(lifecycle.review, trusted_lifecycle.review),
       handoff:
-        lifecycle.publication.passed and
-          Enum.all?(@task_contract.handoff_fields, fn field ->
-            lifecycle.handoff
-            |> Map.get(field)
-            |> non_empty_string?()
-          end)
+        valid_handoff_evidence?(
+          lifecycle.publication,
+          lifecycle.handoff,
+          trusted_lifecycle.publication,
+          trusted_lifecycle.handoff
+        )
     }
   end
+
+  defp valid_verification_evidence?(verification, trusted)
+       when is_list(verification) and is_list(trusted) do
+    length(verification) == length(@required_verification) and
+      length(trusted) == length(@required_verification) and
+      Enum.zip([verification, trusted, @required_verification])
+      |> Enum.all?(fn {receipt, trusted_receipt, command} ->
+        receipt.command == command and receipt.passed == true and
+          trusted_receipt.command == command and trusted_receipt.passed == true and
+          valid_digest?(receipt.receipt_digest) and
+          receipt.receipt_digest == trusted_receipt.receipt_digest
+      end)
+  end
+
+  defp valid_verification_evidence?(_verification, _trusted), do: false
+
+  defp valid_review_evidence?(review, trusted_review)
+       when is_map(review) and is_map(trusted_review) do
+    Enum.all?(@task_contract.review_checks, fn check ->
+      review[check] == true and trusted_review[check] == true
+    end) and
+      valid_digest?(review["receipt_digest"]) and
+      review["receipt_digest"] == trusted_review["receipt_digest"]
+  end
+
+  defp valid_review_evidence?(_review, _trusted_review), do: false
+
+  defp valid_handoff_evidence?(publication, handoff, trusted_publication, trusted_handoff)
+       when is_map(publication) and is_map(handoff) and is_map(trusted_publication) and
+              is_map(trusted_handoff) do
+    publication_evidence_matches?(publication, trusted_publication) and
+      handoff_evidence_matches?(handoff, trusted_handoff) and
+      handoff_fields_present?(handoff)
+  end
+
+  defp valid_handoff_evidence?(
+         _publication,
+         _handoff,
+         _trusted_publication,
+         _trusted_handoff
+       ),
+       do: false
+
+  defp publication_evidence_matches?(publication, trusted_publication) do
+    publication.passed and trusted_publication.passed and
+      valid_digest?(publication.receipt_digest) and
+      publication.receipt_digest == trusted_publication.receipt_digest
+  end
+
+  defp handoff_evidence_matches?(handoff, trusted_handoff) do
+    valid_digest?(handoff["artifact_digest"]) and
+      handoff["artifact_digest"] == trusted_handoff["artifact_digest"]
+  end
+
+  defp handoff_fields_present?(handoff) do
+    Enum.all?(@task_contract.handoff_fields, fn field ->
+      handoff
+      |> Map.get(field)
+      |> non_empty_string?()
+    end)
+  end
+
+  defp valid_digest?(value),
+    do: is_binary(value) and Regex.match?(~r/^[a-f0-9]{64}$/, value)
 
   defp plan_lifecycle do
     issue = benchmark_issue("pin-28-benchmark")
@@ -382,9 +470,9 @@ defmodule SymphonyElixir.Pin28Benchmark do
     end
   end
 
-  defp prepare_lifecycle(implementation, fixture_root) do
+  defp prepare_lifecycle(implementation, fixture_root, command_executor) do
     if valid_observed_implementation?(implementation) do
-      prepare_valid_lifecycle(implementation, fixture_root)
+      prepare_valid_lifecycle(implementation, fixture_root, command_executor)
     else
       %{
         passed: false,
@@ -393,7 +481,7 @@ defmodule SymphonyElixir.Pin28Benchmark do
     end
   end
 
-  defp prepare_valid_lifecycle(implementation, fixture_root) do
+  defp prepare_valid_lifecycle(implementation, fixture_root, command_executor) do
     workspace = Path.join(fixture_root, "repo")
     File.mkdir_p!(Path.join(workspace, "docs"))
     git!(workspace, ["init", "-q", "-b", "main"])
@@ -408,7 +496,20 @@ defmodule SymphonyElixir.Pin28Benchmark do
     issue = benchmark_issue("pin-28-#{Path.basename(fixture_root)}")
     {:ok, contract} = TaskContract.from_issue(issue)
     {:ok, _branch} = TaskBranch.ensure(workspace, issue, "chore", base_sha)
-    File.write!(Path.join(workspace, "Makefile"), "symphony-workflow:\n\t@true\n")
+
+    File.write!(
+      Path.join(workspace, "Makefile"),
+      """
+      .PHONY: symphony-workflow symphony-workflow-check all
+      symphony-workflow:
+      \t@test -f docs/symphony-linear-setup.md
+      symphony-workflow-check:
+      \t@grep -q "Symphony setup" docs/symphony-linear-setup.md
+      all:
+      \t@$(MAKE) symphony-workflow-check
+      """
+    )
+
     File.write!(Path.join(workspace, "docs/symphony-linear-setup.md"), "# Symphony setup\n")
     git!(workspace, ["add", "."])
     git!(workspace, ["commit", "-qm", implementation.commit_message])
@@ -455,7 +556,6 @@ defmodule SymphonyElixir.Pin28Benchmark do
 
     plan = Map.put(semantic, "plan_digest", PlanningArtifact.digest(semantic))
     key = ExecutionLedger.key(state.origin, issue.id, plan["plan_digest"])
-    executor = fn _directory, command, _opts -> {:ok, %{exit_status: 0, stdout: command, stderr: ""}} end
 
     verification =
       Enum.map(proofs, fn proof ->
@@ -466,7 +566,7 @@ defmodule SymphonyElixir.Pin28Benchmark do
             workspace,
             "deliver",
             proof["id"],
-            command_executor: executor
+            command_executor: command_executor
           )
 
         %{
@@ -476,10 +576,14 @@ defmodule SymphonyElixir.Pin28Benchmark do
         }
       end)
 
-    {:ok, _phase} = ExecutionControl.complete_execution_phase(plan, key, workspace, "deliver")
+    passed = Enum.all?(verification, & &1.passed)
+
+    if passed do
+      {:ok, _phase} = ExecutionControl.complete_execution_phase(plan, key, workspace, "deliver")
+    end
 
     %{
-      passed: Enum.all?(verification, & &1.passed),
+      passed: passed,
       reused: false,
       workspace: workspace,
       issue: issue,
@@ -491,11 +595,7 @@ defmodule SymphonyElixir.Pin28Benchmark do
     }
   end
 
-  defp reuse_lifecycle(%{passed: true} = lifecycle) do
-    executor = fn _directory, command, _opts ->
-      {:ok, %{exit_status: 0, stdout: command, stderr: ""}}
-    end
-
+  defp reuse_lifecycle(%{passed: true} = lifecycle, command_executor) do
     verification =
       Enum.map(lifecycle.plan["candidate"]["proofs"], fn proof ->
         {:ok, receipt} =
@@ -505,7 +605,7 @@ defmodule SymphonyElixir.Pin28Benchmark do
             lifecycle.workspace,
             "deliver",
             proof["id"],
-            command_executor: executor
+            command_executor: command_executor
           )
 
         %{
@@ -526,7 +626,7 @@ defmodule SymphonyElixir.Pin28Benchmark do
     %{lifecycle | reused: true, verification: verification}
   end
 
-  defp reuse_lifecycle(lifecycle), do: lifecycle
+  defp reuse_lifecycle(lifecycle, _command_executor), do: lifecycle
 
   defp review_lifecycle(%{passed: true} = lifecycle) do
     {:ok, approval} = lifecycle_review(lifecycle)
@@ -690,6 +790,20 @@ defmodule SymphonyElixir.Pin28Benchmark do
     case System.cmd("git", ["-C", workspace | args], stderr_to_stdout: true) do
       {output, 0} -> String.trim(output)
       {output, status} -> raise "benchmark git command failed status=#{status}: #{output}"
+    end
+  end
+
+  defp execute_benchmark_command(directory, command, _opts) do
+    {executable, args} =
+      case command do
+        "make symphony-workflow" -> {"make", ["symphony-workflow"]}
+        "make symphony-workflow-check" -> {"make", ["symphony-workflow-check"]}
+        "mise exec -- make all" -> {"mise", ["exec", "--", "make", "all"]}
+      end
+
+    case System.cmd(executable, args, cd: directory, stderr_to_stdout: true) do
+      {output, exit_status} ->
+        {:ok, %{exit_status: exit_status, stdout: output, stderr: ""}}
     end
   end
 

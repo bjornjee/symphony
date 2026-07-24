@@ -283,6 +283,7 @@ Verification profiles are selected before implementation. Observed diff expansio
 scope MUST promote `Surgical` work to at least `Targeted`; uncertain profile data MUST promote to
 `Full`. A changed path outside approved scope is both a Full-risk escalation and an authority
 violation, so delivery MUST fail closed rather than treating the broader path as implicitly approved.
+Affected directory scopes MUST end in `/`; other entries authorize only the exact repository path.
 
 Passed proof receipts MAY be reused only when proof, plan, instruction, workflow profile, repository
 digest, and head revision all match. Failed, malformed, stale, or ambiguous receipts are misses.

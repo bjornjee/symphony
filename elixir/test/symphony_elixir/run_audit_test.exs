@@ -11,9 +11,14 @@ defmodule SymphonyElixir.RunAuditTest do
         "symphony-run-audit-#{System.unique_integer([:positive, :monotonic])}"
       )
 
-    File.mkdir_p!(workspace)
-    on_exit(fn -> File.rm_rf(workspace) end)
     task = issue()
+    File.mkdir_p!(workspace)
+
+    on_exit(fn ->
+      File.rm_rf(workspace)
+      File.rm_rf(Path.dirname(RunAudit.paths(workspace, task).audit_events_path))
+    end)
+
     RunAudit.start(workspace, task)
     %{workspace: workspace, task: task}
   end
@@ -307,11 +312,13 @@ defmodule SymphonyElixir.RunAuditTest do
   end
 
   test "persists a dashboard-readable audit when the worker workspace is remote", context do
-    remote_workspace = "/remote/workspaces/#{context.task.identifier}"
+    remote_workspace = Path.join(context.workspace, "remote-worker")
+    File.mkdir_p!(remote_workspace)
     RunAudit.start(remote_workspace, context.task, %{worker_host: "worker-a"})
     RunAudit.append(remote_workspace, context.task, :workspace_prepared, %{status: "completed"})
 
     paths = RunAudit.paths(remote_workspace, context.task)
+    refute String.starts_with?(paths.audit_events_path, remote_workspace)
     assert File.exists?(paths.audit_events_path)
     assert {:ok, %{verification_profile: nil}} = RunAudit.summary_path(paths.audit_events_path)
 
@@ -329,6 +336,75 @@ defmodule SymphonyElixir.RunAuditTest do
 
     assert File.stat!(path).size <= 4_194_304
     assert {:ok, %{verification_profile: "Full"}} = RunAudit.summary(context.workspace)
+  end
+
+  test "compaction preserves aggregate diagnostics when retained events exceed the bound", context do
+    path = RunAudit.paths(context.workspace).audit_events_path
+
+    profile =
+      Jason.encode!(%{
+        "event" => "verification_profile_selected",
+        "verification_profile" => "Full"
+      })
+
+    phases =
+      Enum.map_join(1..60, "\n", fn index ->
+        Jason.encode!(%{
+          "event" => "phase_timing",
+          "phase" => if(index == 1, do: "planning", else: "verification"),
+          "duration_ms" => if(index == 1, do: 99_999, else: index),
+          "budget_overrun_ms" => if(index == 1, do: 50_000, else: nil),
+          "detail" => String.duplicate("x", 80_000)
+        })
+      end)
+
+    File.write!(path, profile <> "\n" <> phases <> "\n")
+
+    RunAudit.append(context.workspace, context.task, :proof_cache_result, %{
+      cache: "proof",
+      cache_status: "hit"
+    })
+
+    assert File.stat!(path).size <= 4_194_304
+
+    assert {:ok, summary} = RunAudit.summary(context.workspace)
+    assert summary.verification_profile == "Full"
+    assert summary.cache.proof.hits == 1
+    assert summary.slowest_phase == %{phase: "planning", duration_ms: 99_999}
+    assert summary.budget_overruns == [%{phase: "planning", budget_overrun_ms: 50_000}]
+  end
+
+  test "compaction pins the first useful edit outside the bounded activity tail", context do
+    path = RunAudit.paths(context.workspace).audit_events_path
+
+    first_edit =
+      Jason.encode!(%{
+        "event" => "first_useful_edit",
+        "timestamp" => "2026-07-24T08:00:00Z",
+        "phase" => "implementation",
+        "status" => "completed"
+      })
+
+    noise =
+      Enum.map_join(1..60, "\n", fn index ->
+        Jason.encode!(%{
+          "event" => "proof_completed",
+          "timestamp" => "2026-07-24T08:00:#{index}Z",
+          "detail" => String.duplicate("x", 80_000)
+        })
+      end)
+
+    File.write!(path, first_edit <> "\n" <> noise <> "\n")
+
+    RunAudit.append(context.workspace, context.task, :proof_cache_result, %{
+      cache: "proof",
+      cache_status: "hit"
+    })
+
+    assert Enum.any?(events(context.workspace), fn event ->
+             event["event"] == "first_useful_edit" and
+               event["timestamp"] == "2026-07-24T08:00:00Z"
+           end)
   end
 
   defp events(workspace) do

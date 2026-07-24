@@ -64,7 +64,7 @@ defmodule SymphonyElixir.VerificationProfile do
   def approved_path?(changed_path, allowed) when is_binary(changed_path) and is_list(allowed) do
     Enum.any?(allowed, fn path ->
       changed_path == path or
-        String.starts_with?(changed_path, String.trim_trailing(path, "/") <> "/")
+        (String.ends_with?(path, "/") and String.starts_with?(changed_path, path))
     end)
   end
 

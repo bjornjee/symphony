@@ -233,7 +233,7 @@ defmodule SymphonyElixir.AgentRunnerThreadResumeTest do
         "id" => "implement",
         "step" => "Implement and prove the task",
         "status" => "in_progress",
-        "affected_paths" => ["docs"],
+        "affected_paths" => ["docs/"],
         "depends_on" => [],
         "verification_profile" => "Targeted",
         "proof_ids" => ["final"],
@@ -247,7 +247,7 @@ defmodule SymphonyElixir.AgentRunnerThreadResumeTest do
     semantic =
       execution_plan
       |> Map.delete("plan_digest")
-      |> put_in(["candidate", "affected_paths"], ["docs"])
+      |> put_in(["candidate", "affected_paths"], ["docs/"])
       |> put_in(["candidate", "ordered_steps"], ordered_steps)
 
     {:ok, Map.put(semantic, "plan_digest", SymphonyElixir.PlanningArtifact.digest(semantic))}
