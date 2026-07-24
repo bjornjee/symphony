@@ -5,6 +5,9 @@ defmodule SymphonyElixirWeb.Presenter do
 
   alias SymphonyElixir.{Config, Orchestrator, StatusDashboard}
 
+  @audit_tail_bytes 64 * 1_024
+  @audit_event_limit 50
+
   @spec state_payload(GenServer.name(), timeout()) :: map()
   def state_payload(orchestrator, snapshot_timeout_ms) do
     generated_at = DateTime.utc_now() |> DateTime.truncate(:second) |> DateTime.to_iso8601()
@@ -63,6 +66,46 @@ defmodule SymphonyElixirWeb.Presenter do
     end
   end
 
+  @doc """
+  Projects the existing observability payload into dashboard-only agent summaries.
+
+  This deliberately leaves `state_payload/2` and `issue_payload/3` unchanged for API
+  consumers. Audit history is not read while building the overview.
+  """
+  @spec dashboard_agents(map()) :: [map()]
+  def dashboard_agents(payload) when is_map(payload) do
+    running =
+      payload
+      |> Map.get(:running, [])
+      |> Enum.map(&dashboard_running_agent/1)
+
+    retrying =
+      payload
+      |> Map.get(:retrying, [])
+      |> Enum.map(&dashboard_retrying_agent/1)
+
+    blocked =
+      payload
+      |> Map.get(:blocked, [])
+      |> Enum.map(&dashboard_blocked_agent/1)
+
+    running ++ retrying ++ blocked
+  end
+
+  @doc """
+  Adds a bounded recent-event timeline to one selected dashboard agent.
+  """
+  @spec dashboard_detail(map()) :: map()
+  def dashboard_detail(agent) when is_map(agent) do
+    timeline =
+      agent
+      |> Map.get(:audit_events_path)
+      |> read_audit_timeline()
+      |> fallback_timeline(agent)
+
+    Map.put(agent, :timeline, timeline)
+  end
+
   defp issue_payload_body(issue_identifier, running, retry, blocked) do
     %{
       issue_identifier: issue_identifier,
@@ -89,6 +132,168 @@ defmodule SymphonyElixirWeb.Presenter do
       tracked: %{}
     }
   end
+
+  defp dashboard_running_agent(entry) do
+    %{
+      id: entry.issue_id,
+      issue_id: entry.issue_id,
+      issue_identifier: entry.issue_identifier,
+      issue_url: entry.issue_url,
+      status: "running",
+      status_label: "Running",
+      state: entry.state,
+      activity: entry.last_message || to_string(entry.last_event || "Waiting for agent activity"),
+      activity_at: entry.last_event_at,
+      relevant_at: entry.started_at,
+      reason: nil,
+      next_action: "Monitor progress",
+      session_id: entry.session_id,
+      worker_host: entry.worker_host,
+      workspace_path: entry.workspace_path,
+      audit_path: entry.audit_path,
+      audit_events_path: entry.audit_events_path,
+      capability_diagnostics: entry.capability_diagnostics,
+      turn_count: entry.turn_count,
+      started_at: entry.started_at,
+      tokens: entry.tokens,
+      attempt: nil,
+      due_at: nil
+    }
+  end
+
+  defp dashboard_retrying_agent(entry) do
+    %{
+      id: entry.issue_id,
+      issue_id: entry.issue_id,
+      issue_identifier: entry.issue_identifier,
+      issue_url: entry.issue_url,
+      status: "retrying",
+      status_label: "Retrying",
+      state: "Retrying",
+      activity: entry.error || "Waiting for the next retry window",
+      activity_at: entry.due_at,
+      relevant_at: entry.due_at,
+      reason: entry.error,
+      next_action: "Wait for the retry window",
+      session_id: nil,
+      worker_host: entry.worker_host,
+      workspace_path: entry.workspace_path,
+      audit_path: entry.audit_path,
+      audit_events_path: entry.audit_events_path,
+      capability_diagnostics: entry.capability_diagnostics,
+      turn_count: nil,
+      started_at: nil,
+      tokens: nil,
+      attempt: entry.attempt,
+      due_at: entry.due_at
+    }
+  end
+
+  defp dashboard_blocked_agent(entry) do
+    %{
+      id: entry.issue_id,
+      issue_id: entry.issue_id,
+      issue_identifier: entry.issue_identifier,
+      issue_url: entry.issue_url,
+      status: "blocked",
+      status_label: "Approval or input needed",
+      state: entry.state,
+      activity: entry.last_message || entry.error || "Waiting for operator input",
+      activity_at: entry.last_event_at,
+      relevant_at: entry.blocked_at,
+      reason: entry.error,
+      next_action: "Review the request and provide the required input",
+      session_id: entry.session_id,
+      worker_host: entry.worker_host,
+      workspace_path: entry.workspace_path,
+      audit_path: entry.audit_path,
+      audit_events_path: entry.audit_events_path,
+      capability_diagnostics: entry.capability_diagnostics,
+      turn_count: nil,
+      started_at: nil,
+      tokens: nil,
+      attempt: nil,
+      due_at: nil
+    }
+  end
+
+  defp read_audit_timeline(path) when is_binary(path) and path != "" do
+    with {:ok, %{size: size}} <- File.stat(path),
+         {:ok, data} <- read_audit_tail(path, size) do
+      offset = max(size - @audit_tail_bytes, 0)
+
+      data
+      |> discard_partial_line(offset)
+      |> String.split("\n", trim: true)
+      |> Enum.flat_map(&decode_audit_event/1)
+      |> Enum.sort_by(&(&1.at || ""))
+      |> Enum.take(-@audit_event_limit)
+    else
+      _ -> []
+    end
+  end
+
+  defp read_audit_timeline(_path), do: []
+
+  defp read_audit_tail(path, size) do
+    offset = max(size - @audit_tail_bytes, 0)
+    length = min(size, @audit_tail_bytes)
+
+    case :file.open(String.to_charlist(path), [:read, :binary]) do
+      {:ok, device} ->
+        result =
+          case :file.pread(device, offset, length) do
+            {:ok, data} -> {:ok, data}
+            :eof -> {:ok, ""}
+            error -> error
+          end
+
+        :ok = :file.close(device)
+        result
+
+      error ->
+        error
+    end
+  end
+
+  defp discard_partial_line(data, 0), do: data
+
+  defp discard_partial_line(data, _offset) do
+    case :binary.split(data, "\n") do
+      [_partial, rest] -> rest
+      [_partial] -> ""
+    end
+  end
+
+  defp decode_audit_event(line) do
+    case Jason.decode(line) do
+      {:ok, %{} = event} ->
+        at = first_binary(event, ["timestamp", "recorded_at", "at"])
+        kind = first_binary(event, ["event", "type", "method"]) || "activity"
+        message = first_binary(event, ["detail", "message", "summary"]) || kind
+
+        [%{at: at, event: kind, message: message}]
+
+      _ ->
+        []
+    end
+  end
+
+  defp first_binary(map, keys) do
+    Enum.find_value(keys, fn key ->
+      case Map.get(map, key) do
+        value when is_binary(value) and value != "" -> value
+        _ -> nil
+      end
+    end)
+  end
+
+  defp fallback_timeline([], %{activity_at: at, activity: message, status: status})
+       when is_binary(at) and is_binary(message) do
+    [%{at: at, event: status, message: message}]
+  end
+
+  defp fallback_timeline(timeline, _agent), do: timeline
 
   defp issue_id_from_entries(running, retry, blocked),
     do: (running && running.issue_id) || (retry && retry.issue_id) || (blocked && blocked.issue_id)

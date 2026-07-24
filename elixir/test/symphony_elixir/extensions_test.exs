@@ -6,6 +6,7 @@ defmodule SymphonyElixir.ExtensionsTest do
 
   alias SymphonyElixir.Linear.Adapter
   alias SymphonyElixir.Tracker.Memory
+  alias SymphonyElixirWeb.Presenter
 
   @endpoint SymphonyElixirWeb.Endpoint
 
@@ -487,6 +488,7 @@ defmodule SymphonyElixir.ExtensionsTest do
              Adapter.cleanup_issue_labels(issue, ["codex-ready"])
   end
 
+  @tag :dashboard_detail
   test "phoenix observability api preserves state, issue, and refresh responses" do
     snapshot = static_snapshot()
     orchestrator_name = Module.concat(__MODULE__, :ObservabilityApiOrchestrator)
@@ -640,6 +642,7 @@ defmodule SymphonyElixir.ExtensionsTest do
              json_response(conn, 202)
   end
 
+  @tag :dashboard_detail
   test "phoenix observability api preserves 405, 404, and unavailable behavior" do
     unavailable_orchestrator = Module.concat(__MODULE__, :UnavailableOrchestrator)
     start_test_endpoint(orchestrator: unavailable_orchestrator, snapshot_timeout_ms: 5)
@@ -676,6 +679,7 @@ defmodule SymphonyElixir.ExtensionsTest do
              }
   end
 
+  @tag :dashboard_detail
   test "phoenix observability api preserves snapshot timeout behavior" do
     timeout_orchestrator = Module.concat(__MODULE__, :TimeoutOrchestrator)
     {:ok, _pid} = SlowOrchestrator.start_link(name: timeout_orchestrator)
@@ -690,6 +694,211 @@ defmodule SymphonyElixir.ExtensionsTest do
              }
   end
 
+  @tag :dashboard_detail
+  test "dashboard detail keeps the newest bounded audit events in chronological order" do
+    audit_events_path = write_dashboard_audit_events!()
+
+    detail =
+      Presenter.dashboard_detail(%{
+        issue_id: "issue-http",
+        issue_identifier: "MT-HTTP",
+        audit_events_path: audit_events_path
+      })
+
+    assert length(detail.timeline) == 50
+    assert hd(detail.timeline).message == "event 7"
+    assert List.last(detail.timeline).message == "event 56"
+
+    timestamps = Enum.map(detail.timeline, & &1.at)
+    assert timestamps == Enum.sort(timestamps)
+    refute inspect(detail.timeline) =~ "discarded-prefix"
+    refute inspect(detail.timeline) =~ "malformed-event"
+  end
+
+  @tag :dashboard_detail
+  test "dashboard overview and selected detail expose status guidance and progressive metadata" do
+    orchestrator_name = Module.concat(__MODULE__, :DashboardDetailOrchestrator)
+
+    {:ok, _pid} =
+      StaticOrchestrator.start_link(
+        name: orchestrator_name,
+        snapshot: static_snapshot(),
+        refresh: :unavailable
+      )
+
+    start_test_endpoint(orchestrator: orchestrator_name, snapshot_timeout_ms: 50)
+
+    {:ok, view, html} = live(build_conn(), "/")
+
+    assert html =~ ~s(data-agent-status="running")
+    assert html =~ ~s(data-agent-status="retrying")
+    assert html =~ ~s(data-agent-status="blocked")
+    assert html =~ "rendered"
+    assert html =~ "boom"
+    assert html =~ "codex turn requires operator input"
+    refute html =~ "{&quot;"
+
+    html = render_click(view, "select-agent", %{"agent-id" => "issue-retry"})
+    assert html =~ ~s(data-selected-agent="issue-retry")
+    assert html =~ "Retry attempt 2"
+    assert html =~ "Next retry"
+    assert html =~ "Wait for the retry window"
+
+    html = render_click(view, "select-agent", %{"agent-id" => "issue-blocked"})
+    assert html =~ ~s(data-selected-agent="issue-blocked")
+    assert html =~ "Approval or input needed"
+    assert html =~ "Review the request and provide the required input"
+    assert html =~ "thread-blocked"
+    assert html =~ "dm-dev2"
+    assert html =~ "/workspaces/MT-BLOCKED"
+    assert html =~ "/workspaces/MT-BLOCKED/.symphony/run-audit.md"
+  end
+
+  @tag :dashboard_detail
+  test "dashboard keeps selection and preservation identity across PubSub updates and disappearance" do
+    orchestrator_name = Module.concat(__MODULE__, :DashboardPreservationOrchestrator)
+    snapshot = static_snapshot()
+
+    {:ok, orchestrator_pid} =
+      StaticOrchestrator.start_link(
+        name: orchestrator_name,
+        snapshot: snapshot,
+        refresh: :unavailable
+      )
+
+    start_test_endpoint(orchestrator: orchestrator_name, snapshot_timeout_ms: 50)
+    {:ok, view, _html} = live(build_conn(), "/")
+
+    html = render_click(view, "select-agent", %{"agent-id" => "issue-blocked"})
+    assert html =~ ~s(data-selected-agent="issue-blocked")
+    assert html =~ ~s(id="agent-issue-blocked")
+    assert html =~ ~s(aria-pressed="true")
+    assert html =~ ~s(id="agent-detail-timeline")
+    assert html =~ ~s(phx-hook="PreserveDashboardReadingPosition")
+
+    updated_snapshot =
+      update_in(snapshot.blocked, fn blocked ->
+        Enum.map(blocked, &Map.put(&1, :last_codex_timestamp, DateTime.utc_now()))
+      end)
+
+    :sys.replace_state(orchestrator_pid, fn state ->
+      Keyword.put(state, :snapshot, updated_snapshot)
+    end)
+
+    StatusDashboard.notify_update()
+
+    assert_eventually(fn ->
+      rendered = render(view)
+
+      rendered =~ ~s(data-selected-agent="issue-blocked") and
+        rendered =~ ~s(id="agent-issue-blocked") and
+        rendered =~ ~s(aria-pressed="true")
+    end)
+
+    :sys.replace_state(orchestrator_pid, fn state ->
+      Keyword.put(state, :snapshot, %{updated_snapshot | blocked: []})
+    end)
+
+    StatusDashboard.notify_update()
+
+    assert_eventually(fn ->
+      rendered = render(view)
+
+      rendered =~ ~s(data-selected-agent="issue-blocked") and
+        rendered =~ ~s(data-agent-status="unavailable") and
+        rendered =~ "This agent is no longer present in the current runtime snapshot"
+    end)
+  end
+
+  @tag :dashboard_detail
+  test "dashboard keeps the selected issue when its runtime status changes" do
+    orchestrator_name = Module.concat(__MODULE__, :DashboardStatusTransitionOrchestrator)
+    snapshot = static_snapshot()
+
+    {:ok, orchestrator_pid} =
+      StaticOrchestrator.start_link(
+        name: orchestrator_name,
+        snapshot: snapshot,
+        refresh: :unavailable
+      )
+
+    start_test_endpoint(orchestrator: orchestrator_name, snapshot_timeout_ms: 50)
+    {:ok, view, _html} = live(build_conn(), "/")
+    render_click(view, "select-agent", %{"agent-id" => "issue-http"})
+
+    retrying_issue = %{
+      issue_id: "issue-http",
+      identifier: "MT-HTTP",
+      issue_url: "https://example.org/issues/MT-HTTP",
+      attempt: 2,
+      due_in_ms: 2_000,
+      error: "temporary upstream failure"
+    }
+
+    :sys.replace_state(orchestrator_pid, fn state ->
+      Keyword.put(
+        state,
+        :snapshot,
+        %{snapshot | running: [], retrying: [retrying_issue | snapshot.retrying]}
+      )
+    end)
+
+    StatusDashboard.notify_update()
+
+    assert_eventually(fn ->
+      rendered = render(view)
+
+      rendered =~ ~s(data-selected-agent="issue-http") and
+        rendered =~ ~s(data-agent-status="retrying") and
+        not (rendered =~ "This agent is no longer present in the current runtime snapshot")
+    end)
+  end
+
+  @tag :dashboard_detail
+  test "dashboard selection is keyboard-semantic with visible focus and reduced motion" do
+    orchestrator_name = Module.concat(__MODULE__, :DashboardKeyboardOrchestrator)
+
+    {:ok, _pid} =
+      StaticOrchestrator.start_link(
+        name: orchestrator_name,
+        snapshot: static_snapshot(),
+        refresh: :unavailable
+      )
+
+    start_test_endpoint(orchestrator: orchestrator_name, snapshot_timeout_ms: 50)
+
+    {:ok, _view, html} = live(build_conn(), "/")
+    assert html =~ ~s(<button)
+    assert html =~ ~s(phx-click="select-agent")
+    assert html =~ ~s(aria-pressed="true")
+    assert html =~ ~s(aria-controls="agent-detail")
+    assert html =~ ~s(role="status")
+    assert html =~ ~s(aria-live="polite")
+
+    dashboard_css = response(get(build_conn(), "/dashboard.css"), 200)
+    assert dashboard_css =~ ":focus-visible"
+    assert dashboard_css =~ "@media (prefers-reduced-motion: reduce)"
+  end
+
+  @tag :dashboard_detail
+  test "dashboard server render declares a loading state before the connected snapshot" do
+    orchestrator_name = Module.concat(__MODULE__, :DashboardLoadingOrchestrator)
+
+    {:ok, _pid} =
+      StaticOrchestrator.start_link(
+        name: orchestrator_name,
+        snapshot: static_snapshot(),
+        refresh: :unavailable
+      )
+
+    start_test_endpoint(orchestrator: orchestrator_name, snapshot_timeout_ms: 50)
+
+    html = html_response(get(build_conn(), "/"), 200)
+    assert html =~ ~s(data-dashboard-state="loading")
+    assert html =~ "Loading agent status"
+  end
+
+  @tag :dashboard_detail
   test "dashboard bootstraps liveview from embedded static assets" do
     orchestrator_name = Module.concat(__MODULE__, :AssetOrchestrator)
 
@@ -742,6 +951,7 @@ defmodule SymphonyElixir.ExtensionsTest do
     assert live_view_js =~ "var LiveView = (() => {"
   end
 
+  @tag :dashboard_detail
   test "dashboard liveview renders and refreshes over pubsub" do
     orchestrator_name = Module.concat(__MODULE__, :DashboardOrchestrator)
     snapshot = static_snapshot()
@@ -838,6 +1048,7 @@ defmodule SymphonyElixir.ExtensionsTest do
     refute render(view) =~ "javascript:alert"
   end
 
+  @tag :dashboard_detail
   test "dashboard liveview renders an unavailable state without crashing" do
     start_test_endpoint(
       orchestrator: Module.concat(__MODULE__, :MissingDashboardOrchestrator),
@@ -1027,6 +1238,38 @@ defmodule SymphonyElixir.ExtensionsTest do
     capability_diagnostics_fixture()
     |> Jason.encode!()
     |> Jason.decode!()
+  end
+
+  defp write_dashboard_audit_events! do
+    path =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-dashboard-detail-#{System.unique_integer([:positive])}.jsonl"
+      )
+
+    base = ~U[2026-07-23 12:00:00Z]
+
+    events =
+      Enum.map(1..56, fn index ->
+        Jason.encode!(%{
+          "event" => "agent_message",
+          "timestamp" => DateTime.add(base, index, :second) |> DateTime.to_iso8601(),
+          "detail" => "event #{index}"
+        })
+      end)
+
+    content =
+      [
+        String.duplicate("discarded-prefix", 5_000),
+        ~s({"event":"malformed-event"),
+        events
+      ]
+      |> List.flatten()
+      |> Enum.join("\n")
+
+    File.write!(path, content)
+    on_exit(fn -> File.rm(path) end)
+    path
   end
 
   defp wait_for_bound_port do

@@ -33,8 +33,69 @@ defmodule SymphonyElixirWeb.Layouts do
 
             if (!window.Phoenix || !window.LiveView) return;
 
+            var PreserveDashboardReadingPosition = {
+              mounted: function () {
+                this.copyHandler = function (event) {
+                  var button = event.target.closest("[data-copy]");
+                  if (!button) return;
+
+                  var copyStatus = document.querySelector("[data-copy-status]");
+                  var copyName = button.dataset.copyName || "value";
+
+                  if (!navigator.clipboard) {
+                    if (copyStatus) {
+                      copyStatus.textContent =
+                        "Copy unavailable. Select and copy the value manually.";
+                    }
+                    return;
+                  }
+
+                  navigator.clipboard.writeText(button.dataset.copy).then(function () {
+                    if (copyStatus) {
+                      copyStatus.textContent = "Copied " + copyName + ".";
+                    }
+                  }).catch(function () {
+                    if (copyStatus) {
+                      copyStatus.textContent =
+                        "Copy failed. Select and copy the value manually.";
+                    }
+                  });
+                };
+
+                this.el.addEventListener("click", this.copyHandler);
+              },
+              beforeUpdate: function () {
+                var timeline = this.el.querySelector("#agent-detail-timeline");
+                this.timelineScrollTop = timeline ? timeline.scrollTop : null;
+                this.focusedId =
+                  this.el.contains(document.activeElement) && document.activeElement.id
+                    ? document.activeElement.id
+                    : null;
+              },
+              updated: function () {
+                var timelineScrollTop = this.timelineScrollTop;
+                var focusedId = this.focusedId;
+
+                window.requestAnimationFrame(function () {
+                  var timeline = document.querySelector("#agent-detail-timeline");
+                  if (timeline && timelineScrollTop !== null) {
+                    timeline.scrollTop = timelineScrollTop;
+                  }
+
+                  var focused = focusedId ? document.getElementById(focusedId) : null;
+                  if (focused && document.activeElement !== focused) {
+                    focused.focus({preventScroll: true});
+                  }
+                });
+              },
+              destroyed: function () {
+                this.el.removeEventListener("click", this.copyHandler);
+              }
+            };
+
             var liveSocket = new window.LiveView.LiveSocket("/live", window.Phoenix.Socket, {
-              params: {_csrf_token: csrfToken}
+              params: {_csrf_token: csrfToken},
+              hooks: {PreserveDashboardReadingPosition: PreserveDashboardReadingPosition}
             });
 
             liveSocket.connect();

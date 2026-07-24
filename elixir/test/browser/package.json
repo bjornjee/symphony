@@ -1,0 +1,8 @@
+{
+  "name": "symphony-dashboard-browser-proof",
+  "private": true,
+  "type": "module",
+  "devDependencies": {
+    "@playwright/test": "1.59.1"
+  }
+}
