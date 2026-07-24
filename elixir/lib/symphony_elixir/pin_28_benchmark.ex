@@ -4,12 +4,13 @@ defmodule SymphonyElixir.Pin28Benchmark do
   alias SymphonyElixir.Linear.{Issue, TaskContract}
 
   alias SymphonyElixir.{
+    AgentRunner,
     CompletionEvidence,
     DeliveryControl,
     ExecutionControl,
     ExecutionLedger,
     ImplementationReview,
-    PlanningArtifact,
+    InstructionAuthority,
     PlanningLifecycle,
     RepositoryFingerprint,
     TaskBranch,
@@ -18,6 +19,8 @@ defmodule SymphonyElixir.Pin28Benchmark do
 
   @expected_diff ["Makefile", "docs/symphony-linear-setup.md"]
   @pin_28_commit "41808f55b68b3727710651df7601e6f2023e40dc"
+  @default_runs 10
+  @checked_option_keys [:check, :runs]
   @required_verification [
     "make symphony-workflow",
     "make symphony-workflow-check",
@@ -73,8 +76,52 @@ defmodule SymphonyElixir.Pin28Benchmark do
   Workflow: chore
   """
 
+  @spec validate_options(keyword()) :: :ok | {:error, String.t()}
+  def validate_options(opts) do
+    keys = Keyword.keys(opts)
+    unexpected_keys = keys -- @checked_option_keys
+    runs = Keyword.get(opts, :runs, @default_runs)
+
+    if Keyword.get(opts, :check, false) do
+      cond do
+        Enum.uniq(keys) != keys ->
+          {:error, "checked benchmark options must not be repeated"}
+
+        unexpected_keys != [] ->
+          {:error, "checked benchmark rejects noncanonical hooks/options: #{inspect(unexpected_keys)}"}
+
+        runs != @default_runs ->
+          {:error, "checked benchmark requires canonical options: runs=#{@default_runs}"}
+
+        true ->
+          :ok
+      end
+    else
+      :ok
+    end
+  end
+
+  @spec validate_report(map(), keyword()) :: :ok | {:error, String.t()}
+  def validate_report(report, opts) do
+    if Keyword.get(opts, :check, false) and not report.thresholds_passed,
+      do: {:error, "PIN-28 benchmark thresholds failed"},
+      else: :ok
+  end
+
+  @doc false
+  @spec improvement_threshold_met?(non_neg_integer(), non_neg_integer()) :: boolean()
+  def improvement_threshold_met?(baseline, candidate) when baseline > 0,
+    do: (baseline - candidate) / baseline >= 0.4
+
+  def improvement_threshold_met?(_baseline, _candidate), do: false
+
   @spec run(keyword()) :: map()
   def run(opts \\ []) do
+    case validate_options(opts) do
+      :ok -> :ok
+      {:error, message} -> raise ArgumentError, message
+    end
+
     temporary_root_parent = Keyword.get(opts, :temporary_root_parent, System.tmp_dir!())
 
     root_name_generator =
@@ -100,14 +147,16 @@ defmodule SymphonyElixir.Pin28Benchmark do
   end
 
   defp run_controlled(opts, ledger_root) do
-    runs = Keyword.get(opts, :runs, 10)
-    observation_delay_ms = Keyword.get(opts, :observation_delay_ms, 50)
-    fixed_overhead_ms = Keyword.get(opts, :fixed_overhead_ms, 75)
+    runs = Keyword.get(opts, :runs, @default_runs)
     artifact_observer = Keyword.get(opts, :artifact_observer, &observed_pin_28_artifacts/0)
     command_executor = Keyword.get(opts, :command_executor, &execute_benchmark_command/3)
     lifecycle_mutator = Keyword.get(opts, :lifecycle_mutator, &Function.identity/1)
     implementation_writer = Keyword.get(opts, :implementation_writer, &write_fixture_implementation/1)
     implementation_mutator = Keyword.get(opts, :implementation_mutator, fn _workspace -> :ok end)
+
+    instruction_authority_mutator =
+      Keyword.get(opts, :instruction_authority_mutator, &Function.identity/1)
+
     review_requester = Keyword.get(opts, :review_requester, &request_lifecycle_review/1)
 
     planning_lifecycle_runner =
@@ -115,15 +164,19 @@ defmodule SymphonyElixir.Pin28Benchmark do
 
     if runs < 10, do: raise(ArgumentError, "PIN-28 benchmark requires at least 10 controlled runs")
 
+    instruction_path = Path.join(ledger_root, "benchmark-instructions.md")
+    File.write!(instruction_path, "# Deterministic benchmark instructions\n")
+    {:ok, instruction_authority} = InstructionAuthority.capture([instruction_path])
+
     settings = %{
-      observation_delay_ms: observation_delay_ms,
-      fixed_overhead_ms: fixed_overhead_ms,
       artifact_observer: artifact_observer,
       ledger_root: ledger_root,
       command_executor: command_executor,
       lifecycle_mutator: lifecycle_mutator,
       implementation_writer: implementation_writer,
       implementation_mutator: implementation_mutator,
+      instruction_authority: instruction_authority,
+      instruction_authority_mutator: instruction_authority_mutator,
       review_requester: review_requester,
       planning_lifecycle_runner: planning_lifecycle_runner
     }
@@ -136,15 +189,17 @@ defmodule SymphonyElixir.Pin28Benchmark do
     baseline = summarize(samples, :baseline)
     candidate = summarize(samples, :candidate)
 
-    improvement_percent =
+    raw_improvement_percent =
       percentage_improvement(
         baseline.median_end_to_end_ms,
         candidate.median_end_to_end_ms
       )
 
     thresholds_passed =
-      observation_delay_ms > 0 and
-        improvement_percent >= 40.0 and
+      improvement_threshold_met?(
+        baseline.median_end_to_end_ms,
+        candidate.median_end_to_end_ms
+      ) and
         candidate.median_end_to_end_ms <= 600_000 and
         candidate.median_first_useful_edit_ms <= 240_000 and
         baseline.completion_accuracy == 1.0 and
@@ -152,7 +207,7 @@ defmodule SymphonyElixir.Pin28Benchmark do
 
     %{
       schema_version: 1,
-      benchmark: "PIN-28-style simple task",
+      benchmark: "PIN-28-style controlled initial run and continuation",
       run_count: runs,
       repository_revision: repository_revision(),
       environment: benchmark_environment(),
@@ -160,8 +215,17 @@ defmodule SymphonyElixir.Pin28Benchmark do
       expected_diff: @expected_diff,
       model_configuration: %{
         kind: "deterministic-agent-replay",
-        revision: 6,
+        revision: 7,
         live_model: false
+      },
+      harness_configuration: %{
+        check_mode: Keyword.get(opts, :check, false),
+        runs: runs,
+        run_modes: %{baseline: "initial", candidate: "continuation"},
+        capture_modes: %{baseline: "serial", candidate: "parallel"},
+        context_cache: %{baseline: "miss", candidate: "hit"},
+        proof_cache: %{baseline: "miss", candidate: "hit"},
+        review_cache: %{baseline: "miss", candidate: "hit"}
       },
       required_artifacts: Map.take(@task_contract, [:verification, :review_checks, :handoff_fields]),
       evidence: %{
@@ -172,7 +236,7 @@ defmodule SymphonyElixir.Pin28Benchmark do
       },
       baseline: baseline,
       candidate: candidate,
-      improvement_percent: improvement_percent,
+      improvement_percent: Float.round(raw_improvement_percent, 1),
       thresholds_passed: thresholds_passed,
       samples: samples
     }
@@ -183,7 +247,7 @@ defmodule SymphonyElixir.Pin28Benchmark do
 
     baseline =
       run_variant(
-        &serial_capture/2,
+        &serial_capture/1,
         Path.join(fixture_root, "baseline"),
         false,
         settings
@@ -191,10 +255,14 @@ defmodule SymphonyElixir.Pin28Benchmark do
 
     candidate =
       run_variant(
-        &parallel_capture/2,
+        &parallel_capture/1,
         Path.join(fixture_root, "candidate"),
         true,
-        settings
+        Map.put(
+          settings,
+          :instruction_authority,
+          settings.instruction_authority_mutator.(settings.instruction_authority)
+        )
       )
 
     File.rm_rf(fixture_root)
@@ -235,15 +303,18 @@ defmodule SymphonyElixir.Pin28Benchmark do
     started_ms = System.monotonic_time(:millisecond)
     prepared = prepare_fixture_workspace(fixture_root)
     workspace_completed_ms = System.monotonic_time(:millisecond)
-    snapshot = capture.(prepared.workspace, settings.observation_delay_ms)
+    snapshot = capture.(prepared.workspace)
     context_completed_ms = System.monotonic_time(:millisecond)
 
     planning_started_ms = context_completed_ms
-    pre_edit_ms = div(settings.fixed_overhead_ms * 3, 5)
-    Process.sleep(pre_edit_ms)
 
     {planning, execution_plan} =
-      plan_lifecycle(prepared, settings.planning_lifecycle_runner)
+      plan_lifecycle(
+        prepared,
+        settings.planning_lifecycle_runner,
+        if(reuse_proofs, do: :hit, else: :miss),
+        settings
+      )
 
     historical_artifacts = settings.artifact_observer.()
     planning_completed_ms = System.monotonic_time(:millisecond)
@@ -261,7 +332,6 @@ defmodule SymphonyElixir.Pin28Benchmark do
 
     first_edit_ms = first_useful_edit_ms(implementation, started_ms)
     commit_fixture_implementation(prepared.workspace, historical_artifacts)
-    Process.sleep(settings.fixed_overhead_ms - pre_edit_ms)
     implementation_completed_ms = System.monotonic_time(:millisecond)
 
     verification_started_ms = implementation_completed_ms
@@ -292,8 +362,10 @@ defmodule SymphonyElixir.Pin28Benchmark do
 
     %{
       snapshot: snapshot,
+      execution_plan: execution_plan,
       lifecycle: %{
         workspace_id: digest(lifecycle.workspace),
+        repository_state_digest: lifecycle[:state] && lifecycle.state.digest,
         planning: planning,
         implementation: implementation,
         verification: verification,
@@ -320,13 +392,13 @@ defmodule SymphonyElixir.Pin28Benchmark do
     }
   end
 
-  defp serial_capture(workspace, delay_ms) do
+  defp serial_capture(workspace) do
     {:ok, lock} = Agent.start_link(fn -> :ready end)
 
     runner = fn args ->
       Agent.get_and_update(
         lock,
-        fn state -> {delayed_git_observation(workspace, args, delay_ms), state} end,
+        fn state -> {git_observation(workspace, args), state} end,
         120_000
       )
     end
@@ -336,12 +408,12 @@ defmodule SymphonyElixir.Pin28Benchmark do
     snapshot
   end
 
-  defp parallel_capture(workspace, delay_ms) do
+  defp parallel_capture(workspace) do
     {:ok, snapshot} =
       RepositoryFingerprint.capture(
         workspace,
         nil,
-        git_runner: &delayed_git_observation(workspace, &1, delay_ms)
+        git_runner: &git_observation(workspace, &1)
       )
 
     snapshot
@@ -397,9 +469,8 @@ defmodule SymphonyElixir.Pin28Benchmark do
     Enum.at(sorted, index)
   end
 
-  defp percentage_improvement(baseline, candidate) when baseline > 0 do
-    Float.round((baseline - candidate) / baseline * 100, 1)
-  end
+  defp percentage_improvement(baseline, candidate) when baseline > 0,
+    do: (baseline - candidate) / baseline * 100
 
   defp percentage_improvement(_baseline, _candidate), do: 0.0
 
@@ -508,7 +579,35 @@ defmodule SymphonyElixir.Pin28Benchmark do
   defp valid_digest?(value),
     do: is_binary(value) and Regex.match?(~r/^[a-f0-9]{64}$/, value)
 
-  defp plan_lifecycle(prepared, planning_lifecycle_runner) do
+  defp plan_lifecycle(prepared, _planning_lifecycle_runner, :hit, settings) do
+    with {:ok, instruction_authority} <-
+           InstructionAuthority.capture(
+             settings.instruction_authority.paths,
+             settings.instruction_authority.worker_host
+           ),
+         {:ok, profile} <- WorkflowProfile.select(prepared.contract),
+         {:ok, repository} <- RepositoryFingerprint.capture(prepared.workspace),
+         {:ok, execution_plan} <-
+           AgentRunner.registered_execution_plan_for_benchmark(
+             repository,
+             prepared.workspace,
+             prepared.issue,
+             prepared.contract,
+             profile,
+             benchmark_session(),
+             instruction_authority
+           ),
+         true <- is_map(execution_plan) || {:error, :execution_plan_cache_miss} do
+      {
+        planning_summary(execution_plan, "hit"),
+        execution_plan
+      }
+    else
+      {:error, reason} -> {%{passed: false, cache_status: "miss", error: inspect(reason)}, nil}
+    end
+  end
+
+  defp plan_lifecycle(prepared, planning_lifecycle_runner, :miss, settings) do
     with {:ok, profile} <- WorkflowProfile.select(prepared.contract),
          {:ok, repository} <- RepositoryFingerprint.capture(prepared.workspace),
          candidate <- planning_candidate(prepared, profile, repository),
@@ -520,24 +619,39 @@ defmodule SymphonyElixir.Pin28Benchmark do
              prepared.contract,
              profile,
              planning_lifecycle_options(prepared, candidate, repository)
+             |> Keyword.put(:instruction_authority, settings.instruction_authority)
+           ),
+         :ok <-
+           AgentRunner.persist_execution_authority_for_benchmark(
+             plan,
+             settings.instruction_authority,
+             benchmark_session(),
+             prepared.issue
            ) do
       {
-        %{
-          passed: true,
-          contract_digest: prepared.contract.digest,
-          workflow: profile.name,
-          plan_digest: plan["plan_digest"],
-          execution_mode: plan["execution_mode"] || "planned"
-        },
+        planning_summary(plan, "miss"),
         plan
       }
     else
-      {:error, reason} -> {%{passed: false, error: inspect(reason)}, nil}
+      {:error, reason} -> {%{passed: false, cache_status: "miss", error: inspect(reason)}, nil}
     end
   end
 
+  defp planning_summary(plan, cache_status) do
+    %{
+      passed: true,
+      cache_status: cache_status,
+      contract_digest: plan["contract_digest"],
+      workflow: plan["workflow"],
+      plan_digest: plan["plan_digest"],
+      execution_mode: plan["execution_mode"] || "planned"
+    }
+  end
+
+  defp benchmark_session, do: %{role: :primary, thread_id: "pin-28-primary"}
+
   defp planning_lifecycle_options(prepared, candidate, repository) do
-    run_turn = fn session, _prompt, _issue, opts ->
+    run_turn = fn session, prompt, _issue, opts ->
       case session.role do
         :primary ->
           opts[:on_message].(%{
@@ -552,7 +666,7 @@ defmodule SymphonyElixir.Pin28Benchmark do
 
         :reviewer ->
           opts[:tool_executor].("submit_plan_review", %{
-            "candidate_digest" => PlanningArtifact.digest(candidate),
+            "candidate_digest" => review_candidate_digest(prompt),
             "verdict" => "approve",
             "blocking_findings" => [],
             "advisory_findings" => [],
@@ -577,6 +691,11 @@ defmodule SymphonyElixir.Pin28Benchmark do
       pin_primary_thread: fn -> :ok end,
       stop_session: fn _session -> :ok end
     ]
+  end
+
+  defp review_candidate_digest(prompt) do
+    [candidate_json] = String.split(prompt, "Exact candidate:\n", parts: 2) |> tl()
+    candidate_json |> Jason.decode!() |> Map.fetch!("candidate_digest")
   end
 
   defp planning_candidate(prepared, profile, repository) do
@@ -737,25 +856,34 @@ defmodule SymphonyElixir.Pin28Benchmark do
           "security" => approved,
           "convention" => approved,
           "scope" => approved,
-          "receipt_digest" => approval["receipt_digest"]
+          "receipt_digest" => approval["receipt_digest"],
+          "cache_status" => approval["cache_status"]
         }
 
-      {:error, _reason} ->
-        failed_review()
+      {:error, reason} ->
+        Map.put(failed_review(), "error", inspect(reason))
     end
   end
 
   defp review_lifecycle(_lifecycle, _review_requester), do: failed_review()
 
   defp lifecycle_review(%{reused: true} = lifecycle, _review_requester) do
-    ImplementationReview.latest_approval(
-      lifecycle.key,
-      lifecycle.state.base_sha,
-      lifecycle.state.digest
-    )
+    case ImplementationReview.latest_approval(
+           lifecycle.key,
+           lifecycle.state.base_sha,
+           lifecycle.state.digest
+         ) do
+      {:ok, approval} -> {:ok, Map.put(approval, "cache_status", "hit")}
+      {:error, _reason} = error -> error
+    end
   end
 
-  defp lifecycle_review(lifecycle, review_requester), do: review_requester.(lifecycle)
+  defp lifecycle_review(lifecycle, review_requester) do
+    case review_requester.(lifecycle) do
+      {:ok, approval} -> {:ok, Map.put(approval, "cache_status", "miss")}
+      {:error, _reason} = error -> error
+    end
+  end
 
   defp request_lifecycle_review(lifecycle) do
     run_turn = fn _session, prompt, _issue, opts ->
@@ -918,8 +1046,8 @@ defmodule SymphonyElixir.Pin28Benchmark do
   defp valid_fixture_implementation?(_implementation), do: false
 
   defp commit_fixture_implementation(workspace, historical_artifacts) do
-    if git!(workspace, ["status", "--porcelain"]) != "" do
-      git!(workspace, ["add", "."])
+    if git!(workspace, ["status", "--porcelain", "--" | @expected_diff]) != "" do
+      git!(workspace, ["add", "--" | @expected_diff])
 
       message =
         if non_empty_string?(historical_artifacts.commit_message),
@@ -1121,9 +1249,7 @@ defmodule SymphonyElixir.Pin28Benchmark do
     end
   end
 
-  defp delayed_git_observation(workspace, args, delay_ms) do
-    Process.sleep(delay_ms)
-
+  defp git_observation(workspace, args) do
     case System.cmd("git", ["-C", workspace | args], stderr_to_stdout: true) do
       {output, 0} -> {:ok, output}
       {output, status} -> {:error, {:git_failed, status, output}}

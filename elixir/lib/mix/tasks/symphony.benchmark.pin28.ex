@@ -9,21 +9,27 @@ defmodule Mix.Tasks.Symphony.Benchmark.Pin28 do
 
   @switches [
     runs: :integer,
-    observation_delay_ms: :integer,
-    fixed_overhead_ms: :integer,
     check: :boolean
   ]
 
   @impl Mix.Task
   def run(args) do
-    {opts, _remaining, invalid} = OptionParser.parse(args, strict: @switches)
-    if invalid != [], do: Mix.raise("invalid benchmark options: #{inspect(invalid)}")
+    {opts, remaining, invalid} = OptionParser.parse(args, strict: @switches)
+
+    if invalid != [] or remaining != [],
+      do: Mix.raise("invalid benchmark options: #{inspect(invalid ++ remaining)}")
+
+    case Pin28Benchmark.validate_options(opts) do
+      :ok -> :ok
+      {:error, message} -> Mix.raise(message)
+    end
 
     report = Pin28Benchmark.run(opts)
     Mix.shell().info(Jason.encode!(report, pretty: true))
 
-    if Keyword.get(opts, :check, false) and not report.thresholds_passed do
-      Mix.raise("PIN-28 benchmark thresholds failed")
+    case Pin28Benchmark.validate_report(report, opts) do
+      :ok -> :ok
+      {:error, message} -> Mix.raise(message)
     end
   end
 end

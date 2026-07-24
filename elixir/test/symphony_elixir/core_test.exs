@@ -2444,6 +2444,134 @@ defmodule SymphonyElixir.CoreTest do
     end
   end
 
+  test "agent runner records planning timing when planning raises" do
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-agent-runner-raised-planning-timing-#{System.unique_integer([:positive])}"
+      )
+
+    try do
+      issue = audited_agent_fixture!(test_root, "MT-RAISED-PLANNING")
+
+      opts =
+        audited_agent_opts(
+          issue,
+          planning_lifecycle_runner: &raise_planning_timing_failure/6
+        )
+
+      error =
+        try do
+          AgentRunner.run(issue, nil, opts)
+          flunk("expected planning to raise")
+        rescue
+          error ->
+            assert Enum.any?(__STACKTRACE__, fn
+                     {__MODULE__, :raise_planning_timing_failure, 6, _location} -> true
+                     _frame -> false
+                   end)
+
+            error
+        end
+
+      assert Exception.message(error) == "raised planning timing failure"
+
+      planning_timing =
+        test_root
+        |> local_run_audit_events(issue.identifier)
+        |> Enum.find(&(&1["event"] == "phase_timing" and &1["phase"] == "planning"))
+
+      assert planning_timing["attribution"] == "model"
+      assert is_integer(planning_timing["duration_ms"])
+    after
+      File.rm_rf(test_root)
+    end
+  end
+
+  test "agent runner records implementation timing when the implementation turn raises" do
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-agent-runner-raised-implementation-timing-#{System.unique_integer([:positive])}"
+      )
+
+    try do
+      issue = audited_agent_fixture!(test_root, "MT-RAISED-IMPLEMENTATION")
+
+      opts =
+        audited_agent_opts(
+          issue,
+          codex_turn_runner: &raise_implementation_timing_failure/4
+        )
+
+      error =
+        try do
+          AgentRunner.run(issue, nil, opts)
+          flunk("expected implementation to raise")
+        rescue
+          error ->
+            assert Enum.any?(__STACKTRACE__, fn
+                     {__MODULE__, :raise_implementation_timing_failure, 4, _location} -> true
+                     _frame -> false
+                   end)
+
+            error
+        end
+
+      assert Exception.message(error) == "raised implementation timing failure"
+
+      implementation_timing =
+        test_root
+        |> local_run_audit_events(issue.identifier)
+        |> Enum.find(&(&1["event"] == "phase_timing" and &1["phase"] == "implementation"))
+
+      assert implementation_timing["attribution"] == "model"
+      assert is_integer(implementation_timing["duration_ms"])
+    after
+      File.rm_rf(test_root)
+    end
+  end
+
+  for phase <- [:planning, :implementation], outcome_kind <- [:throw, :exit] do
+    test "agent runner preserves #{outcome_kind} and #{phase} timing" do
+      phase = unquote(phase)
+      outcome_kind = unquote(outcome_kind)
+      marker = {phase, outcome_kind, :timing_failure}
+
+      test_root =
+        Path.join(
+          System.tmp_dir!(),
+          "symphony-agent-runner-#{phase}-#{outcome_kind}-timing-" <>
+            Integer.to_string(System.unique_integer([:positive]))
+        )
+
+      try do
+        issue =
+          audited_agent_fixture!(
+            test_root,
+            "MT-#{String.upcase(to_string(phase))}-#{String.upcase(to_string(outcome_kind))}"
+          )
+
+        abnormal_outcome = fn -> produce_abnormal_outcome(outcome_kind, marker) end
+        override = abnormal_timing_override(phase, abnormal_outcome)
+        opts = audited_agent_opts(issue, override)
+        caught = catch_abnormal_outcome(outcome_kind, fn -> AgentRunner.run(issue, nil, opts) end)
+
+        assert caught == marker
+
+        timing =
+          test_root
+          |> local_run_audit_events(issue.identifier)
+          |> Enum.find(&(&1["event"] == "phase_timing" and &1["phase"] == to_string(phase)))
+
+        assert timing["attribution"] == "model"
+        assert is_integer(timing["duration_ms"])
+      after
+        File.rm_rf(test_root)
+      end
+    end
+  end
+
   test "agent runner finalizes an unexpectedly raised after-run hook before reraising" do
     test_root =
       Path.join(
@@ -3388,4 +3516,35 @@ defmodule SymphonyElixir.CoreTest do
   end
 
   defp event_index(events, name), do: Enum.find_index(events, &(&1["event"] == name))
+
+  defp raise_planning_timing_failure(
+         _session,
+         _workspace,
+         _issue,
+         _contract,
+         _profile,
+         _opts
+       ),
+       do: raise("raised planning timing failure")
+
+  defp raise_implementation_timing_failure(_session, _prompt, _issue, _opts),
+    do: raise("raised implementation timing failure")
+
+  defp produce_abnormal_outcome(:throw, marker), do: throw(marker)
+  defp produce_abnormal_outcome(:exit, marker), do: exit(marker)
+
+  defp abnormal_timing_override(:planning, abnormal_outcome) do
+    [
+      planning_lifecycle_runner: fn
+        _session, _workspace, _issue, _contract, _profile, _opts -> abnormal_outcome.()
+      end
+    ]
+  end
+
+  defp abnormal_timing_override(:implementation, abnormal_outcome) do
+    [codex_turn_runner: fn _session, _prompt, _issue, _opts -> abnormal_outcome.() end]
+  end
+
+  defp catch_abnormal_outcome(:throw, fun), do: catch_throw(fun.())
+  defp catch_abnormal_outcome(:exit, fun), do: catch_exit(fun.())
 end

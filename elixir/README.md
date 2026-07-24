@@ -263,7 +263,16 @@ proof receipts, publication evidence, and handoff validation. It fails when medi
 improvement is below 40%, median end-to-end latency exceeds ten minutes, first useful edit exceeds
 four minutes, either variant is not 100% accurate, or completion accuracy differs. The fixture is
 deterministic so CI measures Symphony-controlled harness overhead without model-provider variance;
-it is not a live provider benchmark. CI runs the same target after `make all`.
+it is not a live provider benchmark. The baseline performs repository capture serially and runs the
+full planning lifecycle, proof commands, and review. The candidate is an issue-scoped continuation:
+it performs the same repository capture work in parallel, resolves the sealed plan through
+AgentRunner's production registry and pinned instruction-authority validation, and reuses
+content-addressed proof and review receipts only for the identical committed state. It does not
+represent a fresh-task planning speedup. No synthetic delays contribute to the measured
+improvement. Its JSON report identifies the run count, check mode, capture modes, and expected
+context, proof, and review cache hits and misses. Checked runs reject unsupported options and
+injected lifecycle hooks so checked evidence always uses the production validators. CI runs the
+same target after `make all`.
 
 Run the real external end-to-end test only when you want Symphony to create disposable Linear
 resources and launch a real `codex app-server` session:

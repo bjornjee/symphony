@@ -1600,8 +1600,10 @@ one primary attribution (`model`, `tool`, `subprocess`, or `external`) for queue
 bootstrap, context loading, research/preflight, planning, implementation, verification, review,
 Git/PR publication, and handoff when those phases occur. External attribution MUST include a
 non-empty wait reason. Overlapping phases MUST NOT be double-counted under multiple primary
-attributions; an inclusive parent interval MAY be retained as separate diagnostic metadata. The
-audit SHOULD record the first useful edit, selected and effective
+attributions; an inclusive parent interval MAY be retained as separate diagnostic metadata.
+Planning and implementation phase intervals MUST still be emitted when their wrapped operations
+raise, throw, or exit. The original outcome and stacktrace MUST be preserved.
+The audit SHOULD record the first useful edit, selected and effective
 verification profiles, proof-cache outcome, and budget overrun. A compact finalized summary SHOULD
 identify the slowest phase without requiring log reconstruction. Audit persistence MUST remain
 bounded; when a worker workspace is not locally readable, the orchestrator MUST expose a bounded
@@ -2322,7 +2324,12 @@ Unless otherwise noted, Sections 17.1 through 17.7 are `Core Conformance`. Bulle
   evidence, and handoff validation. Each variant MUST perform its own observable fixture edit before
   first-useful-edit is recorded, and expected-diff/review accuracy MUST be bound to the evaluated
   workspace content rather than path constants alone. Identify that configuration, require 100%
-  completion accuracy, and MUST NOT represent it as live provider latency
+  completion accuracy, and MUST NOT represent it as live provider latency. The machine-readable
+  report MUST identify whether each variant is an initial run or continuation, the
+  baseline/candidate capture modes, and expected context/proof/review cache outcomes. Continuation
+  measurements MUST NOT be represented as fresh-task planning latency. Synthetic delays MUST NOT
+  contribute to the measured improvement. Checked evaluation MUST reject unsupported options and
+  injected lifecycle adapters
 - Cache invalidation tests independently cover base revision, instructions, workflow, manifests,
   lockfiles, and toolchain configuration
 - Token/rate-limit aggregation remains correct across repeated agent updates

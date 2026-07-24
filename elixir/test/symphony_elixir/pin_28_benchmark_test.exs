@@ -7,7 +7,7 @@ defmodule SymphonyElixir.Pin28BenchmarkTest do
   alias SymphonyElixir.Pin28Benchmark
 
   test "ten controlled runs improve latency without reducing completion accuracy" do
-    report = Pin28Benchmark.run(runs: 10, observation_delay_ms: 50, fixed_overhead_ms: 30)
+    report = Pin28Benchmark.run(runs: 10)
 
     assert report.run_count == 10
     assert byte_size(report.repository_revision) == 40
@@ -16,8 +16,18 @@ defmodule SymphonyElixir.Pin28BenchmarkTest do
 
     assert report.model_configuration == %{
              kind: "deterministic-agent-replay",
-             revision: 6,
+             revision: 7,
              live_model: false
+           }
+
+    assert report.harness_configuration == %{
+             check_mode: false,
+             runs: 10,
+             run_modes: %{baseline: "initial", candidate: "continuation"},
+             capture_modes: %{baseline: "serial", candidate: "parallel"},
+             context_cache: %{baseline: "miss", candidate: "hit"},
+             proof_cache: %{baseline: "miss", candidate: "hit"},
+             review_cache: %{baseline: "miss", candidate: "hit"}
            }
 
     assert report.required_artifacts.verification == [
@@ -47,8 +57,10 @@ defmodule SymphonyElixir.Pin28BenchmarkTest do
              Enum.all?(sample.baseline.accuracy, fn {_name, passed} -> passed end) and
                Enum.all?(sample.candidate.accuracy, fn {_name, passed} -> passed end) and
                sample.baseline.lifecycle.planning.passed and
+               sample.baseline.lifecycle.planning.cache_status == "miss" and
                sample.baseline.lifecycle.planning.execution_mode == "planned" and
                is_binary(sample.baseline.lifecycle.planning.plan_digest) and
+               sample.candidate.lifecycle.planning.cache_status == "hit" and
                sample.candidate.lifecycle.planning.execution_mode == "planned" and
                is_binary(sample.candidate.lifecycle.planning.plan_digest) and
                sample.baseline.lifecycle.publication.passed and
@@ -56,6 +68,8 @@ defmodule SymphonyElixir.Pin28BenchmarkTest do
                Enum.all?(sample.candidate.lifecycle.verification, &is_binary(&1.receipt_digest)) and
                is_binary(sample.baseline.lifecycle.review["receipt_digest"]) and
                is_binary(sample.candidate.lifecycle.review["receipt_digest"]) and
+               sample.baseline.lifecycle.review["cache_status"] == "miss" and
+               sample.candidate.lifecycle.review["cache_status"] == "hit" and
                is_binary(sample.baseline.lifecycle.publication.receipt_digest) and
                is_binary(sample.candidate.lifecycle.publication.receipt_digest) and
                is_binary(sample.baseline.lifecycle.handoff["artifact_digest"]) and
@@ -96,8 +110,6 @@ defmodule SymphonyElixir.Pin28BenchmarkTest do
     report =
       Pin28Benchmark.run(
         runs: 10,
-        observation_delay_ms: 1,
-        fixed_overhead_ms: 1,
         artifact_observer: observer
       )
 
@@ -114,12 +126,35 @@ defmodule SymphonyElixir.Pin28BenchmarkTest do
     report =
       Pin28Benchmark.run(
         runs: 10,
-        observation_delay_ms: 1,
-        fixed_overhead_ms: 1,
         planning_lifecycle_runner: planning_runner
       )
 
     assert report.baseline.completion_accuracy == 0.0
+    assert report.candidate.completion_accuracy == 0.0
+    refute report.thresholds_passed
+  end
+
+  test "fails closed when candidate instruction authority differs from the registered plan" do
+    mutator = fn authority ->
+      File.write!(hd(authority.paths), "# Changed benchmark instructions\n")
+      authority
+    end
+
+    report =
+      Pin28Benchmark.run(
+        runs: 10,
+        instruction_authority_mutator: mutator
+      )
+
+    first_sample = hd(report.samples)
+
+    assert first_sample.baseline.lifecycle.planning.passed
+    assert first_sample.baseline.lifecycle.planning.cache_status == "miss"
+    refute first_sample.candidate.lifecycle.planning.passed
+    assert first_sample.candidate.lifecycle.planning.cache_status == "miss"
+    assert first_sample.candidate.lifecycle.planning.error =~ "execution_plan_cache_miss"
+
+    assert report.baseline.completion_accuracy == 0.1
     assert report.candidate.completion_accuracy == 0.0
     refute report.thresholds_passed
   end
@@ -132,8 +167,6 @@ defmodule SymphonyElixir.Pin28BenchmarkTest do
     report =
       Pin28Benchmark.run(
         runs: 10,
-        observation_delay_ms: 1,
-        fixed_overhead_ms: 1,
         lifecycle_mutator: mutator
       )
 
@@ -146,8 +179,6 @@ defmodule SymphonyElixir.Pin28BenchmarkTest do
     report =
       Pin28Benchmark.run(
         runs: 10,
-        observation_delay_ms: 1,
-        fixed_overhead_ms: 1,
         implementation_writer: fn _workspace -> :ok end
       )
 
@@ -170,8 +201,6 @@ defmodule SymphonyElixir.Pin28BenchmarkTest do
     report =
       Pin28Benchmark.run(
         runs: 10,
-        observation_delay_ms: 1,
-        fixed_overhead_ms: 1,
         implementation_mutator: mutator
       )
 
@@ -197,8 +226,6 @@ defmodule SymphonyElixir.Pin28BenchmarkTest do
     report =
       Pin28Benchmark.run(
         runs: 10,
-        observation_delay_ms: 1,
-        fixed_overhead_ms: 1,
         command_executor: executor
       )
 
@@ -215,8 +242,6 @@ defmodule SymphonyElixir.Pin28BenchmarkTest do
     report =
       Pin28Benchmark.run(
         runs: 10,
-        observation_delay_ms: 1,
-        fixed_overhead_ms: 1,
         lifecycle_mutator: mutator
       )
 
@@ -229,8 +254,6 @@ defmodule SymphonyElixir.Pin28BenchmarkTest do
     report =
       Pin28Benchmark.run(
         runs: 10,
-        observation_delay_ms: 1,
-        fixed_overhead_ms: 1,
         review_requester: fn _lifecycle -> {:error, :forced_review_failure} end
       )
 
@@ -247,8 +270,6 @@ defmodule SymphonyElixir.Pin28BenchmarkTest do
     report =
       Pin28Benchmark.run(
         runs: 10,
-        observation_delay_ms: 1,
-        fixed_overhead_ms: 1,
         lifecycle_mutator: mutator
       )
 
@@ -268,8 +289,6 @@ defmodule SymphonyElixir.Pin28BenchmarkTest do
     report =
       Pin28Benchmark.run(
         runs: 10,
-        observation_delay_ms: 1,
-        fixed_overhead_ms: 1,
         lifecycle_mutator: mutator
       )
 
@@ -280,7 +299,7 @@ defmodule SymphonyElixir.Pin28BenchmarkTest do
 
   test "rejects fewer than ten controlled runs" do
     assert_raise ArgumentError, ~r/at least 10/, fn ->
-      Pin28Benchmark.run(runs: 9, observation_delay_ms: 0)
+      Pin28Benchmark.run(runs: 9)
     end
   end
 
@@ -307,8 +326,6 @@ defmodule SymphonyElixir.Pin28BenchmarkTest do
     report =
       Pin28Benchmark.run(
         runs: 10,
-        observation_delay_ms: 1,
-        fixed_overhead_ms: 1,
         temporary_root_parent: parent,
         root_name_generator: name_generator
       )
@@ -323,42 +340,69 @@ defmodule SymphonyElixir.Pin28BenchmarkTest do
   test "Mix task prints the machine-readable benchmark report" do
     output =
       capture_io(fn ->
-        Pin28Task.run([
-          "--runs",
-          "10",
-          "--observation-delay-ms",
-          "1",
-          "--fixed-overhead-ms",
-          "1"
-        ])
+        Pin28Task.run(["--runs", "10"])
       end)
 
     assert Jason.decode!(output)["run_count"] == 10
   end
 
-  test "Mix task rejects invalid options and failed checked thresholds" do
+  test "Mix task rejects invalid options" do
     assert_raise Mix.Error, ~r/invalid benchmark options/, fn ->
       Pin28Task.run(["--unknown"])
     end
+  end
 
-    assert_raise Mix.Error, ~r/thresholds failed/, fn ->
+  test "Mix task rejects unsupported positional arguments" do
+    assert_raise Mix.Error, ~r/invalid benchmark options/, fn ->
+      Pin28Task.run(["unexpected"])
+    end
+  end
+
+  test "Mix task rejects removed synthetic timing knobs" do
+    assert_raise Mix.Error, ~r/invalid benchmark options/, fn ->
       capture_io(fn ->
         Pin28Task.run([
-          "--runs",
-          "10",
           "--observation-delay-ms",
-          "0",
-          "--fixed-overhead-ms",
-          "10",
-          "--check"
+          "5"
         ])
       end)
     end
+  end
+
+  test "checked benchmark options reject injectable hooks" do
+    assert {:error, message} =
+             Pin28Benchmark.validate_options(
+               check: true,
+               artifact_observer: fn -> %{} end
+             )
+
+    assert message =~ "rejects noncanonical hooks/options"
+    assert message =~ "artifact_observer"
+  end
+
+  test "Mix task preserves internal benchmark argument errors" do
+    assert_raise ArgumentError, ~r/at least 10/, fn ->
+      capture_io(fn -> Pin28Task.run(["--runs", "9"]) end)
+    end
+  end
+
+  test "checked Mix task has no injectable benchmark runner" do
+    refute function_exported?(Pin28Task, :run, 2)
+  end
+
+  test "canonical checked report below the thresholds is rejected" do
+    assert {:error, "PIN-28 benchmark thresholds failed"} =
+             Pin28Benchmark.validate_report(%{thresholds_passed: false}, check: true)
   end
 
   defp non_empty_handoff?(handoff) do
     Enum.all?(["summary", "verification", "reviewer_action", "audit"], fn field ->
       is_binary(handoff[field]) and String.trim(handoff[field]) != ""
     end)
+  end
+
+  test "compares the raw improvement ratio at the threshold boundary" do
+    assert Pin28Benchmark.improvement_threshold_met?(10_000, 6_000)
+    refute Pin28Benchmark.improvement_threshold_met?(10_000, 6_001)
   end
 end

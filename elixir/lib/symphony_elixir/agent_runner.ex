@@ -70,6 +70,57 @@ defmodule SymphonyElixir.AgentRunner do
   end
 
   @doc false
+  @spec registered_execution_plan_for_benchmark(
+          map(),
+          Path.t(),
+          Issue.t(),
+          TaskContract.t(),
+          WorkflowProfile.t(),
+          map(),
+          InstructionAuthority.t(),
+          worker_host()
+        ) :: {:ok, :missing | map()} | {:error, term()}
+  def registered_execution_plan_for_benchmark(
+        repository,
+        workspace,
+        %Issue{} = issue,
+        %TaskContract{} = contract,
+        %WorkflowProfile{} = profile,
+        session,
+        authority,
+        worker_host \\ nil
+      ) do
+    registered_execution_plan(
+      repository,
+      workspace,
+      issue,
+      contract,
+      profile,
+      session,
+      authority,
+      worker_host
+    )
+  end
+
+  @doc false
+  @spec persist_execution_authority_for_benchmark(
+          map(),
+          InstructionAuthority.t(),
+          map(),
+          Issue.t()
+        ) :: :ok | {:error, term()}
+  def persist_execution_authority_for_benchmark(
+        plan,
+        authority,
+        session,
+        %Issue{} = issue
+      ) do
+    plan
+    |> execution_ledger_key(issue)
+    |> persist_execution_authority(plan, authority, session, issue)
+  end
+
+  @doc false
   @spec validate_handoff_for_test(Path.t(), Issue.t(), TaskContract.t(), map(), keyword()) ::
           {:ok, map()} | {:error, term()}
   def validate_handoff_for_test(workspace, %Issue{} = issue, %TaskContract{} = contract, proofs, opts \\ [])
@@ -223,6 +274,11 @@ defmodule SymphonyElixir.AgentRunner do
   catch
     kind, reason -> {:raised, kind, reason, __STACKTRACE__}
   end
+
+  defp return_or_raise({:returned, result}), do: result
+
+  defp return_or_raise({:raised, kind, reason, stacktrace}),
+    do: :erlang.raise(kind, reason, stacktrace)
 
   defp run_after_workspace_hook(workspace, issue, opts, worker_host) do
     hook_runner = Keyword.get(opts, :after_run_hook_runner, &Workspace.run_after_run_hook/3)
@@ -561,16 +617,18 @@ defmodule SymphonyElixir.AgentRunner do
                 implementation_started_at = RunAudit.now()
                 Agent.update(runtime.nested_phase_time, fn _previous -> 0 end)
 
-                result =
-                  do_run_codex_turns(
-                    session,
-                    workspace,
-                    issue,
-                    task_contract,
-                    codex_update_recipient,
-                    runtime,
-                    {1, max_turns}
-                  )
+                implementation_outcome =
+                  capture_workspace_outcome(fn ->
+                    do_run_codex_turns(
+                      session,
+                      workspace,
+                      issue,
+                      task_contract,
+                      codex_update_recipient,
+                      runtime,
+                      {1, max_turns}
+                    )
+                  end)
 
                 implementation_completed_at = RunAudit.now()
                 excluded_duration_ms = Agent.get(runtime.nested_phase_time, & &1)
@@ -585,7 +643,9 @@ defmodule SymphonyElixir.AgentRunner do
                   %{excluded_duration_ms: excluded_duration_ms}
                 )
 
-                update_goal_for_result(session, workspace, issue, result)
+                implementation_outcome
+                |> return_or_raise()
+                |> then(&update_goal_for_result(session, workspace, issue, &1))
               else
                 {:error, reason} = error ->
                   RunAudit.append(workspace, issue, :codex_goal_failed, %{
@@ -640,17 +700,28 @@ defmodule SymphonyElixir.AgentRunner do
           "tool"
         )
 
-        {result, attribution} =
-          execution_plan_for_repository(
-            planning_runner,
-            session,
-            workspace,
-            issue,
-            contract,
-            profile,
-            instruction_authority,
-            Keyword.put(planning_opts, :preactivation_repository, repository)
-          )
+        planning_outcome =
+          capture_workspace_outcome(fn ->
+            execution_plan_for_repository(
+              planning_runner,
+              session,
+              workspace,
+              issue,
+              contract,
+              profile,
+              instruction_authority,
+              Keyword.put(planning_opts, :preactivation_repository, repository)
+            )
+          end)
+
+        {result_outcome, attribution} =
+          case planning_outcome do
+            {:returned, {returned_outcome, returned_attribution}} ->
+              {returned_outcome, returned_attribution}
+
+            {:raised, _kind, _reason, _stacktrace} = raised ->
+              {raised, "tool"}
+          end
 
         RunAudit.record_phase(
           workspace,
@@ -661,7 +732,7 @@ defmodule SymphonyElixir.AgentRunner do
           attribution
         )
 
-        result
+        return_or_raise(result_outcome)
 
       {:error, _reason} = error ->
         RunAudit.record_phase(
@@ -810,7 +881,9 @@ defmodule SymphonyElixir.AgentRunner do
         prompt = build_turn_prompt(issue, runtime.opts, turn_number, max_turns)
         RunAudit.append(workspace, issue, :codex_turn_started, %{phase: "codex_turn", status: "started", turn_number: turn_number})
 
-        case AppServer.run_turn(
+        turn_runner = Keyword.get(runtime.opts, :codex_turn_runner, &AppServer.run_turn/4)
+
+        case turn_runner.(
                app_session,
                prompt,
                issue,
@@ -985,18 +1058,32 @@ defmodule SymphonyElixir.AgentRunner do
          ) do
       {:ok, :missing} ->
         record_context_cache_result(workspace, issue, "miss", repository)
-        result = planning_runner.(session, workspace, issue, contract, profile, planning_opts)
-        {result, planning_attribution(result)}
+
+        outcome =
+          capture_workspace_outcome(fn ->
+            planning_runner.(session, workspace, issue, contract, profile, planning_opts)
+          end)
+
+        attribution =
+          case outcome do
+            {:returned, result} -> planning_attribution(result)
+            {:raised, _kind, _reason, _stacktrace} -> "model"
+          end
+
+        {outcome, attribution}
 
       {:ok, plan} when is_map(plan) ->
         record_context_cache_result(workspace, issue, "hit", repository)
-        {{:ok, plan}, "tool"}
+        {{:returned, {:ok, plan}}, "tool"}
 
       {:error, {:instruction_drift_with_changes, old_plan_digest}} ->
-        {publish_instruction_drift_blocker(issue, contract, old_plan_digest), "tool"}
+        {
+          {:returned, publish_instruction_drift_blocker(issue, contract, old_plan_digest)},
+          "tool"
+        }
 
       {:error, _reason} = error ->
-        {error, "tool"}
+        {{:returned, error}, "tool"}
     end
   end
 
