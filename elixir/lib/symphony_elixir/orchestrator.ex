@@ -1104,9 +1104,12 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   defp spawn_issue_on_worker_host(%State{} = state, issue, contract, attempt, recipient, worker_host) do
+    dispatch_started_at = DateTime.utc_now()
+
     case Task.Supervisor.start_child(SymphonyElixir.TaskSupervisor, fn ->
            AgentRunner.run(issue, recipient,
              attempt: attempt,
+             dispatch_started_at: dispatch_started_at,
              worker_host: worker_host,
              task_contract: contract
            )
@@ -1138,7 +1141,7 @@ defmodule SymphonyElixir.Orchestrator do
             codex_last_reported_total_tokens: 0,
             turn_count: 0,
             retry_attempt: normalize_retry_attempt(attempt),
-            started_at: DateTime.utc_now()
+            started_at: dispatch_started_at
           })
 
         %{

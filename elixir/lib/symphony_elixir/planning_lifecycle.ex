@@ -22,7 +22,7 @@ defmodule SymphonyElixir.PlanningLifecycle do
     worker_host = Keyword.get(opts, :worker_host)
     capture = Keyword.get(opts, :repository_capture, &RepositoryFingerprint.capture/2)
 
-    with {:ok, repository} <- capture.(workspace, worker_host),
+    with {:ok, repository} <- initial_repository(workspace, worker_host, opts, capture),
          authority <- authority_context(issue, contract, profile, primary_session.thread_id, repository, opts) do
       context = context(issue, contract, profile, primary_session.thread_id, repository, authority)
 
@@ -31,6 +31,17 @@ defmodule SymphonyElixir.PlanningLifecycle do
         :missing -> start_new_authority(primary_session, workspace, issue, contract, profile, repository, context, opts)
         {:error, _reason} = error -> error
       end
+    end
+  end
+
+  defp initial_repository(workspace, worker_host, opts, capture) do
+    case Keyword.get(opts, :preactivation_repository) do
+      %{origin: origin, base_sha: base_sha, digest: digest} = repository
+      when is_binary(origin) and is_binary(base_sha) and is_binary(digest) ->
+        {:ok, repository}
+
+      _missing_or_invalid ->
+        capture.(workspace, worker_host)
     end
   end
 
@@ -460,6 +471,14 @@ defmodule SymphonyElixir.PlanningLifecycle do
   defp hex(value, width), do: value |> Integer.to_string(16) |> String.pad_leading(width, "0")
 
   defp validate_execution_plan(plan, issue, contract, profile, thread_id, context) do
+    if plan_repository(plan) == context["repository"] do
+      validate_execution_plan_fields(plan, issue, contract, profile, thread_id, context)
+    else
+      {:error, :execution_plan_repository_drift}
+    end
+  end
+
+  defp validate_execution_plan_fields(plan, issue, contract, profile, thread_id, context) do
     expected_digest = plan |> Map.delete("plan_digest") |> PlanningArtifact.digest()
 
     cond do
@@ -544,6 +563,8 @@ defmodule SymphonyElixir.PlanningLifecycle do
             profile.digest,
             thread_id,
             repository.origin,
+            repository.base_sha,
+            repository.digest,
             instruction_digest
           ])
 
@@ -569,6 +590,10 @@ defmodule SymphonyElixir.PlanningLifecycle do
       do: :ok,
       else: {:error, :preactivation_repository_drift}
   end
+
+  defp plan_repository(%{"candidate" => %{"repository" => repository}}), do: repository
+  defp plan_repository(%{"repository" => repository}), do: repository
+  defp plan_repository(_plan), do: nil
 
   defp reject_file_change(true), do: {:error, :preactivation_file_change}
   defp reject_file_change(false), do: :ok

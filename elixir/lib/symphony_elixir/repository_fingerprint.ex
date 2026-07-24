@@ -11,6 +11,8 @@ defmodule SymphonyElixir.RepositoryFingerprint do
     ".symphony/codex-thread.json",
     ".symphony/run-audit.jsonl",
     ".symphony/run-audit.md",
+    ".symphony/first-useful-edit",
+    ".symphony/workpad.md",
     ".symphony/plan-candidate-*.json",
     ".symphony/plan-review-*.json",
     ".symphony/execution-plan.json",
@@ -31,11 +33,27 @@ defmodule SymphonyElixir.RepositoryFingerprint do
 
   @spec capture(Path.t(), String.t() | nil) :: {:ok, snapshot()} | {:error, term()}
   def capture(workspace, worker_host \\ nil) when is_binary(workspace) do
-    with {:ok, origin} <- git(workspace, worker_host, ["config", "--get", "remote.origin.url"]),
-         {:ok, base_sha} <- git(workspace, worker_host, ["rev-parse", "HEAD"]),
-         {:ok, status} <- git(workspace, worker_host, status_args()),
-         {:ok, unstaged} <- git(workspace, worker_host, diff_args([])),
-         {:ok, staged} <- git(workspace, worker_host, diff_args(["--cached"])),
+    capture(workspace, worker_host, [])
+  end
+
+  @spec capture(Path.t(), String.t() | nil, keyword()) :: {:ok, snapshot()} | {:error, term()}
+  def capture(workspace, worker_host, opts) when is_binary(workspace) and is_list(opts) do
+    runner = Keyword.get(opts, :git_runner, &git(workspace, worker_host, &1))
+
+    commands = [
+      origin: ["config", "--get", "remote.origin.url"],
+      base_sha: ["rev-parse", "HEAD"],
+      status: status_args(),
+      unstaged: diff_args([]),
+      staged: diff_args(["--cached"])
+    ]
+
+    with {:ok, captured} <- parallel_git(commands, runner),
+         origin <- captured.origin,
+         base_sha <- captured.base_sha,
+         status <- captured.status,
+         unstaged <- captured.unstaged,
+         staged <- captured.staged,
          :ok <- bounded(status, "status"),
          :ok <- bounded(unstaged, "unstaged diff"),
          :ok <- bounded(staged, "staged diff") do
@@ -59,6 +77,27 @@ defmodule SymphonyElixir.RepositoryFingerprint do
          }}
       end
     end
+  end
+
+  defp parallel_git(commands, runner) do
+    commands
+    |> Task.async_stream(
+      fn {key, args} -> {key, runner.(args)} end,
+      max_concurrency: length(commands),
+      ordered: true,
+      timeout: 120_000,
+      on_timeout: :kill_task
+    )
+    |> Enum.reduce_while({:ok, %{}}, fn
+      {:ok, {key, {:ok, output}}}, {:ok, captured} ->
+        {:cont, {:ok, Map.put(captured, key, output)}}
+
+      {:ok, {_key, {:error, _reason} = error}}, _captured ->
+        {:halt, error}
+
+      {:exit, reason}, _captured ->
+        {:halt, {:error, {:git_capture_task_failed, reason}}}
+    end)
   end
 
   @spec head(Path.t(), String.t() | nil) :: {:ok, String.t()} | {:error, term()}

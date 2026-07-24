@@ -10,7 +10,14 @@ defmodule SymphonyElixir.RunAudit do
   @audit_dir ".symphony"
   @jsonl_file "run-audit.jsonl"
   @markdown_file "run-audit.md"
+  @first_edit_marker "first-useful-edit"
   @max_preview_chars 160
+  @max_summary_bytes 4_194_304
+  @phase_names ~w(
+    queueing workspace_bootstrap context_loading research planning implementation
+    verification review git_pr external_wait handoff run
+  )
+  @attributions ~w(model tool subprocess external)
   @handoff_events [
     :handoff_publish_started,
     :handoff_comment_result,
@@ -72,6 +79,7 @@ defmodule SymphonyElixir.RunAudit do
     with_audit_guard(workspace, fn ->
       File.mkdir_p!(audit_dir(workspace))
       File.write!(jsonl_path(workspace), "")
+      File.rm(first_edit_marker_path(workspace))
 
       File.write!(
         markdown_path(workspace),
@@ -116,6 +124,115 @@ defmodule SymphonyElixir.RunAudit do
     end)
   end
 
+  @spec record_phase(
+          Path.t(),
+          Issue.t(),
+          String.t(),
+          DateTime.t(),
+          DateTime.t(),
+          String.t(),
+          map()
+        ) :: :ok | {:error, term()}
+  def record_phase(
+        workspace,
+        %Issue{} = issue,
+        phase,
+        %DateTime{} = started_at,
+        %DateTime{} = ended_at,
+        attribution,
+        attrs \\ %{}
+      )
+      when is_binary(workspace) and is_binary(phase) and is_binary(attribution) and is_map(attrs) do
+    case validate_phase_timing(phase, started_at, ended_at, attribution, attrs) do
+      {:ok, duration_ms} ->
+        timing =
+          attrs
+          |> Map.merge(%{
+            phase: phase,
+            status: "completed",
+            started_at: started_at,
+            ended_at: ended_at,
+            duration_ms: duration_ms,
+            attribution: attribution,
+            budget_overrun_ms: budget_overrun(duration_ms, attr(attrs, :budget_ms))
+          })
+
+        append(workspace, issue, :phase_timing, timing)
+
+      {:error, _reason} = error ->
+        error
+    end
+  end
+
+  defp validate_phase_timing(phase, started_at, ended_at, attribution, attrs) do
+    duration_ms = DateTime.diff(ended_at, started_at, :millisecond)
+    reason = attr(attrs, :reason)
+
+    cond do
+      phase not in @phase_names ->
+        {:error, {:invalid_phase, phase}}
+
+      attribution not in @attributions ->
+        {:error, {:invalid_phase_attribution, attribution}}
+
+      duration_ms < 0 ->
+        {:error, :invalid_phase_interval}
+
+      attribution == "external" and (not is_binary(reason) or String.trim(reason) == "") ->
+        {:error, :external_wait_reason_required}
+
+      true ->
+        {:ok, duration_ms}
+    end
+  end
+
+  defp attr(attrs, key), do: Map.get(attrs, key) || Map.get(attrs, to_string(key))
+
+  @spec summary(Path.t()) ::
+          {:ok,
+           %{
+             verification_profile: String.t() | nil,
+             cache: %{hits: non_neg_integer(), misses: non_neg_integer()},
+             slowest_phase: %{phase: String.t(), duration_ms: non_neg_integer()} | nil,
+             budget_overruns: [%{phase: String.t(), budget_overrun_ms: pos_integer()}],
+             phases: [map()]
+           }}
+          | {:error, term()}
+  def summary(workspace) when is_binary(workspace) do
+    with {:ok, events} <- read_events(workspace) do
+      phases = Enum.filter(events, &(&1["event"] == "phase_timing"))
+
+      {:ok,
+       %{
+         verification_profile: latest_value(events, "verification_profile"),
+         cache: cache_summary(events),
+         slowest_phase: slowest_phase(phases),
+         budget_overruns: budget_overruns(phases),
+         phases: phases
+       }}
+    end
+  end
+
+  @spec finish(Path.t(), Issue.t()) :: :ok | {:error, term()}
+  def finish(workspace, %Issue{} = issue) when is_binary(workspace) do
+    with {:ok, run_summary} <- summary(workspace) do
+      slowest = run_summary.slowest_phase
+      overruns = run_summary.budget_overruns
+
+      append(workspace, issue, :run_summary, %{
+        phase: "run",
+        status: "completed",
+        verification_profile: run_summary.verification_profile,
+        cache_hits: run_summary.cache.hits,
+        cache_misses: run_summary.cache.misses,
+        slowest_phase: slowest && slowest.phase,
+        slowest_phase_duration_ms: slowest && slowest.duration_ms,
+        budget_overrun_count: length(overruns),
+        max_budget_overrun_ms: max_budget_overrun(overruns)
+      })
+    end
+  end
+
   @spec append_handoff_event(Path.t(), Issue.t(), handoff_event(), map()) :: :ok
   def append_handoff_event(workspace, %Issue{} = issue, event, attrs \\ %{})
       when is_binary(workspace) and is_map(attrs) do
@@ -133,6 +250,8 @@ defmodule SymphonyElixir.RunAudit do
           {:ok, %{event_id: String.t(), exit_code: integer(), command: String.t() | nil} | nil}
   def append_codex_update(workspace, %Issue{} = issue, update)
       when is_binary(workspace) and is_map(update) do
+    maybe_append_first_useful_edit(workspace, issue, update)
+
     case codex_audit_attrs(update) do
       nil ->
         {:ok, nil}
@@ -282,6 +401,29 @@ defmodule SymphonyElixir.RunAudit do
 
   defp maybe_attach_command_proof(attrs), do: {attrs, nil}
 
+  defp maybe_append_first_useful_edit(workspace, issue, %{payload: %{"method" => method} = payload})
+       when method in ["item/started", "item/completed"] do
+    if get_in(payload, ["params", "item", "type"]) == "fileChange" do
+      case File.write(first_edit_marker_path(workspace), "", [:write, :exclusive]) do
+        :ok ->
+          append(workspace, issue, :first_useful_edit, %{
+            phase: "implementation",
+            status: if(method == "item/completed", do: "completed", else: "started"),
+            method: method
+          })
+
+        {:error, :eexist} ->
+          :ok
+
+        {:error, reason} ->
+          Logger.warning("Failed to record first useful edit marker: #{inspect(reason)}")
+          :ok
+      end
+    end
+  end
+
+  defp maybe_append_first_useful_edit(_workspace, _issue, _update), do: :ok
+
   defp command_from_payload(payload) do
     get_in(payload, ["params", "msg", "command"]) ||
       get_in(payload, ["params", "msg", "parsed_cmd"]) ||
@@ -329,6 +471,80 @@ defmodule SymphonyElixir.RunAudit do
   defp normalize_value(nil), do: nil
   defp normalize_value(value), do: preview(value)
 
+  defp budget_overrun(duration_ms, budget_ms)
+       when is_integer(budget_ms) and budget_ms >= 0 and duration_ms > budget_ms,
+       do: duration_ms - budget_ms
+
+  defp budget_overrun(_duration_ms, _budget_ms), do: nil
+
+  defp read_events(workspace) do
+    path = jsonl_path(workspace)
+
+    case File.read(path) do
+      {:ok, payload} when byte_size(payload) <= @max_summary_bytes ->
+        decode_events(payload)
+
+      {:ok, _payload} ->
+        {:error, :run_audit_too_large}
+
+      {:error, reason} ->
+        {:error, {:run_audit_read_failed, reason}}
+    end
+  end
+
+  defp decode_events(payload) do
+    payload
+    |> String.split("\n", trim: true)
+    |> Enum.reduce_while({:ok, []}, fn line, {:ok, events} ->
+      case Jason.decode(line) do
+        {:ok, event} when is_map(event) -> {:cont, {:ok, [event | events]}}
+        _invalid -> {:halt, {:error, :invalid_run_audit_event}}
+      end
+    end)
+    |> case do
+      {:ok, events} -> {:ok, Enum.reverse(events)}
+      {:error, _reason} = error -> error
+    end
+  end
+
+  defp latest_value(events, key) do
+    events
+    |> Enum.reverse()
+    |> Enum.find_value(&Map.get(&1, key))
+  end
+
+  defp cache_summary(events) do
+    Enum.reduce(events, %{hits: 0, misses: 0}, fn
+      %{"cache_status" => "hit"}, counts -> Map.update!(counts, :hits, &(&1 + 1))
+      %{"cache_status" => "miss"}, counts -> Map.update!(counts, :misses, &(&1 + 1))
+      _event, counts -> counts
+    end)
+  end
+
+  defp slowest_phase([]), do: nil
+
+  defp slowest_phase(phases) do
+    phases
+    |> Enum.max_by(& &1["duration_ms"])
+    |> then(&%{phase: &1["phase"], duration_ms: &1["duration_ms"]})
+  end
+
+  defp budget_overruns(phases) do
+    phases
+    |> Enum.flat_map(fn phase ->
+      case phase["budget_overrun_ms"] do
+        overrun when is_integer(overrun) and overrun > 0 ->
+          [%{phase: phase["phase"], budget_overrun_ms: overrun}]
+
+        _ ->
+          []
+      end
+    end)
+  end
+
+  defp max_budget_overrun([]), do: 0
+  defp max_budget_overrun(overruns), do: overruns |> Enum.map(& &1.budget_overrun_ms) |> Enum.max()
+
   defp scalar?(value) do
     is_binary(value) or is_atom(value) or is_integer(value) or is_float(value) or
       is_boolean(value) or is_nil(value)
@@ -367,6 +583,7 @@ defmodule SymphonyElixir.RunAudit do
   defp audit_dir(workspace), do: Path.join(workspace, @audit_dir)
   defp jsonl_path(workspace), do: Path.join(audit_dir(workspace), @jsonl_file)
   defp markdown_path(workspace), do: Path.join(audit_dir(workspace), @markdown_file)
+  defp first_edit_marker_path(workspace), do: Path.join(audit_dir(workspace), @first_edit_marker)
 
   defp with_audit_guard(workspace, fun) when is_function(fun, 0) do
     fun.()

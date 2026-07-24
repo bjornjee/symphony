@@ -128,6 +128,7 @@ defmodule SymphonyElixir.AgentRunner do
 
   defp run_on_worker_host(issue, codex_update_recipient, opts, worker_host) do
     Logger.info("Starting worker attempt for #{issue_context(issue)} worker_host=#{worker_host_for_log(worker_host)}")
+    worker_started_at = DateTime.utc_now()
 
     case Workspace.create_for_issue(issue, worker_host) do
       {:ok, workspace} ->
@@ -135,10 +136,20 @@ defmodule SymphonyElixir.AgentRunner do
 
         case ExecutionManifest.pin(workspace, issue, task_contract, worker_host) do
           {:ok, manifest} ->
+            workspace_ready_at = DateTime.utc_now()
+
             RunAudit.start(workspace, issue, %{
               worker_host: worker_host_for_log(worker_host),
               plan_digest: manifest["plan_digest"]
             })
+
+            record_bootstrap_timings(
+              workspace,
+              issue,
+              Keyword.get(opts, :dispatch_started_at, worker_started_at),
+              worker_started_at,
+              workspace_ready_at
+            )
 
             RunAudit.append(workspace, issue, :workspace_prepared, %{
               phase: "workspace",
@@ -183,12 +194,41 @@ defmodule SymphonyElixir.AgentRunner do
     end
   end
 
+  defp record_bootstrap_timings(
+         workspace,
+         issue,
+         dispatch_started_at,
+         worker_started_at,
+         workspace_ready_at
+       ) do
+    RunAudit.record_phase(
+      workspace,
+      issue,
+      "queueing",
+      dispatch_started_at,
+      worker_started_at,
+      "external",
+      %{reason: "waiting for the worker task to start"}
+    )
+
+    RunAudit.record_phase(
+      workspace,
+      issue,
+      "workspace_bootstrap",
+      worker_started_at,
+      workspace_ready_at,
+      "subprocess"
+    )
+  end
+
   defp record_run_result(workspace, issue, {:ok, _completion_info}) do
     RunAudit.append(workspace, issue, :run_completed, %{phase: "run", status: "completed"})
+    RunAudit.finish(workspace, issue)
   end
 
   defp record_run_result(workspace, issue, {:error, reason}) do
     RunAudit.append(workspace, issue, :run_failed, %{phase: "run", status: "failed", reason: reason})
+    RunAudit.finish(workspace, issue)
   end
 
   defp normalize_run_result({:ok, _completion_info}), do: :ok
@@ -295,6 +335,7 @@ defmodule SymphonyElixir.AgentRunner do
       worker_host: worker_host
     }
 
+    context_started_at = DateTime.utc_now()
     RunAudit.append(workspace, issue, :codex_app_server_starting, %{phase: "codex_app_server", status: "started"})
 
     try do
@@ -325,6 +366,17 @@ defmodule SymphonyElixir.AgentRunner do
 
             with {:ok, instruction_authority} <-
                    InstructionAuthority.capture(session.instruction_sources, worker_host) do
+              context_loaded_at = DateTime.utc_now()
+
+              RunAudit.record_phase(
+                workspace,
+                issue,
+                "context_loading",
+                context_started_at,
+                context_loaded_at,
+                "tool"
+              )
+
               planning_opts =
                 runtime.opts
                 |> Keyword.put(:worker_host, worker_host)
@@ -366,7 +418,7 @@ defmodule SymphonyElixir.AgentRunner do
                 Keyword.get(runtime.opts, :task_branch_ensurer, &TaskBranch.ensure/5)
 
               with {:ok, execution_plan} <-
-                     execution_plan_for_run(
+                     execution_plan_for_run_with_timing(
                        planning_runner,
                        session,
                        workspace,
@@ -424,6 +476,8 @@ defmodule SymphonyElixir.AgentRunner do
                       |> Keyword.put(:instruction_authority, instruction_authority)
                 }
 
+                implementation_started_at = DateTime.utc_now()
+
                 result =
                   do_run_codex_turns(
                     session,
@@ -434,6 +488,16 @@ defmodule SymphonyElixir.AgentRunner do
                     runtime,
                     {1, max_turns}
                   )
+
+                RunAudit.record_phase(
+                  workspace,
+                  issue,
+                  "implementation",
+                  implementation_started_at,
+                  DateTime.utc_now(),
+                  "model",
+                  %{includes_nested_tool_time: true}
+                )
 
                 update_goal_for_result(session, workspace, issue, result)
               else
@@ -463,6 +527,75 @@ defmodule SymphonyElixir.AgentRunner do
     end
   end
 
+  defp execution_plan_for_run_with_timing(
+         planning_runner,
+         session,
+         workspace,
+         issue,
+         contract,
+         profile,
+         instruction_authority,
+         planning_opts
+       ) do
+    research_started_at = DateTime.utc_now()
+    worker_host = Keyword.get(planning_opts, :worker_host)
+
+    case RepositoryFingerprint.capture(workspace, worker_host) do
+      {:ok, repository} ->
+        research_completed_at = DateTime.utc_now()
+
+        RunAudit.record_phase(
+          workspace,
+          issue,
+          "research",
+          research_started_at,
+          research_completed_at,
+          "tool"
+        )
+
+        result =
+          execution_plan_for_repository(
+            planning_runner,
+            session,
+            workspace,
+            issue,
+            contract,
+            profile,
+            instruction_authority,
+            Keyword.put(planning_opts, :preactivation_repository, repository)
+          )
+
+        attribution =
+          case result do
+            {:ok, %{"execution_mode" => "simple"}} -> "tool"
+            _planned_or_failed -> "model"
+          end
+
+        RunAudit.record_phase(
+          workspace,
+          issue,
+          "planning",
+          research_completed_at,
+          DateTime.utc_now(),
+          attribution
+        )
+
+        result
+
+      {:error, _reason} = error ->
+        RunAudit.record_phase(
+          workspace,
+          issue,
+          "research",
+          research_started_at,
+          DateTime.utc_now(),
+          "tool"
+        )
+
+        error
+    end
+  end
+
   defp record_execution_plan_approved(workspace, issue, session, execution_plan) do
     RunAudit.append(workspace, issue, :execution_plan_approved, %{
       phase: if(execution_plan["execution_mode"] == "simple", do: "classification", else: "planning"),
@@ -470,6 +603,7 @@ defmodule SymphonyElixir.AgentRunner do
       execution_mode: execution_plan["execution_mode"] || "planned",
       plan_digest: execution_plan["plan_digest"],
       workflow: execution_plan["workflow"],
+      verification_profile: execution_plan_verification_profile(execution_plan),
       profile_digest: execution_plan["profile_digest"],
       thread_id: session.thread_id
     })
@@ -481,6 +615,14 @@ defmodule SymphonyElixir.AgentRunner do
 
   defp execution_plan_base_sha(execution_plan),
     do: get_in(execution_plan, ["candidate", "repository", "base_sha"])
+
+  defp execution_plan_verification_profile(%{"verification_profile" => profile}),
+    do: profile
+
+  defp execution_plan_verification_profile(%{"candidate" => %{"verification_profile" => profile}}),
+    do: profile
+
+  defp execution_plan_verification_profile(_execution_plan), do: nil
 
   defp pin_thread_before_goal(%{"execution_mode" => "simple"}, _workspace, _session, _worker_host),
     do: :ok
@@ -738,7 +880,7 @@ defmodule SymphonyElixir.AgentRunner do
     end
   end
 
-  defp execution_plan_for_run(
+  defp execution_plan_for_repository(
          planning_runner,
          session,
          workspace,
@@ -748,26 +890,22 @@ defmodule SymphonyElixir.AgentRunner do
          instruction_authority,
          planning_opts
        ) do
-    worker_host = Keyword.get(planning_opts, :worker_host)
+    repository = Keyword.fetch!(planning_opts, :preactivation_repository)
 
-    with {:ok, repository} <- RepositoryFingerprint.capture(workspace, worker_host),
-         {:ok, registered} <-
-           registered_execution_plan(
-             repository,
-             issue,
-             contract,
-             profile,
-             session,
-             instruction_authority
-           ) do
-      case registered do
-        :missing ->
-          planning_runner.(session, workspace, issue, contract, profile, planning_opts)
+    case registered_execution_plan(
+           repository,
+           issue,
+           contract,
+           profile,
+           session,
+           instruction_authority
+         ) do
+      {:ok, :missing} ->
+        planning_runner.(session, workspace, issue, contract, profile, planning_opts)
 
-        plan when is_map(plan) ->
-          {:ok, plan}
-      end
-    else
+      {:ok, plan} when is_map(plan) ->
+        {:ok, plan}
+
       {:error, {:instruction_drift_with_changes, old_plan_digest}} ->
         publish_instruction_drift_blocker(issue, contract, old_plan_digest)
 
@@ -792,7 +930,9 @@ defmodule SymphonyElixir.AgentRunner do
             plan["profile_digest"] == profile.digest and
             plan["primary_thread_id"] == session.thread_id and
             plan["instruction_digest"] == authority.digest and
-            execution_plan_origin(plan) == repository.origin
+            execution_plan_origin(plan) == repository.origin and
+            execution_plan_base_sha(plan) == repository.base_sha and
+            execution_plan_preactivation_digest(plan) == repository.digest
         end)
 
       cond do
@@ -811,7 +951,8 @@ defmodule SymphonyElixir.AgentRunner do
         Enum.any?(valid, &(&1["plan"]["contract_digest"] != contract.digest)) ->
           {:error, :registered_execution_plan_contract_drift}
 
-        repository.clean and Enum.any?(valid, &(execution_plan_base_sha(&1["plan"]) == repository.base_sha)) ->
+        repository.clean and
+            Enum.any?(valid, &(execution_plan_base_sha(&1["plan"]) == repository.base_sha)) ->
           {:ok, :missing}
 
         true ->
@@ -929,6 +1070,16 @@ defmodule SymphonyElixir.AgentRunner do
   defp execution_plan_origin(%{"candidate" => %{"repository" => %{"origin" => origin}}}), do: origin
   defp execution_plan_origin(%{"repository" => %{"origin" => origin}}), do: origin
 
+  defp execution_plan_preactivation_digest(%{
+         "candidate" => %{"repository" => %{"preactivation_digest" => digest}}
+       }),
+       do: digest
+
+  defp execution_plan_preactivation_digest(%{"repository" => %{"preactivation_digest" => digest}}),
+    do: digest
+
+  defp execution_plan_preactivation_digest(_plan), do: nil
+
   defp implementation_sandbox_policy(workspace, execution_plan) do
     protected_roots =
       execution_plan
@@ -988,6 +1139,8 @@ defmodule SymphonyElixir.AgentRunner do
     browser_path = capability_diagnostics[:browser_path]
 
     fn tool, arguments ->
+      started_at = DateTime.utc_now()
+
       result =
         if tool in ["request_implementation_review", "publish_pull_request"] do
           DeliveryControl.execute_tool(
@@ -1024,12 +1177,29 @@ defmodule SymphonyElixir.AgentRunner do
           |> dynamic_tool_result()
         end
 
-      record_execution_tool_event(workspace, issue, tool, arguments, result)
+      record_execution_tool_event(
+        workspace,
+        issue,
+        tool,
+        arguments,
+        result,
+        started_at,
+        DateTime.utc_now()
+      )
+
       result
     end
   end
 
-  defp record_execution_tool_event(workspace, issue, tool, arguments, result) do
+  defp record_execution_tool_event(
+         workspace,
+         issue,
+         tool,
+         arguments,
+         result,
+         started_at,
+         ended_at
+       ) do
     payload = decode_dynamic_tool_output(result)
 
     attrs = %{
@@ -1042,6 +1212,11 @@ defmodule SymphonyElixir.AgentRunner do
       verdict: payload["verdict"],
       proof_role: payload["role"],
       proof_passed: payload["passed"],
+      cache_status: payload["cache_status"],
+      reused: payload["reused"],
+      duration_ms: payload["duration_ms"],
+      verification_profile: payload["verification_profile"],
+      verification_profile_escalated: payload["verification_profile_escalated"],
       browser_path: payload["browser_path"],
       browser_provenance: payload["browser_provenance"],
       browser_selection_provenance: payload["browser_selection_provenance"],
@@ -1053,7 +1228,66 @@ defmodule SymphonyElixir.AgentRunner do
     }
 
     RunAudit.append(workspace, issue, execution_tool_event(tool), attrs)
+    record_execution_tool_timing(workspace, issue, tool, payload, started_at, ended_at)
   end
+
+  defp record_execution_tool_timing(
+         workspace,
+         issue,
+         "run_plan_proof",
+         payload,
+         started_at,
+         ended_at
+       ) do
+    RunAudit.record_phase(
+      workspace,
+      issue,
+      "verification",
+      started_at,
+      ended_at,
+      if(payload["cache_status"] == "hit", do: "tool", else: "subprocess")
+    )
+  end
+
+  defp record_execution_tool_timing(
+         workspace,
+         issue,
+         "request_implementation_review",
+         _payload,
+         started_at,
+         ended_at
+       ) do
+    RunAudit.record_phase(workspace, issue, "review", started_at, ended_at, "model")
+  end
+
+  defp record_execution_tool_timing(
+         workspace,
+         issue,
+         "publish_pull_request",
+         _payload,
+         started_at,
+         ended_at
+       ) do
+    RunAudit.record_phase(
+      workspace,
+      issue,
+      "git_pr",
+      started_at,
+      ended_at,
+      "external",
+      %{reason: "waiting for Git push and pull-request publication"}
+    )
+  end
+
+  defp record_execution_tool_timing(
+         _workspace,
+         _issue,
+         _tool,
+         _payload,
+         _started_at,
+         _ended_at
+       ),
+       do: :ok
 
   defp decode_dynamic_tool_output(%{"output" => output}) when is_binary(output) do
     case Jason.decode(output) do
@@ -1506,7 +1740,20 @@ defmodule SymphonyElixir.AgentRunner do
       ]
       |> maybe_put_thread_id(Keyword.get(opts, :thread_id))
 
-    case publisher.(refreshed_issue, task_contract, evidence, publisher_opts) do
+    handoff_started_at = DateTime.utc_now()
+    publication_result = publisher.(refreshed_issue, task_contract, evidence, publisher_opts)
+
+    RunAudit.record_phase(
+      workspace,
+      issue,
+      "handoff",
+      handoff_started_at,
+      DateTime.utc_now(),
+      "external",
+      %{reason: "waiting for Linear comment readback and state transition"}
+    )
+
+    case publication_result do
       {:ok, publication} ->
         record_published_handoff(
           workspace,

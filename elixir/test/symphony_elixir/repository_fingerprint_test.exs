@@ -38,6 +38,7 @@ defmodule SymphonyElixir.RepositoryFingerprintTest do
     File.mkdir_p!(Path.join(workspace, ".symphony"))
     File.write!(Path.join(workspace, ".symphony/plan-candidate-1.json"), "{}")
     File.write!(Path.join(workspace, ".symphony/task-classification.json"), "{}")
+    File.write!(Path.join(workspace, ".symphony/first-useful-edit"), "")
     assert {:ok, second} = RepositoryFingerprint.capture(workspace)
     assert first.digest == second.digest
   end
@@ -65,5 +66,58 @@ defmodule SymphonyElixir.RepositoryFingerprintTest do
     assert {:ok, remote} = RepositoryFingerprint.capture(workspace, "worker-a")
     assert remote == local
     assert {:ok, local.base_sha} == RepositoryFingerprint.head(workspace, "worker-a")
+  end
+
+  test "captures independent repository observations in parallel", %{workspace: workspace} do
+    parent = self()
+    base_sha = String.duplicate("a", 40)
+
+    runner = fn args ->
+      send(parent, {:git_capture_started, self(), args})
+
+      receive do
+        :continue ->
+          case args do
+            ["config", "--get", "remote.origin.url"] -> {:ok, "git@github.com:acme/repo.git\n"}
+            ["rev-parse", "HEAD"] -> {:ok, base_sha <> "\n"}
+            _ -> {:ok, ""}
+          end
+      end
+    end
+
+    capture =
+      Task.async(fn ->
+        RepositoryFingerprint.capture(workspace, nil, git_runner: runner)
+      end)
+
+    started =
+      for _index <- 1..5 do
+        assert_receive {:git_capture_started, pid, args}, 1_000
+        {pid, args}
+      end
+
+    Enum.each(started, fn {pid, _args} -> send(pid, :continue) end)
+
+    assert {:ok, %{base_sha: ^base_sha, clean: true}} = Task.await(capture)
+  end
+
+  test "invalidates for instructions, workflow, manifests, lockfiles, and toolchain configuration", %{
+    workspace: workspace
+  } do
+    assert {:ok, initial} = RepositoryFingerprint.capture(workspace)
+
+    final =
+      Enum.reduce(
+        ["AGENTS.md", "workflow.md", "mix.exs", "mix.lock", "mise.toml"],
+        initial,
+        fn path, previous ->
+          File.write!(Path.join(workspace, path), "#{path}\n")
+          assert {:ok, current} = RepositoryFingerprint.capture(workspace)
+          refute current.digest == previous.digest
+          current
+        end
+      )
+
+    refute final.digest == initial.digest
   end
 end

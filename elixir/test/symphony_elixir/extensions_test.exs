@@ -713,6 +713,83 @@ defmodule SymphonyElixir.ExtensionsTest do
   end
 
   @tag :dashboard_detail
+  test "dashboard detail summarizes latency, cache, profile, and budget data" do
+    audit_events_path =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-dashboard-run-summary-#{System.unique_integer([:positive])}.jsonl"
+      )
+
+    events = [
+      %{
+        "event" => "run_summary",
+        "timestamp" => "2026-07-24T08:00:10Z",
+        "verification_profile" => "Full",
+        "cache_hits" => 3,
+        "cache_misses" => 1,
+        "slowest_phase" => "planning",
+        "slowest_phase_duration_ms" => 12_500,
+        "budget_overrun_count" => 1,
+        "max_budget_overrun_ms" => 2_500
+      }
+    ]
+
+    File.write!(
+      audit_events_path,
+      Enum.map_join(events, "", &(Jason.encode!(&1) <> "\n"))
+    )
+
+    on_exit(fn -> File.rm(audit_events_path) end)
+
+    detail = Presenter.dashboard_detail(%{audit_events_path: audit_events_path})
+
+    assert detail.audit_summary == %{
+             verification_profile: "Full",
+             cache_hits: 3,
+             cache_misses: 1,
+             slowest_phase: "planning",
+             slowest_phase_duration_ms: 12_500,
+             budget_overrun_count: 1,
+             max_budget_overrun_ms: 2_500
+           }
+  end
+
+  @tag :dashboard_detail
+  test "dashboard derives an active run summary before the final summary event" do
+    audit_events_path =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-dashboard-live-summary-#{System.unique_integer([:positive])}.jsonl"
+      )
+
+    events = [
+      %{"event" => "execution_plan_approved", "verification_profile" => "Targeted"},
+      %{"event" => "proof_completed", "cache_status" => "hit"},
+      %{
+        "event" => "phase_timing",
+        "phase" => "planning",
+        "duration_ms" => 12_500,
+        "budget_overrun_ms" => 2_500
+      }
+    ]
+
+    File.write!(audit_events_path, Enum.map_join(events, "", &(Jason.encode!(&1) <> "\n")))
+    on_exit(fn -> File.rm(audit_events_path) end)
+
+    detail = Presenter.dashboard_detail(%{audit_events_path: audit_events_path})
+
+    assert detail.audit_summary == %{
+             verification_profile: "Targeted",
+             cache_hits: 1,
+             cache_misses: 0,
+             slowest_phase: "planning",
+             slowest_phase_duration_ms: 12_500,
+             budget_overrun_count: 1,
+             max_budget_overrun_ms: 2_500
+           }
+  end
+
+  @tag :dashboard_detail
   test "dashboard log tail formats command completion output" do
     audit_events_path =
       Path.join(
@@ -897,7 +974,33 @@ defmodule SymphonyElixir.ExtensionsTest do
   @tag :dashboard_detail
   test "dashboard liveview renders and refreshes over pubsub" do
     orchestrator_name = Module.concat(__MODULE__, :DashboardOrchestrator)
-    snapshot = static_snapshot()
+
+    audit_events_path =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-dashboard-liveview-summary-#{System.unique_integer([:positive])}.jsonl"
+      )
+
+    File.write!(
+      audit_events_path,
+      Jason.encode!(%{
+        "event" => "run_summary",
+        "verification_profile" => "Full",
+        "cache_hits" => 3,
+        "cache_misses" => 1,
+        "slowest_phase" => "planning",
+        "slowest_phase_duration_ms" => 12_500,
+        "budget_overrun_count" => 1,
+        "max_budget_overrun_ms" => 2_500
+      }) <> "\n"
+    )
+
+    on_exit(fn -> File.rm(audit_events_path) end)
+
+    snapshot =
+      update_in(static_snapshot(), [:running, Access.at(0)], fn running ->
+        %{running | audit_events_path: audit_events_path}
+      end)
 
     {:ok, orchestrator_pid} =
       StaticOrchestrator.start_link(
@@ -940,6 +1043,11 @@ defmodule SymphonyElixir.ExtensionsTest do
     assert html =~ "browser_session_backend_unavailable"
     assert html =~ "Audit"
     assert html =~ "Copy audit"
+    assert html =~ "Verification profile"
+    assert html =~ "3 hits"
+    assert html =~ "Slowest phase"
+    assert html =~ "planning"
+    assert html =~ "Budget overruns"
     assert html =~ "/workspaces/MT-HTTP/.symphony/run-audit.md"
     refute html =~ "data-runtime-clock="
     refute html =~ "setInterval(refreshRuntimeClocks"

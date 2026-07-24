@@ -162,9 +162,73 @@ defmodule SymphonyElixir.PlanningLifecycleTest do
     assert plan["execution_mode"] == "simple"
     assert plan["candidate"] == nil
     assert plan["repository"]["base_sha"] == ctx.repository.base_sha
+    assert plan["verification_profile"] == "Surgical"
 
     assert [%{"command" => "mix test test/docs_test.exs", "role" => "final"}] =
              Enum.map(plan["proofs"], &Map.take(&1, ["command", "role"]))
+  end
+
+  test "simple feature tasks retain a Targeted verification profile", ctx do
+    description =
+      TaskContractFixtures.valid_description(%{
+        "Goal" => "Adjust one formatter behavior.",
+        "Scope" => "In:\n- lib/formatter.ex\n\nOut:\n- other formatters",
+        "Acceptance Criteria" => "- [ ] The formatter emits the adjusted value.",
+        "Verification" => "Run:\n`mix test test/formatter_test.exs`",
+        "Risk" => "low",
+        "Notes For Agent" => "Workflow: feature"
+      })
+
+    issue = TaskContractFixtures.issue(%{title: "feat: adjust one formatter behavior", description: description})
+    {:ok, contract} = TaskContract.from_issue(issue)
+    {:ok, profile} = WorkflowProfile.select(contract)
+
+    assert {:ok, %{"execution_mode" => "simple", "verification_profile" => "Targeted"}} =
+             PlanningLifecycle.run(
+               %{role: :primary, thread_id: "primary-thread"},
+               ctx.workspace,
+               issue,
+               contract,
+               profile,
+               repository_capture: fn _, _ -> {:ok, ctx.repository} end,
+               issue_fetcher: fn [_id] -> {:ok, [issue]} end
+             )
+  end
+
+  test "reuses the preactivation repository snapshot before later boundary revalidation", ctx do
+    parent = self()
+
+    description =
+      TaskContractFixtures.valid_description(%{
+        "Goal" => "Correct one documentation example.",
+        "Scope" => "In:\n- docs/guide.md\n\nOut:\n- source code",
+        "Acceptance Criteria" => "- [ ] Guide example is current.",
+        "Verification" => "Run:\n`mix test test/docs_test.exs`",
+        "Risk" => "low",
+        "Notes For Agent" => "Workflow: chore"
+      })
+
+    issue = TaskContractFixtures.issue(%{title: "docs: correct guide example", description: description})
+    {:ok, contract} = TaskContract.from_issue(issue)
+    {:ok, profile} = WorkflowProfile.select(contract)
+
+    assert {:ok, %{"execution_mode" => "simple"}} =
+             PlanningLifecycle.run(
+               %{role: :primary, thread_id: "primary-thread"},
+               ctx.workspace,
+               issue,
+               contract,
+               profile,
+               preactivation_repository: ctx.repository,
+               repository_capture: fn _, _ ->
+                 send(parent, :repository_revalidated)
+                 {:ok, ctx.repository}
+               end,
+               issue_fetcher: fn [_id] -> {:ok, [issue]} end
+             )
+
+    assert_receive :repository_revalidated
+    refute_receive :repository_revalidated
   end
 
   test "clean preimplementation instruction drift creates a new authority namespace", ctx do
@@ -219,6 +283,60 @@ defmodule SymphonyElixir.PlanningLifecycleTest do
     refute first["plan_digest"] == second["plan_digest"]
     assert File.exists?(SymphonyElixir.PlanningArtifact.execution_plan_path(ctx.workspace, first["authority_digest"]))
     assert File.exists?(SymphonyElixir.PlanningArtifact.execution_plan_path(ctx.workspace, second["authority_digest"]))
+  end
+
+  test "base revision drift creates a new authority namespace", ctx do
+    description =
+      TaskContractFixtures.valid_description(%{
+        "Goal" => "Correct one documentation example.",
+        "Scope" => "In:\n- docs/guide.md\n\nOut:\n- source code",
+        "Acceptance Criteria" => "- [ ] Guide example is current.",
+        "Verification" => "Run:\n`mix test test/docs_test.exs`",
+        "Risk" => "low",
+        "Notes For Agent" => "Workflow: chore"
+      })
+
+    issue = TaskContractFixtures.issue(%{title: "docs: correct guide example", description: description})
+    {:ok, contract} = TaskContract.from_issue(issue)
+    {:ok, profile} = WorkflowProfile.select(contract)
+    {:ok, instruction_authority} = SymphonyElixir.InstructionAuthority.capture([])
+
+    common = [
+      instruction_authority: instruction_authority,
+      issue_fetcher: fn [_id] -> {:ok, [issue]} end,
+      run_turn: fn _, _, _, _ -> flunk("simple task must not plan") end
+    ]
+
+    assert {:ok, first} =
+             PlanningLifecycle.run(
+               %{role: :primary, thread_id: "primary-thread"},
+               ctx.workspace,
+               issue,
+               contract,
+               profile,
+               Keyword.put(common, :repository_capture, fn _, _ -> {:ok, ctx.repository} end)
+             )
+
+    next_repository = %{
+      ctx.repository
+      | base_sha: String.duplicate("e", 40),
+        digest: String.duplicate("f", 64)
+    }
+
+    assert {:ok, second} =
+             PlanningLifecycle.run(
+               %{role: :primary, thread_id: "primary-thread"},
+               ctx.workspace,
+               issue,
+               contract,
+               profile,
+               Keyword.put(common, :repository_capture, fn _, _ -> {:ok, next_repository} end)
+             )
+
+    refute first["authority_digest"] == second["authority_digest"]
+    refute first["plan_digest"] == second["plan_digest"]
+    assert first["repository"]["base_sha"] == ctx.repository.base_sha
+    assert second["repository"]["base_sha"] == next_repository.base_sha
   end
 
   test "rejects a planning turn that emits a file-change event", ctx do

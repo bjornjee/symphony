@@ -400,6 +400,31 @@ defmodule SymphonyElixirWeb.DashboardLive do
               </span>
             </dd>
           </div>
+          <div :if={@agent.audit_summary}>
+            <dt>Verification profile</dt>
+            <dd><strong><%= @agent.audit_summary.verification_profile || "n/a" %></strong></dd>
+          </div>
+          <div :if={@agent.audit_summary}>
+            <dt>Cache</dt>
+            <dd>
+              <%= @agent.audit_summary.cache_hits %> hits ·
+              <%= @agent.audit_summary.cache_misses %> misses
+            </dd>
+          </div>
+          <div :if={@agent.audit_summary && @agent.audit_summary.slowest_phase}>
+            <dt>Slowest phase</dt>
+            <dd>
+              <strong><%= @agent.audit_summary.slowest_phase %></strong>
+              · <%= format_duration_ms(@agent.audit_summary.slowest_phase_duration_ms) %>
+            </dd>
+          </div>
+          <div :if={@agent.audit_summary && @agent.audit_summary.budget_overrun_count > 0}>
+            <dt>Budget overruns</dt>
+            <dd>
+              <%= @agent.audit_summary.budget_overrun_count %>
+              · max <%= format_duration_ms(@agent.audit_summary.max_budget_overrun_ms) %>
+            </dd>
+          </div>
           <div>
             <dt>Rate limits</dt>
             <dd><%= rate_limit_summary(@rate_limits) %></dd>
@@ -580,6 +605,17 @@ defmodule SymphonyElixirWeb.DashboardLive do
       true -> "<1m"
     end
   end
+
+  defp format_duration_ms(milliseconds) when is_integer(milliseconds) and milliseconds >= 60_000,
+    do: "#{Float.round(milliseconds / 60_000, 1)}m"
+
+  defp format_duration_ms(milliseconds) when is_integer(milliseconds) and milliseconds >= 1_000,
+    do: "#{Float.round(milliseconds / 1_000, 1)}s"
+
+  defp format_duration_ms(milliseconds) when is_integer(milliseconds),
+    do: "#{milliseconds}ms"
+
+  defp format_duration_ms(_milliseconds), do: "n/a"
 
   defp runtime_seconds_from_started_at(%DateTime{} = started_at, %DateTime{} = now) do
     DateTime.diff(now, started_at, :second)

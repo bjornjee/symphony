@@ -225,6 +225,8 @@ The observability UI now runs on a minimal Phoenix stack:
 - Tracker issue identifiers link to the tracker-provided URL when it uses `http` or `https`
 - Running sessions show the selected browser verification path, provenance, and diagnostic code
   when startup capability diagnostics are available
+- Audit diagnostics show the selected verification profile, proof-cache hits and misses, slowest
+  completed phase, and budget overruns during active runs and after final summary emission
 
 ## Project Layout
 
@@ -238,6 +240,18 @@ The observability UI now runs on a minimal Phoenix stack:
 ```bash
 make all
 ```
+
+Run the repeatable PIN-28-style latency and completion-accuracy evaluation locally with:
+
+```bash
+make benchmark-pin28
+```
+
+The benchmark executes ten controlled baseline/candidate samples against the checked-out revision,
+records the environment and task-contract digest, verifies the historical PIN-28 expected diff, and
+fails when median latency improvement is below 40%, median end-to-end latency exceeds ten minutes,
+first useful edit exceeds four minutes, or completion accuracy differs. CI runs the same target
+after `make all`.
 
 Run the real external end-to-end test only when you want Symphony to create disposable Linear
 resources and launch a real `codex app-server` session:

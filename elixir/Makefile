@@ -1,9 +1,9 @@
-.PHONY: help all setup deps build fmt fmt-check lint test coverage ci dialyzer e2e pilot
+.PHONY: help all setup deps build fmt fmt-check lint test coverage ci dialyzer e2e pilot benchmark-pin28
 
 MIX ?= mix
 
 help:
-	@echo "Targets: setup, deps, fmt, fmt-check, lint, test, coverage, dialyzer, e2e, pilot, ci"
+	@echo "Targets: setup, deps, fmt, fmt-check, lint, test, coverage, dialyzer, e2e, pilot, benchmark-pin28, ci"
 
 setup:
 	$(MIX) setup
@@ -39,6 +39,9 @@ e2e:
 pilot:
 	@test -n "$$SYMPHONY_LIVE_PULL_REQUEST_URL" || (echo "SYMPHONY_LIVE_PULL_REQUEST_URL is required" >&2; exit 2)
 	SYMPHONY_RUN_LIVE_E2E=1 $(MIX) test test/symphony_elixir/live_e2e_test.exs --only pin18_pilot
+
+benchmark-pin28:
+	$(MIX) symphony.benchmark.pin28 --check
 
 ci:
 	$(MAKE) setup

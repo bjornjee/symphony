@@ -61,6 +61,155 @@ defmodule SymphonyElixir.RunAuditTest do
              })
   end
 
+  test "records machine-readable phase timing with attribution and budget overrun", context do
+    started_at = ~U[2026-07-24 08:00:00.000Z]
+    ended_at = ~U[2026-07-24 08:00:02.250Z]
+
+    assert :ok =
+             RunAudit.record_phase(
+               context.workspace,
+               context.task,
+               "context_loading",
+               started_at,
+               ended_at,
+               "tool",
+               %{budget_ms: 2_000}
+             )
+
+    event = List.last(events(context.workspace))
+
+    assert event["event"] == "phase_timing"
+    assert event["phase"] == "context_loading"
+    assert event["started_at"] == "2026-07-24T08:00:00.000Z"
+    assert event["ended_at"] == "2026-07-24T08:00:02.250Z"
+    assert event["duration_ms"] == 2_250
+    assert event["attribution"] == "tool"
+    assert event["budget_ms"] == 2_000
+    assert event["budget_overrun_ms"] == 250
+  end
+
+  test "requires a reason for external wait timing", context do
+    assert {:error, :external_wait_reason_required} =
+             RunAudit.record_phase(
+               context.workspace,
+               context.task,
+               "external_wait",
+               ~U[2026-07-24 08:00:00Z],
+               ~U[2026-07-24 08:00:01Z],
+               "external",
+               %{}
+             )
+
+    assert :ok =
+             RunAudit.record_phase(
+               context.workspace,
+               context.task,
+               "external_wait",
+               ~U[2026-07-24 08:00:00Z],
+               ~U[2026-07-24 08:00:01Z],
+               "external",
+               %{reason: "waiting for GitHub checks"}
+             )
+  end
+
+  test "summarizes slowest phase, cache outcomes, profile, and overruns", context do
+    assert :ok =
+             RunAudit.record_phase(
+               context.workspace,
+               context.task,
+               "planning",
+               ~U[2026-07-24 08:00:00Z],
+               ~U[2026-07-24 08:00:03Z],
+               "model",
+               %{budget_ms: 2_000}
+             )
+
+    assert :ok =
+             RunAudit.record_phase(
+               context.workspace,
+               context.task,
+               "verification",
+               ~U[2026-07-24 08:00:03Z],
+               ~U[2026-07-24 08:00:04Z],
+               "subprocess"
+             )
+
+    RunAudit.append(context.workspace, context.task, :verification_profile_selected, %{
+      phase: "planning",
+      verification_profile: "Targeted"
+    })
+
+    RunAudit.append(context.workspace, context.task, :context_cache_result, %{
+      phase: "context_loading",
+      cache: "context",
+      cache_status: "hit"
+    })
+
+    RunAudit.append(context.workspace, context.task, :proof_cache_result, %{
+      phase: "verification",
+      cache: "proof",
+      cache_status: "miss"
+    })
+
+    assert {:ok, summary} = RunAudit.summary(context.workspace)
+    assert summary.verification_profile == "Targeted"
+    assert summary.cache == %{hits: 1, misses: 1}
+    assert summary.slowest_phase == %{phase: "planning", duration_ms: 3_000}
+    assert summary.budget_overruns == [%{phase: "planning", budget_overrun_ms: 1_000}]
+  end
+
+  test "records the first completed file change as the first useful edit", context do
+    update = %{
+      event: :notification,
+      payload: %{
+        "method" => "item/completed",
+        "params" => %{"item" => %{"type" => "fileChange", "status" => "completed"}}
+      }
+    }
+
+    assert {:ok, nil} = RunAudit.append_codex_update(context.workspace, context.task, update)
+    assert {:ok, nil} = RunAudit.append_codex_update(context.workspace, context.task, update)
+
+    first_edit_events =
+      Enum.filter(events(context.workspace), fn event ->
+        event["event"] == "first_useful_edit" and event["phase"] == "implementation"
+      end)
+
+    assert length(first_edit_events) == 1
+  end
+
+  test "appends a compact run summary for bounded dashboard reads", context do
+    assert :ok =
+             RunAudit.record_phase(
+               context.workspace,
+               context.task,
+               "verification",
+               ~U[2026-07-24 08:00:00Z],
+               ~U[2026-07-24 08:00:02Z],
+               "subprocess",
+               %{budget_ms: 1_500}
+             )
+
+    RunAudit.append(context.workspace, context.task, :verification_profile_selected, %{
+      verification_profile: "Full"
+    })
+
+    RunAudit.append(context.workspace, context.task, :proof_cache_result, %{cache_status: "hit"})
+
+    assert :ok = RunAudit.finish(context.workspace, context.task)
+
+    assert %{
+             "event" => "run_summary",
+             "verification_profile" => "Full",
+             "cache_hits" => 1,
+             "cache_misses" => 0,
+             "slowest_phase" => "verification",
+             "slowest_phase_duration_ms" => 2_000,
+             "budget_overrun_count" => 1,
+             "max_budget_overrun_ms" => 500
+           } = List.last(events(context.workspace))
+  end
+
   test "handoff events keep only allowlisted scalar attributes", context do
     assert :ok =
              RunAudit.append_handoff_event(context.workspace, context.task, :handoff_transition_result, %{
@@ -97,5 +246,14 @@ defmodule SymphonyElixir.RunAuditTest do
     refute Map.has_key?(event, "external_payload")
     refute Map.has_key?(event, "evidence_result")
     refute File.read!(RunAudit.paths(context.workspace).audit_events_path) =~ "SECRET"
+  end
+
+  defp events(workspace) do
+    workspace
+    |> RunAudit.paths()
+    |> Map.fetch!(:audit_events_path)
+    |> File.read!()
+    |> String.split("\n", trim: true)
+    |> Enum.map(&Jason.decode!/1)
   end
 end

@@ -64,7 +64,13 @@ defmodule SymphonyElixir.DeliveryControl do
              plan_base(plan),
              Keyword.get(opts, :worker_host)
            ),
-         {:ok, review} <- required_review(plan, key, delivery.repository),
+         {:ok, review} <-
+           required_review(
+             plan,
+             key,
+             delivery.repository,
+             delivery.verification_profile.effective
+           ),
          {:ok, published} <- publisher.(workspace, plan, title, body, opts),
          true <- published["head_sha"] == delivery.repository.base_sha || {:error, :publication_review_head_drift},
          {:ok, publication} <- persist_publication(key, plan, published, delivery, review) do
@@ -81,8 +87,8 @@ defmodule SymphonyElixir.DeliveryControl do
     end
   end
 
-  defp required_review(plan, key, repository) do
-    if ImplementationReview.required?(plan) do
+  defp required_review(plan, key, repository, effective_profile) do
+    if ImplementationReview.required?(plan, effective_profile) do
       ImplementationReview.latest_approval(key, repository.base_sha, repository.digest)
     else
       {:ok, nil}
@@ -94,6 +100,8 @@ defmodule SymphonyElixir.DeliveryControl do
       "plan_digest" => plan["plan_digest"],
       "instruction_digest" => plan["instruction_digest"],
       "profile_digest" => plan["profile_digest"],
+      "verification_profile" => delivery.verification_profile.effective,
+      "verification_profile_escalated" => delivery.verification_profile.escalated,
       "url" => published["url"],
       "head_sha" => published["head_sha"],
       "head_branch" => published["head_branch"],
@@ -143,6 +151,8 @@ defmodule SymphonyElixir.DeliveryControl do
         "instruction_digest" => plan["instruction_digest"],
         "workflow" => plan["workflow"],
         "profile_digest" => plan["profile_digest"],
+        "verification_profile" => publication["verification_profile"],
+        "verification_profile_escalated" => publication["verification_profile_escalated"],
         "repository_head_sha" => publication["head_sha"],
         "pr_head_sha" => publication["head_sha"],
         "pr_head_branch" => publication["head_branch"],

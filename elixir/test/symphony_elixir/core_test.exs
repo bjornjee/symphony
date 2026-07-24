@@ -1613,6 +1613,10 @@ defmodule SymphonyElixir.CoreTest do
     assert prompt =~ "A failed proof receipt is evidence, not a permanent blocker"
     assert prompt =~ "zero attempts remaining"
     assert prompt =~ "do not retry or substitute another command"
+    assert prompt =~ "Compact execution brief"
+    assert prompt =~ ~s("verification_profile":"Targeted")
+    assert prompt =~ ~s("affected_paths":["lib/example.ex"])
+    assert prompt =~ ~s("proof_commands":["mix test test/example_test.exs"])
   end
 
   test "implementation sandbox explicitly permits approved repository-local Codex skill paths" do
@@ -1698,6 +1702,7 @@ defmodule SymphonyElixir.CoreTest do
       "workflow" => "chore",
       "profile_digest" => profile.digest,
       "affected_paths" => ["docs/guide.md"],
+      "verification_profile" => "Surgical",
       "proofs" => [
         %{
           "id" => "final",
@@ -1723,6 +1728,8 @@ defmodule SymphonyElixir.CoreTest do
     assert prompt =~ "docs/guide.md"
     assert prompt =~ "mix test test/docs_test.exs"
     assert prompt =~ "do not manufacture a plan-progress update"
+    assert prompt =~ "Compact execution brief"
+    assert prompt =~ ~s("verification_profile":"Surgical")
     refute prompt =~ "final native plan exactly matches"
   end
 
@@ -2308,8 +2315,26 @@ defmodule SymphonyElixir.CoreTest do
              end)
 
       assert Enum.any?(audit_events, &(&1["event"] == "run_completed"))
+      assert Enum.any?(audit_events, &(&1["event"] == "run_summary"))
       assert Enum.any?(audit_events, &(&1["phase"] == "command" and &1["command"] == "mix test"))
       refute Enum.any?(audit_events, &(&1["detail"] == "downloading dependency chunk 1"))
+
+      phase_timings = Enum.filter(audit_events, &(&1["event"] == "phase_timing"))
+
+      for phase <- ~w(queueing workspace_bootstrap context_loading research planning implementation handoff) do
+        assert Enum.any?(phase_timings, fn timing ->
+                 timing["phase"] == phase and
+                   is_binary(timing["started_at"]) and
+                   is_binary(timing["ended_at"]) and
+                   is_integer(timing["duration_ms"]) and
+                   timing["attribution"] in ~w(model tool subprocess external)
+               end)
+      end
+
+      assert Enum.any?(phase_timings, fn timing ->
+               timing["phase"] == "handoff" and
+                 timing["reason"] == "waiting for Linear comment readback and state transition"
+             end)
 
       assert Enum.any?(audit_events, fn event ->
                event["phase"] == "command" and is_binary(event["detail"]) and

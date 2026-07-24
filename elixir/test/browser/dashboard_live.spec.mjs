@@ -148,6 +148,12 @@ test("dashboard states and live interactions remain observable", async ({page, r
     await expect(
       page.locator('[aria-live="polite"]').filter({hasText: "Latest activity:"})
     ).toBeAttached();
+    await page.locator("#audit-diagnostics-summary").click();
+    await expect(page.getByText("Verification profile", {exact: true})).toBeVisible();
+    await expect(page.getByText("Full", {exact: true})).toBeVisible();
+    await expect(page.getByText("1 hits · 0 misses", {exact: true})).toBeVisible();
+    await expect(page.getByText("planning · 12.5s", {exact: true})).toBeVisible();
+    await expect(page.getByText("1 · max 2.5s", {exact: true})).toBeVisible();
 
     const activitySurface = await page.locator("#agent-detail-log").evaluate((element) => {
       const style = getComputedStyle(element);
