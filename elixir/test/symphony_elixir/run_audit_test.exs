@@ -474,12 +474,11 @@ defmodule SymphonyElixir.RunAuditTest do
 
     on_exit(fn -> File.rm_rf(base) end)
 
-    assert_raise File.RenameError, fn ->
-      RunAudit.start(remote_workspace, context.task, %{worker_host: "next-worker"})
-    end
+    assert :ok = RunAudit.start(remote_workspace, context.task, %{worker_host: "next-worker"})
 
     remaining = attempts_dir |> File.ls!() |> MapSet.new()
     assert MapSet.subset?(existing, remaining)
+    assert File.exists?(RunAudit.paths(remote_workspace).audit_events_path)
   end
 
   test "keeps an active attempt listed while newer attempts finish", context do
@@ -509,10 +508,13 @@ defmodule SymphonyElixir.RunAuditTest do
     base = central_audit_base(active_paths)
     on_exit(fn -> File.rm_rf(base) end)
 
-    Enum.each(1..5, fn attempt ->
-      RunAudit.start(remote_workspace, context.task, %{worker_host: "newer-#{attempt}"})
-      RunAudit.finish(remote_workspace, context.task)
-    end)
+    completed_paths =
+      Enum.map(1..5, fn attempt ->
+        RunAudit.start(remote_workspace, context.task, %{worker_host: "newer-#{attempt}"})
+        paths = RunAudit.paths(remote_workspace, context.task)
+        RunAudit.finish(remote_workspace, context.task)
+        paths
+      end)
 
     manifest = base |> Path.join("attempts.json") |> File.read!() |> Jason.decode!()
     active_id = active_paths.audit_events_path |> Path.dirname() |> Path.basename()
@@ -523,8 +525,40 @@ defmodule SymphonyElixir.RunAuditTest do
     assert_receive :active_appended
     assert File.read!(active_paths.audit_events_path) =~ "active_sentinel"
 
+    File.write!(active_paths.audit_events_path, "{invalid-json\n")
     send(active.pid, :finish)
     Task.await(active)
+
+    completed_ids =
+      Enum.map(completed_paths, &(&1.audit_events_path |> Path.dirname() |> Path.basename()))
+
+    finalized_manifest = base |> Path.join("attempts.json") |> File.read!() |> Jason.decode!()
+
+    assert active_id in finalized_manifest
+    refute hd(completed_ids) in finalized_manifest
+    assert File.exists?(active_paths.audit_events_path)
+  end
+
+  test "falls back to the local audit when central attempt registration fails", context do
+    suffix = Base.url_encode64(:crypto.strong_rand_bytes(8), padding: false)
+    workspace = Path.join(context.workspace, "fallback-workspace-#{suffix}")
+    File.mkdir_p!(workspace)
+
+    RunAudit.start(workspace, context.task, %{worker_host: "first-worker"})
+    central_paths = RunAudit.paths(workspace, context.task)
+    RunAudit.finish(workspace, context.task)
+
+    base = central_audit_base(central_paths)
+    manifest = Path.join(base, "attempts.json")
+    File.rm!(manifest)
+    File.mkdir!(manifest)
+    attempts_dir = Path.join(base, "attempts")
+    attempts_before = attempts_dir |> File.ls!() |> MapSet.new()
+
+    assert :ok = RunAudit.start(workspace, context.task, %{worker_host: "fallback-worker"})
+    assert File.exists?(RunAudit.paths(workspace).audit_events_path)
+    assert attempts_dir |> File.ls!() |> MapSet.new() == attempts_before
+    refute Enum.any?(File.ls!(base), &String.starts_with?(&1, "attempts.json."))
   end
 
   test "never evicts active attempts when more than five overlap", context do

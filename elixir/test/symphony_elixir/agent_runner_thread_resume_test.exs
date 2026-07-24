@@ -217,6 +217,17 @@ defmodule SymphonyElixir.AgentRunnerThreadResumeTest do
     end
   end
 
+  test "remote repository failures remain retryable instead of becoming instruction drift" do
+    failure =
+      {:error, {:git_failed, "worker-01:2200", ["branch", "--show-current"], {:ssh_failed, "worker-01:2200", 75, "temporary transport failure"}}}
+
+    assert ^failure =
+             AgentRunner.classify_registered_plan_progress_for_test(
+               failure,
+               String.duplicate("a", 64)
+             )
+  end
+
   defp approve_execution_plan_with_phase(session, workspace, issue, contract, profile, opts) do
     {:ok, execution_plan} =
       SymphonyElixir.TestSupport.approve_execution_plan(

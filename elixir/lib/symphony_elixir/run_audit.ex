@@ -111,8 +111,22 @@ defmodule SymphonyElixir.RunAudit do
 
   @spec start(Path.t(), Issue.t(), map()) :: :ok
   def start(workspace, %Issue{} = issue, attrs \\ %{}) when is_binary(workspace) and is_map(attrs) do
-    run_id = bind_central_audit_attempt(workspace, issue)
-    attrs = Map.put(attrs, :run_id, run_id)
+    {run_id, audit_attrs} =
+      case bind_central_audit_attempt(workspace, issue) do
+        {:ok, run_id} ->
+          {run_id, %{}}
+
+        {:error, reason} ->
+          run_id = Base.url_encode64(:crypto.strong_rand_bytes(18), padding: false)
+          fallback = fallback_audit_dir(workspace, issue, run_id)
+          Process.put(central_audit_context_key(workspace, issue), fallback)
+
+          Logger.warning("Central run-audit registration failed; using fallback workspace=#{workspace} reason=#{inspect(reason)}")
+
+          {run_id, %{audit_sink: "fallback", audit_sink_error: inspect(reason)}}
+      end
+
+    attrs = attrs |> Map.merge(audit_attrs) |> Map.put(:run_id, run_id)
 
     Enum.each(audit_targets(workspace, issue), fn directory ->
       with_audit_guard(workspace, fn ->
@@ -259,26 +273,58 @@ defmodule SymphonyElixir.RunAudit do
 
   @spec finish(Path.t(), Issue.t()) :: :ok | {:error, term()}
   def finish(workspace, %Issue{} = issue) when is_binary(workspace) do
-    with {:ok, run_summary} <- summary_path(paths(workspace, issue).audit_events_path) do
-      slowest = run_summary.slowest_phase
-      overruns = run_summary.budget_overruns
+    summary_result =
+      case finish_summary(workspace, issue) do
+        {:ok, run_summary} ->
+          append_run_summary(workspace, issue, run_summary)
+          :ok
 
-      append(workspace, issue, :run_summary, %{
-        phase: "run",
-        status: "completed",
-        verification_profile: run_summary.verification_profile,
-        context_cache_hits: run_summary.cache.context.hits,
-        context_cache_misses: run_summary.cache.context.misses,
-        proof_cache_hits: run_summary.cache.proof.hits,
-        proof_cache_misses: run_summary.cache.proof.misses,
-        slowest_phase: slowest && slowest.phase,
-        slowest_phase_duration_ms: slowest && slowest.duration_ms,
-        budget_overrun_count: length(overruns),
-        max_budget_overrun_ms: max_budget_overrun(overruns)
-      })
+        {:error, _reason} = error ->
+          error
+      end
 
-      complete_central_audit_attempt(workspace, issue)
+    completion_result = complete_central_audit_attempt(workspace, issue)
+    finish_result(workspace, summary_result, completion_result)
+  end
+
+  defp finish_summary(workspace, issue) do
+    central_path = paths(workspace, issue).audit_events_path
+
+    case summary_path(central_path) do
+      {:ok, _summary} = result ->
+        result
+
+      {:error, _reason} = central_error ->
+        local_path = jsonl_path(workspace)
+        if local_path == central_path, do: central_error, else: summary_path(local_path)
     end
+  end
+
+  defp append_run_summary(workspace, issue, run_summary) do
+    slowest = run_summary.slowest_phase
+    overruns = run_summary.budget_overruns
+
+    append(workspace, issue, :run_summary, %{
+      phase: "run",
+      status: "completed",
+      verification_profile: run_summary.verification_profile,
+      context_cache_hits: run_summary.cache.context.hits,
+      context_cache_misses: run_summary.cache.context.misses,
+      proof_cache_hits: run_summary.cache.proof.hits,
+      proof_cache_misses: run_summary.cache.proof.misses,
+      slowest_phase: slowest && slowest.phase,
+      slowest_phase_duration_ms: slowest && slowest.duration_ms,
+      budget_overrun_count: length(overruns),
+      max_budget_overrun_ms: max_budget_overrun(overruns)
+    })
+  end
+
+  defp finish_result(_workspace, :ok, :ok), do: :ok
+
+  defp finish_result(workspace, summary_result, completion_result) do
+    Logger.warning("Run-audit finalization incomplete workspace=#{workspace} summary=#{inspect(summary_result)} completion=#{inspect(completion_result)}")
+
+    {:error, {:run_audit_finalization_incomplete, summary_result, completion_result}}
   end
 
   @spec append_handoff_event(Path.t(), Issue.t(), handoff_event(), map()) :: :ok
@@ -944,40 +990,87 @@ defmodule SymphonyElixir.RunAudit do
     directory = Path.join(attempts, run_id)
     active_name = active_attempt_name(base, run_id)
 
-    start_active_attempt_guardian!(active_name)
-    register_central_audit_attempt!(base, attempts, directory, run_id, active_name)
-    Process.put(central_audit_context_key(workspace, issue), directory)
-    run_id
+    try do
+      start_active_attempt_guardian!(active_name)
+
+      case register_central_audit_attempt(base, attempts, directory, run_id) do
+        :ok ->
+          Process.put(central_audit_context_key(workspace, issue), directory)
+          {:ok, run_id}
+
+        {:error, _reason} = error ->
+          cleanup_failed_central_audit_attempt(active_name, directory, error)
+      end
+    rescue
+      error ->
+        cleanup_failed_central_audit_attempt(
+          active_name,
+          directory,
+          {:error, {:central_run_audit_registration_failed, Exception.message(error)}}
+        )
+    catch
+      kind, reason ->
+        cleanup_failed_central_audit_attempt(
+          active_name,
+          directory,
+          {:error, {:central_run_audit_registration_failed, {kind, reason}}}
+        )
+    end
   end
 
-  defp register_central_audit_attempt!(base, attempts, directory, run_id, active_name) do
-    case :global.trans(
-           {{__MODULE__, :central_audit_retention, base}, self()},
-           fn ->
-             File.mkdir_p!(directory)
-             File.touch!(Path.join(directory, @active_attempt_marker))
-             retain_central_audit_attempts(base, attempts, run_id)
-           end
-         ) do
+  defp cleanup_failed_central_audit_attempt(active_name, directory, error) do
+    stop_result = stop_active_attempt_guardian(active_name)
+    remove_result = File.rm_rf(directory)
+
+    case {stop_result, remove_result} do
+      {:ok, {:ok, _removed}} ->
+        error
+
+      {stop_error, {:ok, _removed}} ->
+        {:error, {:central_run_audit_guardian_cleanup_failed, stop_error, error}}
+
+      {:ok, {:error, reason, path}} ->
+        {:error, {:central_run_audit_directory_cleanup_failed, path, reason, error}}
+
+      {stop_error, {:error, reason, path}} ->
+        {:error, {:central_run_audit_cleanup_failed, stop_error, {path, reason}, error}}
+    end
+  end
+
+  defp register_central_audit_attempt(base, attempts, directory, run_id) do
+    result =
+      :global.trans(
+        {{__MODULE__, :central_audit_retention, base}, self()},
+        fn ->
+          File.mkdir_p!(directory)
+          File.touch!(Path.join(directory, @active_attempt_marker))
+          retain_central_audit_attempts(base, attempts, run_id)
+        end
+      )
+
+    case result do
       :ok -> :ok
-      {:aborted, reason} -> raise "central run-audit registration aborted: #{inspect(reason)}"
-      other -> raise "central run-audit registration failed: #{inspect(other)}"
+      {:aborted, reason} -> {:error, {:central_run_audit_registration_aborted, reason}}
+      other -> {:error, {:central_run_audit_registration_failed, other}}
     end
   rescue
     error ->
-      stop_active_attempt_guardian(active_name)
-      reraise error, __STACKTRACE__
+      {:error, {:central_run_audit_registration_failed, Exception.message(error)}}
   catch
     kind, reason ->
-      stop_active_attempt_guardian(active_name)
-      :erlang.raise(kind, reason, __STACKTRACE__)
+      {:error, {:central_run_audit_registration_failed, {kind, reason}}}
   end
 
   defp retain_central_audit_attempts(base, attempts, run_id) do
     manifest_path = Path.join(base, @attempt_manifest)
     on_disk = attempt_ids_on_disk(attempts)
-    retained = Enum.filter(read_attempt_manifest(manifest_path), &(&1 in on_disk))
     current = List.wrap(run_id)
+
+    retained =
+      manifest_path
+      |> read_attempt_manifest()
+      |> Enum.filter(&(&1 in on_disk))
+      |> Kernel.--(current)
 
     discovered =
       on_disk
@@ -1075,14 +1168,27 @@ defmodule SymphonyElixir.RunAudit do
         :ok
 
       guardian ->
+        monitor = Process.monitor(guardian)
         stop_ref = make_ref()
         send(guardian, {:stop, self(), stop_ref})
 
         receive do
-          {^stop_ref, :stopped} -> :ok
+          {^stop_ref, :stopped} ->
+            Process.demonitor(monitor, [:flush])
+            :ok
         after
           @active_attempt_guard_timeout_ms ->
-            {:error, :central_run_audit_owner_stop_timeout}
+            Process.exit(guardian, :kill)
+
+            receive do
+              {:DOWN, ^monitor, :process, ^guardian, _reason} ->
+                :global.unregister_name(active_name)
+                :ok
+            after
+              @active_attempt_guard_timeout_ms ->
+                Process.demonitor(monitor, [:flush])
+                {:error, :central_run_audit_owner_stop_timeout}
+            end
         end
     end
   end
@@ -1091,28 +1197,49 @@ defmodule SymphonyElixir.RunAudit do
     base = central_audit_base_dir(workspace, issue)
     attempts = Path.join(base, "attempts")
     directory = central_audit_dir(workspace, issue)
-    run_id = Path.basename(directory)
-    active_name = active_attempt_name(base, run_id)
 
-    with :ok <- stop_active_attempt_guardian(active_name) do
-      finalize_central_audit_attempt(base, attempts, directory)
+    if Path.dirname(directory) == attempts do
+      run_id = Path.basename(directory)
+      active_name = active_attempt_name(base, run_id)
+      finalize_central_audit_attempt(base, attempts, directory, active_name)
+    else
+      :ok
     end
   end
 
-  defp finalize_central_audit_attempt(base, attempts, directory) do
+  defp finalize_central_audit_attempt(base, attempts, directory, active_name) do
+    run_id = Path.basename(directory)
+
     result =
       :global.trans(
         {{__MODULE__, :central_audit_retention, base}, self()},
         fn ->
-          File.rm(Path.join(directory, @active_attempt_marker))
-          retain_central_audit_attempts(base, attempts, nil)
+          with :ok <- stop_active_attempt_guardian(active_name),
+               :ok <- remove_active_attempt_marker(directory) do
+            retain_central_audit_attempts(base, attempts, run_id)
+          end
         end
       )
 
     case result do
       :ok -> :ok
       {:aborted, reason} -> {:error, {:central_run_audit_completion_aborted, reason}}
+      {:error, _reason} = error -> error
       other -> {:error, {:central_run_audit_completion_failed, other}}
+    end
+  rescue
+    error ->
+      {:error, {:central_run_audit_completion_failed, Exception.message(error)}}
+  catch
+    kind, reason ->
+      {:error, {:central_run_audit_completion_failed, {kind, reason}}}
+  end
+
+  defp remove_active_attempt_marker(directory) do
+    case File.rm(Path.join(directory, @active_attempt_marker)) do
+      :ok -> :ok
+      {:error, :enoent} -> :ok
+      {:error, reason} -> {:error, {:central_run_audit_marker_removal_failed, reason}}
     end
   end
 
@@ -1127,8 +1254,13 @@ defmodule SymphonyElixir.RunAudit do
 
   defp write_attempt_manifest(path, attempts) do
     temporary = path <> "." <> Base.url_encode64(:crypto.strong_rand_bytes(8), padding: false)
-    File.write!(temporary, Jason.encode!(attempts))
-    File.rename!(temporary, path)
+
+    try do
+      File.write!(temporary, Jason.encode!(attempts))
+      File.rename!(temporary, path)
+    after
+      File.rm(temporary)
+    end
   end
 
   defp safe_attempt_id?(attempt) when is_binary(attempt),
@@ -1151,6 +1283,20 @@ defmodule SymphonyElixir.RunAudit do
       |> Base.encode16(case: :lower)
 
     Path.join([root, "run-audits", key])
+  end
+
+  defp fallback_audit_dir(workspace, issue, run_id) do
+    if File.dir?(workspace) do
+      audit_dir(workspace)
+    else
+      key =
+        [workspace, <<0>>, issue.id || issue.identifier || "unknown"]
+        |> IO.iodata_to_binary()
+        |> then(&:crypto.hash(:sha256, &1))
+        |> Base.encode16(case: :lower)
+
+      Path.join([System.tmp_dir!(), "symphony-run-audit-fallback", key, run_id])
+    end
   end
 
   defp with_audit_guard(workspace, fun) when is_function(fun, 0) do

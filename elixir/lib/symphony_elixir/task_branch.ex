@@ -60,7 +60,8 @@ defmodule SymphonyElixir.TaskBranch do
   defp validate_branch_base(workspace, worker_host, branch, base_sha, target) do
     case git_status(workspace, worker_host, ["merge-base", "--is-ancestor", base_sha, target]) do
       0 -> {:ok, branch}
-      status -> {:error, {:task_branch_base_mismatch, branch, base_sha, status}}
+      1 -> {:error, {:task_branch_base_mismatch, branch, base_sha, 1}}
+      status -> {:error, {:task_branch_base_validation_failed, branch, base_sha, status}}
     end
   end
 

@@ -63,6 +63,13 @@ defmodule SymphonyElixir.AgentRunner do
   end
 
   @doc false
+  @spec classify_registered_plan_progress_for_test({:ok, term()} | {:error, term()}, String.t()) ::
+          {:ok, term()} | {:error, term()}
+  def classify_registered_plan_progress_for_test(result, plan_digest) do
+    classify_registered_plan_progress(result, plan_digest)
+  end
+
+  @doc false
   @spec validate_handoff_for_test(Path.t(), Issue.t(), TaskContract.t(), map(), keyword()) ::
           {:ok, map()} | {:error, term()}
   def validate_handoff_for_test(workspace, %Issue{} = issue, %TaskContract{} = contract, proofs, opts \\ [])
@@ -167,13 +174,13 @@ defmodule SymphonyElixir.AgentRunner do
               RunAudit.paths(workspace, issue)
             )
 
-            try do
-              run_with_workspace(workspace, issue, codex_update_recipient, opts, worker_host)
-            after
-              RunAudit.append(workspace, issue, :after_run_hook_started, %{phase: "workspace", status: "started"})
-              Workspace.run_after_run_hook(workspace, issue, worker_host)
-              RunAudit.append(workspace, issue, :after_run_hook_completed, %{phase: "workspace", status: "completed"})
-            end
+            run_workspace_attempt(
+              workspace,
+              issue,
+              codex_update_recipient,
+              opts,
+              worker_host
+            )
 
           {:error, _reason} = error ->
             error
@@ -190,16 +197,82 @@ defmodule SymphonyElixir.AgentRunner do
     case Workspace.run_before_run_hook(workspace, issue, worker_host) do
       :ok ->
         RunAudit.append(workspace, issue, :before_run_hook_completed, %{phase: "workspace", status: "completed"})
-        result = run_codex_turns(workspace, issue, codex_update_recipient, opts, worker_host)
-        record_run_result(workspace, issue, result)
-        send_worker_completion_info(codex_update_recipient, issue, result)
-        normalize_run_result(result)
+        run_codex_turns(workspace, issue, codex_update_recipient, opts, worker_host)
 
       {:error, reason} = error ->
         RunAudit.append(workspace, issue, :before_run_hook_failed, %{phase: "workspace", status: "failed", reason: reason})
         error
     end
   end
+
+  defp run_workspace_attempt(workspace, issue, codex_update_recipient, opts, worker_host) do
+    run_outcome =
+      capture_workspace_outcome(fn ->
+        run_with_workspace(workspace, issue, codex_update_recipient, opts, worker_host)
+      end)
+
+    hook_outcome = capture_workspace_outcome(fn -> run_after_workspace_hook(workspace, issue, opts, worker_host) end)
+    outcome = workspace_attempt_outcome(run_outcome, hook_outcome)
+    finalize_workspace_attempt(workspace, issue, codex_update_recipient, outcome)
+  end
+
+  defp capture_workspace_outcome(fun) when is_function(fun, 0) do
+    {:returned, fun.()}
+  rescue
+    error -> {:raised, :error, error, __STACKTRACE__}
+  catch
+    kind, reason -> {:raised, kind, reason, __STACKTRACE__}
+  end
+
+  defp run_after_workspace_hook(workspace, issue, opts, worker_host) do
+    hook_runner = Keyword.get(opts, :after_run_hook_runner, &Workspace.run_after_run_hook/3)
+
+    RunAudit.append(workspace, issue, :after_run_hook_started, %{phase: "workspace", status: "started"})
+
+    case hook_runner.(workspace, issue, worker_host) do
+      :ok ->
+        RunAudit.append(workspace, issue, :after_run_hook_completed, %{phase: "workspace", status: "completed"})
+        :ok
+
+      {:error, reason} = error ->
+        RunAudit.append(workspace, issue, :after_run_hook_failed, %{
+          phase: "workspace",
+          status: "failed",
+          reason: reason
+        })
+
+        error
+    end
+  end
+
+  defp workspace_attempt_outcome({:raised, _kind, _reason, _stacktrace} = run_outcome, _hook_outcome),
+    do: run_outcome
+
+  defp workspace_attempt_outcome({:returned, {:error, _reason}} = run_outcome, _hook_outcome),
+    do: run_outcome
+
+  defp workspace_attempt_outcome(run_outcome, {:returned, :ok}), do: run_outcome
+  defp workspace_attempt_outcome(_run_outcome, {:returned, {:error, _reason} = error}), do: {:returned, error}
+  defp workspace_attempt_outcome(_run_outcome, {:raised, _kind, _reason, _stacktrace} = raised), do: raised
+
+  defp finalize_workspace_attempt(workspace, issue, codex_update_recipient, {:returned, result}) do
+    record_run_result(workspace, issue, result)
+    send_worker_completion_info(codex_update_recipient, issue, result)
+    normalize_run_result(result)
+  end
+
+  defp finalize_workspace_attempt(
+         workspace,
+         issue,
+         _codex_update_recipient,
+         {:raised, kind, reason, stacktrace}
+       ) do
+    record_run_result(workspace, issue, {:error, audit_failure_reason(kind, reason)})
+    :erlang.raise(kind, reason, stacktrace)
+  end
+
+  defp audit_failure_reason(:error, exception), do: Exception.message(exception)
+  defp audit_failure_reason(kind, reason), do: {kind, reason}
 
   defp record_bootstrap_timings(
          workspace,
@@ -1023,11 +1096,32 @@ defmodule SymphonyElixir.AgentRunner do
   end
 
   defp validate_registered_plan_progress(plan, workspace, issue, session, authority, worker_host) do
-    case validate_registered_progress(workspace, issue, plan, session, authority, worker_host) do
+    workspace
+    |> validate_registered_progress(issue, plan, session, authority, worker_host)
+    |> case do
       :ok -> {:ok, plan}
-      {:error, _reason} -> {:error, {:instruction_drift_with_changes, plan["plan_digest"]}}
+      {:error, _reason} = error -> classify_registered_plan_progress(error, plan["plan_digest"])
     end
   end
+
+  defp classify_registered_plan_progress({:error, reason} = error, plan_digest) do
+    if verified_registered_progress_drift?(reason),
+      do: {:error, {:instruction_drift_with_changes, plan_digest}},
+      else: error
+  end
+
+  defp classify_registered_plan_progress(result, _plan_digest), do: result
+
+  defp verified_registered_progress_drift?(:registered_execution_authority_drift), do: true
+  defp verified_registered_progress_drift?(:registered_execution_authority_missing), do: true
+
+  defp verified_registered_progress_drift?({:registered_execution_authority_invalid, reason}),
+    do: reason in [:invalid_receipt, :receipt_too_large, :invalid_ledger_component]
+
+  defp verified_registered_progress_drift?({:unexpected_task_branch, _branch}), do: true
+  defp verified_registered_progress_drift?({:task_branch_base_mismatch, _branch, _base, 1}), do: true
+  defp verified_registered_progress_drift?(:registered_execution_plan_scope_drift), do: true
+  defp verified_registered_progress_drift?(_reason), do: false
 
   defp validate_registered_progress(
          workspace,

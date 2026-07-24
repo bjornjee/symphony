@@ -2361,6 +2361,206 @@ defmodule SymphonyElixir.CoreTest do
     end
   end
 
+  test "agent runner finalizes a before-run hook failure exactly once after the after-run hook" do
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-agent-runner-before-hook-audit-#{System.unique_integer([:positive])}"
+      )
+
+    try do
+      issue = audited_agent_fixture!(test_root, "MT-HOOK-FAIL", hook_before_run: "exit 42")
+
+      assert_raise RuntimeError, ~r/workspace_hook_failed.*before_run/, fn ->
+        AgentRunner.run(issue, nil, audited_agent_opts(issue))
+      end
+
+      events = local_run_audit_events(test_root, issue.identifier)
+
+      assert Enum.count(events, &(&1["event"] == "run_failed")) == 1
+      assert Enum.count(events, &(&1["event"] == "run_summary")) == 1
+      assert List.last(events)["event"] == "run_summary"
+      assert event_index(events, "after_run_hook_completed") < event_index(events, "run_failed")
+    after
+      File.rm_rf(test_root)
+    end
+  end
+
+  test "agent runner finalizes a raised run exactly once before reraising" do
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-agent-runner-raised-run-audit-#{System.unique_integer([:positive])}"
+      )
+
+    try do
+      issue = audited_agent_fixture!(test_root, "MT-RAISED-RUN")
+
+      opts =
+        audited_agent_opts(
+          issue,
+          planning_lifecycle_runner: fn _session, _workspace, _issue, _contract, _profile, _opts ->
+            raise "planned test failure"
+          end
+        )
+
+      assert_raise RuntimeError, "planned test failure", fn ->
+        AgentRunner.run(issue, nil, opts)
+      end
+
+      events = local_run_audit_events(test_root, issue.identifier)
+
+      assert Enum.count(events, &(&1["event"] == "run_failed")) == 1
+      assert Enum.count(events, &(&1["event"] == "run_summary")) == 1
+      assert List.last(events)["event"] == "run_summary"
+      assert event_index(events, "after_run_hook_completed") < event_index(events, "run_failed")
+    after
+      File.rm_rf(test_root)
+    end
+  end
+
+  test "agent runner finalizes an unexpectedly raised after-run hook before reraising" do
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-agent-runner-raised-after-hook-#{System.unique_integer([:positive])}"
+      )
+
+    try do
+      issue = audited_agent_fixture!(test_root, "MT-RAISED-AFTER-HOOK")
+
+      opts =
+        audited_agent_opts(
+          issue,
+          after_run_hook_runner: fn _workspace, _issue, _worker_host ->
+            raise "unexpected after-run failure"
+          end
+        )
+
+      assert_raise RuntimeError, "unexpected after-run failure", fn ->
+        AgentRunner.run(issue, nil, opts)
+      end
+
+      events = local_run_audit_events(test_root, issue.identifier)
+
+      assert Enum.count(events, &(&1["event"] == "run_failed")) == 1
+      assert Enum.count(events, &(&1["event"] == "run_summary")) == 1
+      assert List.last(events)["event"] == "run_summary"
+      assert event_index(events, "after_run_hook_started") < event_index(events, "run_failed")
+    after
+      File.rm_rf(test_root)
+    end
+  end
+
+  test "agent runner preserves a raised run when the after-run hook also fails" do
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-agent-runner-primary-and-hook-failure-#{System.unique_integer([:positive])}"
+      )
+
+    try do
+      issue = audited_agent_fixture!(test_root, "MT-PRIMARY-AND-HOOK-FAIL")
+
+      opts =
+        audited_agent_opts(
+          issue,
+          planning_lifecycle_runner: fn _session, _workspace, _issue, _contract, _profile, _opts ->
+            raise "primary run failure"
+          end,
+          after_run_hook_runner: fn _workspace, _issue, _worker_host ->
+            {:error, :after_run_cleanup_failed}
+          end
+        )
+
+      assert_raise RuntimeError, "primary run failure", fn ->
+        AgentRunner.run(issue, nil, opts)
+      end
+
+      events = local_run_audit_events(test_root, issue.identifier)
+      run_failed = Enum.find(events, &(&1["event"] == "run_failed"))
+
+      assert run_failed["reason"] == "primary run failure"
+      assert List.last(events)["event"] == "run_summary"
+    after
+      File.rm_rf(test_root)
+    end
+  end
+
+  test "agent runner continues when central audit registration fails" do
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-agent-runner-audit-fallback-#{System.unique_integer([:positive])}"
+      )
+
+    try do
+      issue = audited_agent_fixture!(test_root, "MT-AUDIT-FALLBACK")
+      opts = audited_agent_opts(issue)
+
+      assert :ok = AgentRunner.run(issue, self(), opts)
+
+      assert_receive {:worker_runtime_info, _issue_id, %{audit_events_path: audit_events_path}}
+
+      central_base =
+        audit_events_path
+        |> Path.dirname()
+        |> Path.dirname()
+        |> Path.dirname()
+
+      manifest = Path.join(central_base, "attempts.json")
+      File.rm!(manifest)
+      File.mkdir!(manifest)
+
+      assert :ok = AgentRunner.run(issue, nil, opts)
+
+      events = local_run_audit_events(test_root, issue.identifier)
+      assert Enum.any?(events, &(&1["event"] == "run_completed"))
+      assert List.last(events)["event"] == "run_summary"
+    after
+      File.rm_rf(test_root)
+    end
+  end
+
+  test "agent runner continues when central audit completion fails" do
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-agent-runner-audit-completion-fallback-#{System.unique_integer([:positive])}"
+      )
+
+    try do
+      issue = audited_agent_fixture!(test_root, "MT-AUDIT-COMPLETION")
+
+      opts =
+        audited_agent_opts(
+          issue,
+          after_run_hook_runner: fn workspace, hook_issue, _worker_host ->
+            central_base =
+              workspace
+              |> SymphonyElixir.RunAudit.paths(hook_issue)
+              |> Map.fetch!(:audit_events_path)
+              |> Path.dirname()
+              |> Path.dirname()
+              |> Path.dirname()
+
+            manifest = Path.join(central_base, "attempts.json")
+            File.rm!(manifest)
+            File.mkdir!(manifest)
+            :ok
+          end
+        )
+
+      assert :ok = AgentRunner.run(issue, nil, opts)
+
+      events = local_run_audit_events(test_root, issue.identifier)
+      assert Enum.count(events, &(&1["event"] == "run_completed")) == 1
+      assert Enum.count(events, &(&1["event"] == "run_summary")) == 1
+    after
+      File.rm_rf(test_root)
+    end
+  end
+
   test "agent runner surfaces ssh startup failures instead of silently hopping hosts" do
     test_root =
       Path.join(
@@ -3077,4 +3277,90 @@ defmodule SymphonyElixir.CoreTest do
       File.rm_rf(test_root)
     end
   end
+
+  defp audited_agent_fixture!(test_root, identifier, workflow_opts \\ []) do
+    template_repo = Path.join(test_root, "source")
+    codex_binary = Path.join(test_root, "fake-codex")
+
+    File.mkdir_p!(template_repo)
+    File.write!(Path.join(template_repo, "README.md"), "# audit fixture")
+    System.cmd("git", ["-C", template_repo, "init", "-b", "main"])
+    System.cmd("git", ["-C", template_repo, "config", "user.name", "Test User"])
+    System.cmd("git", ["-C", template_repo, "config", "user.email", "test@example.com"])
+    System.cmd("git", ["-C", template_repo, "add", "README.md"])
+    System.cmd("git", ["-C", template_repo, "commit", "-m", "initial"])
+
+    File.write!(codex_binary, """
+    #!/bin/sh
+    while IFS= read -r line; do
+      case "$line" in
+        *'"method":"initialize"'*)
+          printf '%s\n' '{"id":1,"result":{}}'
+          ;;
+        *'"method":"thread/start"'*)
+          printf '%s\n' '{"id":2,"result":{"thread":{"id":"thread-audit-fixture"},"instructionSources":[]}}'
+          ;;
+        *'"method":"thread/resume"'*)
+          printf '%s\n' '{"id":5,"result":{"thread":{"id":"thread-audit-fixture"},"instructionSources":[]}}'
+          ;;
+        *'"method":"thread/goal/set"'*)
+          printf '%s\n' '{"id":4,"result":{"goal":{"status":"active"}}}'
+          ;;
+        *'"method":"turn/start"'*)
+          printf '%s\n' '{"id":3,"result":{"turn":{"id":"turn-audit-fixture"}}}'
+          printf '%s\n' '{"method":"turn/plan/updated","params":{"plan":[{"step":"Implement and prove the task","status":"completed"}]}}'
+          printf '%s\n' '{"method":"item/completed","params":{"item":{"type":"commandExecution","command":"mise exec -- make all","exitCode":0}}}'
+          printf '%s\n' '{"method":"turn/completed"}'
+          ;;
+      esac
+    done
+    """)
+
+    File.chmod!(codex_binary, 0o755)
+
+    write_workflow_file!(
+      Workflow.workflow_file_path(),
+      [
+        workspace_root: Path.join(test_root, "workspaces"),
+        hook_after_create: "git clone #{template_repo} .",
+        hook_after_run: "true",
+        codex_command: "#{codex_binary} app-server"
+      ] ++ workflow_opts
+    )
+
+    %Issue{
+      id: "issue-#{String.downcase(identifier)}",
+      identifier: identifier,
+      title: "Audit lifecycle fixture",
+      description: valid_description(),
+      state: "In Progress",
+      url: "https://example.org/issues/#{identifier}",
+      labels: []
+    }
+  end
+
+  defp audited_agent_opts(issue, overrides \\ []) do
+    [
+      issue_state_fetcher: fn [_issue_id] -> {:ok, [issue]} end,
+      completion_evidence_validator: &valid_handoff_evidence/5,
+      handoff_publisher: &valid_handoff_publisher/4,
+      planning_lifecycle_runner: &approve_execution_plan/6,
+      task_branch_ensurer: &accept_task_branch/5,
+      capability_diagnostics_resolver: &test_capability_diagnostics/1
+    ]
+    |> Keyword.merge(overrides)
+  end
+
+  defp local_run_audit_events(test_root, identifier) do
+    test_root
+    |> Path.join("workspaces")
+    |> Path.join(identifier)
+    |> SymphonyElixir.RunAudit.paths()
+    |> Map.fetch!(:audit_events_path)
+    |> File.read!()
+    |> String.split("\n", trim: true)
+    |> Enum.map(&Jason.decode!/1)
+  end
+
+  defp event_index(events, name), do: Enum.find_index(events, &(&1["event"] == name))
 end
