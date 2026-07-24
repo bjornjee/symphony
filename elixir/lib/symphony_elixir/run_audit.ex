@@ -1079,21 +1079,38 @@ defmodule SymphonyElixir.RunAudit do
       |> Enum.sort_by(&attempt_recency(attempts, &1))
 
     candidates = Enum.uniq(retained ++ discovered ++ current)
-    write_attempt_manifest(manifest_path, candidates)
 
-    {active, completed} =
-      Enum.split_with(candidates, fn attempt ->
-        active_attempt?(base, attempts, attempt)
+    classified =
+      Enum.map(candidates, fn attempt ->
+        {attempt, attempt_state(base, attempts, attempt)}
       end)
+
+    active = for {attempt, :active} <- classified, do: attempt
+    completed = for {attempt, :completed} <- classified, do: attempt
+
+    abandoned =
+      classified
+      |> Enum.flat_map(fn
+        {attempt, :abandoned} -> [attempt]
+        {_attempt, _state} -> []
+      end)
+      |> Enum.sort_by(&attempt_recency(attempts, &1))
+
+    ordered_candidates = (candidates -- abandoned) ++ abandoned
+    write_attempt_manifest(manifest_path, ordered_candidates)
+
+    Enum.each(abandoned, fn attempt ->
+      File.rm(Path.join([attempts, attempt, @active_attempt_marker]))
+    end)
 
     keep_set =
       active
-      |> Kernel.++(Enum.take(completed, -@retained_central_attempts))
+      |> Kernel.++(Enum.take(completed ++ abandoned, -@retained_central_attempts))
       |> MapSet.new()
 
-    keep = Enum.filter(candidates, &MapSet.member?(keep_set, &1))
+    keep = Enum.filter(ordered_candidates, &MapSet.member?(keep_set, &1))
 
-    candidates
+    ordered_candidates
     |> Kernel.--(keep)
     |> Enum.each(&File.rm_rf!(Path.join(attempts, &1)))
 
@@ -1115,9 +1132,15 @@ defmodule SymphonyElixir.RunAudit do
     end
   end
 
-  defp active_attempt?(base, attempts, attempt) do
-    File.exists?(Path.join([attempts, attempt, @active_attempt_marker])) and
-      :global.whereis_name(active_attempt_name(base, attempt)) != :undefined
+  defp attempt_state(base, attempts, attempt) do
+    marker? = File.exists?(Path.join([attempts, attempt, @active_attempt_marker]))
+    owner? = :global.whereis_name(active_attempt_name(base, attempt)) != :undefined
+
+    cond do
+      marker? and owner? -> :active
+      marker? -> :abandoned
+      true -> :completed
+    end
   end
 
   defp active_attempt_name(base, run_id),

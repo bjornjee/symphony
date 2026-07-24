@@ -539,6 +539,50 @@ defmodule SymphonyElixir.RunAuditTest do
     assert File.exists?(active_paths.audit_events_path)
   end
 
+  test "keeps an attempt that crashes after newer attempts finish", context do
+    suffix = Base.url_encode64(:crypto.strong_rand_bytes(8), padding: false)
+    remote_workspace = Path.join(context.workspace, "crashed-remote-workspace-#{suffix}")
+    File.mkdir_p!(remote_workspace)
+    parent = self()
+
+    crashing =
+      spawn(fn ->
+        RunAudit.start(remote_workspace, context.task, %{worker_host: "crashing-worker"})
+        paths = RunAudit.paths(remote_workspace, context.task)
+        send(parent, {:crashing_started, paths})
+        Process.sleep(:infinity)
+      end)
+
+    monitor = Process.monitor(crashing)
+    assert_receive {:crashing_started, crashed_paths}
+    base = central_audit_base(crashed_paths)
+    on_exit(fn -> File.rm_rf(base) end)
+
+    completed_paths =
+      Enum.map(1..5, fn attempt ->
+        RunAudit.start(remote_workspace, context.task, %{worker_host: "clean-#{attempt}"})
+        paths = RunAudit.paths(remote_workspace, context.task)
+        RunAudit.finish(remote_workspace, context.task)
+        paths
+      end)
+
+    Process.exit(crashing, :kill)
+    assert_receive {:DOWN, ^monitor, :process, ^crashing, :killed}
+
+    crashed_id = crashed_paths.audit_events_path |> Path.dirname() |> Path.basename()
+    active_name = {RunAudit, :central_audit_attempt, base, crashed_id}
+    wait_for_attempt_guardian(active_name)
+
+    RunAudit.start(remote_workspace, context.task, %{worker_host: "retention-trigger"})
+
+    manifest = base |> Path.join("attempts.json") |> File.read!() |> Jason.decode!()
+    oldest_completed = hd(completed_paths)
+
+    assert crashed_id in manifest
+    assert File.exists?(crashed_paths.audit_events_path)
+    refute File.exists?(oldest_completed.audit_events_path)
+  end
+
   test "falls back to the local audit when central attempt registration fails", context do
     suffix = Base.url_encode64(:crypto.strong_rand_bytes(8), padding: false)
     workspace = Path.join(context.workspace, "fallback-workspace-#{suffix}")
@@ -732,5 +776,18 @@ defmodule SymphonyElixir.RunAuditTest do
     |> Path.dirname()
     |> Path.dirname()
     |> Path.dirname()
+  end
+
+  defp wait_for_attempt_guardian(active_name, attempts \\ 100)
+
+  defp wait_for_attempt_guardian(_active_name, 0), do: flunk("attempt guardian did not stop")
+
+  defp wait_for_attempt_guardian(active_name, attempts) do
+    if :global.whereis_name(active_name) == :undefined do
+      :ok
+    else
+      Process.sleep(10)
+      wait_for_attempt_guardian(active_name, attempts - 1)
+    end
   end
 end
