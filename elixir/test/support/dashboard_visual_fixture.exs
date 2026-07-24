@@ -85,6 +85,25 @@ defmodule SymphonyElixir.DashboardVisualFixture.Orchestrator do
         })
       end)
 
+    events =
+      if status == "running" do
+        events ++
+          [
+            Jason.encode!(%{
+              "event" => "pull_request_published",
+              "timestamp" =>
+                DateTime.utc_now()
+                |> DateTime.add(-20, :second)
+                |> DateTime.truncate(:second)
+                |> DateTime.to_iso8601(),
+              "detail" => "Published pull request for review",
+              "pull_request_url" => "https://github.com/bjornjee/symphony/pull/25"
+            })
+          ]
+      else
+        events
+      end
+
     File.write!(path, Enum.join(events, "\n") <> "\n")
     path
   end
@@ -114,7 +133,7 @@ defmodule SymphonyElixir.DashboardVisualFixture.Orchestrator do
     transitioned = %{
       issue_id: "issue-running",
       identifier: "PIN-RUNNING",
-      issue_url: "https://example.org/issues/PIN-RUNNING",
+      issue_url: "https://linear.app/pinkgu/issue/PIN-RUNNING/dashboard",
       attempt: 2,
       due_in_ms: 30_000,
       error: "Temporary upstream failure; retry scheduled",
@@ -144,7 +163,7 @@ defmodule SymphonyElixir.DashboardVisualFixture.Orchestrator do
         %{
           issue_id: "issue-retrying",
           identifier: "PIN-RETRYING",
-          issue_url: "https://example.org/issues/PIN-RETRYING",
+          issue_url: "https://linear.app/pinkgu/issue/PIN-RETRYING/dashboard",
           attempt: 3,
           due_in_ms: 30_000,
           error: "Upstream rate limit interrupted the previous turn",
@@ -159,7 +178,7 @@ defmodule SymphonyElixir.DashboardVisualFixture.Orchestrator do
         %{
           issue_id: "issue-blocked",
           identifier: "PIN-BLOCKED",
-          issue_url: "https://example.org/issues/PIN-BLOCKED",
+          issue_url: "https://linear.app/pinkgu/issue/PIN-BLOCKED/dashboard",
           state: "In Progress",
           error: "Approval is required before the agent can continue",
           worker_host: "fixture-worker",
@@ -200,7 +219,7 @@ defmodule SymphonyElixir.DashboardVisualFixture.Orchestrator do
     %{
       issue_id: Keyword.fetch!(opts, :issue_id),
       identifier: Keyword.fetch!(opts, :identifier),
-      issue_url: "https://example.org/issues/#{Keyword.fetch!(opts, :identifier)}",
+      issue_url: "https://linear.app/pinkgu/issue/#{Keyword.fetch!(opts, :identifier)}/dashboard",
       state: "In Progress",
       session_id: "fixture-running-session",
       turn_count: 8,

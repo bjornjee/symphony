@@ -3,7 +3,7 @@ defmodule SymphonyElixirWeb.Presenter do
   Shared projections for the observability API and dashboard.
   """
 
-  alias SymphonyElixir.{Config, Orchestrator, StatusDashboard}
+  alias SymphonyElixir.{Config, GitHubRepository, Orchestrator, StatusDashboard}
 
   @audit_tail_bytes 64 * 1_024
   @audit_event_limit 50
@@ -105,7 +105,9 @@ defmodule SymphonyElixirWeb.Presenter do
       |> Map.get(:audit_events_path)
       |> read_audit_events()
 
-    Map.put(agent, :log_tail, audit_events)
+    agent
+    |> Map.put(:log_tail, audit_events)
+    |> put_latest_pull_request(audit_events)
   end
 
   defp issue_payload_body(issue_identifier, running, retry, blocked) do
@@ -280,10 +282,30 @@ defmodule SymphonyElixirWeb.Presenter do
           |> append_exit_code(Map.get(event, "exit_code"))
           |> Kernel.||(kind)
 
-        [%{at: at, event: kind, message: message}]
+        entry = %{at: at, event: kind, message: message}
+
+        entry =
+          case GitHubRepository.pull_request_url(Map.get(event, "pull_request_url")) do
+            {:ok, _pull_request} ->
+              Map.put(entry, :pull_request_url, Map.fetch!(event, "pull_request_url"))
+
+            {:error, :invalid_pull_request_url} ->
+              entry
+          end
+
+        [entry]
 
       _ ->
         []
+    end
+  end
+
+  defp put_latest_pull_request(agent, audit_events) do
+    case audit_events
+         |> Enum.reverse()
+         |> Enum.find_value(&Map.get(&1, :pull_request_url)) do
+      nil -> agent
+      pull_request_url -> Map.put(agent, :pull_request_url, pull_request_url)
     end
   end
 

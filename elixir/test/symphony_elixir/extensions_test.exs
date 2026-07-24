@@ -759,6 +759,70 @@ defmodule SymphonyElixir.ExtensionsTest do
   end
 
   @tag :dashboard_detail
+  test "dashboard detail exposes the latest valid published pull request from the selected audit tail" do
+    audit_events_path =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-dashboard-pull-request-#{System.unique_integer([:positive])}.jsonl"
+      )
+
+    File.write!(
+      audit_events_path,
+      [
+        Jason.encode!(%{
+          "event" => "pull_request_published",
+          "timestamp" => "2026-07-23T12:00:00Z",
+          "detail" => "Published pull request",
+          "pull_request_url" => "javascript:alert(1)"
+        }),
+        Jason.encode!(%{
+          "event" => "pull_request_published",
+          "timestamp" => "2026-07-23T12:01:00Z",
+          "detail" => "Published pull request",
+          "pull_request_url" => "https://github.com/bjornjee/symphony/pull/25"
+        })
+      ]
+      |> Enum.join("\n")
+      |> Kernel.<>("\n")
+    )
+
+    on_exit(fn -> File.rm(audit_events_path) end)
+
+    detail = Presenter.dashboard_detail(%{audit_events_path: audit_events_path})
+
+    assert detail.pull_request_url == "https://github.com/bjornjee/symphony/pull/25"
+
+    assert List.last(detail.log_tail).pull_request_url ==
+             "https://github.com/bjornjee/symphony/pull/25"
+  end
+
+  @tag :dashboard_detail
+  test "dashboard detail does not expose an invalid published pull request URL" do
+    audit_events_path =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-dashboard-invalid-pull-request-#{System.unique_integer([:positive])}.jsonl"
+      )
+
+    File.write!(
+      audit_events_path,
+      Jason.encode!(%{
+        "event" => "pull_request_published",
+        "timestamp" => "2026-07-23T12:00:00Z",
+        "detail" => "Published pull request",
+        "pull_request_url" => "https://example.org/pull/25"
+      }) <> "\n"
+    )
+
+    on_exit(fn -> File.rm(audit_events_path) end)
+
+    detail = Presenter.dashboard_detail(%{audit_events_path: audit_events_path})
+
+    refute Map.has_key?(detail, :pull_request_url)
+    refute Map.has_key?(hd(detail.log_tail), :pull_request_url)
+  end
+
+  @tag :dashboard_detail
   test "dashboard log tail redacts credential-shaped values before rendering" do
     audit_events_path =
       Path.join(
@@ -873,6 +937,59 @@ defmodule SymphonyElixir.ExtensionsTest do
     assert html =~ "dm-dev2"
     assert html =~ "/workspaces/MT-BLOCKED"
     assert html =~ "/workspaces/MT-BLOCKED/.symphony/run-audit.md"
+  end
+
+  @tag :dashboard_detail
+  test "dashboard renders readable dates and explicit issue and pull request destinations" do
+    audit_events_path =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-dashboard-linked-resources-#{System.unique_integer([:positive])}.jsonl"
+      )
+
+    File.write!(
+      audit_events_path,
+      Jason.encode!(%{
+        "event" => "pull_request_published",
+        "timestamp" => "2026-07-23T12:01:00Z",
+        "detail" => "Published pull request",
+        "pull_request_url" => "https://github.com/bjornjee/symphony/pull/25"
+      }) <> "\n"
+    )
+
+    on_exit(fn -> File.rm(audit_events_path) end)
+
+    snapshot =
+      update_in(static_snapshot().running, fn [running] ->
+        [
+          %{
+            running
+            | issue_url: "https://linear.app/pinkgu/issue/MT-HTTP/dashboard",
+              audit_events_path: audit_events_path,
+              last_codex_timestamp: ~U[2026-07-23 12:00:00Z]
+          }
+        ]
+      end)
+
+    orchestrator_name = Module.concat(__MODULE__, :DashboardLinkedResourcesOrchestrator)
+
+    {:ok, _pid} =
+      StaticOrchestrator.start_link(
+        name: orchestrator_name,
+        snapshot: snapshot,
+        refresh: :unavailable
+      )
+
+    start_test_endpoint(orchestrator: orchestrator_name, snapshot_timeout_ms: 50)
+    {:ok, _view, html} = live(build_conn(), "/")
+
+    assert html =~ "Linear MT-HTTP"
+    assert html =~ "PR #25"
+    assert html =~ ~s(datetime="2026-07-23T12:00:00Z")
+    assert html =~ "23 Jul 2026"
+    refute html =~ ">2026-07-23T12:00:00Z<"
+    refute html =~ "Live log tail"
+    assert html =~ "Live activity"
   end
 
   @tag :dashboard_detail
@@ -1102,7 +1219,7 @@ defmodule SymphonyElixir.ExtensionsTest do
     assert html =~ ~s(href="https://example.org/issues/MT-HTTP")
     assert html =~ ~s(href="https://example.org/issues/MT-RETRY")
     assert html =~ ~s(href="https://example.org/issues/MT-BLOCKED")
-    assert html =~ ~s(aria-label="Open MT-HTTP in the issue tracker")
+    assert html =~ ~s(aria-label="Issue MT-HTTP")
     assert html =~ "rendered"
     assert html =~ "turn blocked: waiting for user input"
     assert html =~ ~s(id="agent-detail-runtime")

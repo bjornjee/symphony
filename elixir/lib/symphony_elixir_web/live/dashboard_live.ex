@@ -5,6 +5,7 @@ defmodule SymphonyElixirWeb.DashboardLive do
 
   use Phoenix.LiveView, layout: {SymphonyElixirWeb.Layouts, :app}
 
+  alias SymphonyElixir.GitHubRepository
   alias SymphonyElixirWeb.{Endpoint, ObservabilityPubSub, Presenter}
 
   @runtime_tick_ms 1_000
@@ -128,7 +129,7 @@ defmodule SymphonyElixirWeb.DashboardLive do
                 <span class="agent-total numeric"><%= length(@agents) %></span>
               </div>
 
-              <div class="agent-list">
+              <div class="agent-list" aria-label="Choose an agent">
                 <div
                   :for={agent <- @agents}
                   class={[
@@ -137,6 +138,7 @@ defmodule SymphonyElixirWeb.DashboardLive do
                   ]}
                   data-agent-status={effective_status(agent, @now)}
                 >
+                  <% issue_resource = issue_resource(agent.issue_url, agent.issue_identifier) %>
                   <button
                     id={"agent-#{dom_id(agent.id)}"}
                     type="button"
@@ -159,17 +161,21 @@ defmodule SymphonyElixirWeb.DashboardLive do
                       class="agent-reason"
                     ><%= agent.reason %></span>
                     <span class="agent-time">
-                      <%= activity_time_label(agent, @now) %>
+                      <%= activity_time_prefix(agent, @now) %>
+                      <.timestamp
+                        value={activity_timestamp(agent, @now)}
+                        fallback={activity_time_fallback(agent, @now)}
+                      />
                     </span>
                   </button>
                   <a
-                    :if={external_issue_url(agent.issue_url)}
-                    class="agent-row-issue-link"
-                    href={external_issue_url(agent.issue_url)}
+                    :if={issue_resource}
+                    class="agent-row-resource-link"
+                    href={issue_resource.href}
                     target="_blank"
                     rel="noopener noreferrer"
-                    aria-label={"Open #{agent.issue_identifier} in the issue tracker"}
-                  >Issue</a>
+                    aria-label={issue_resource.label}
+                  ><%= issue_resource.label %></a>
                 </div>
               </div>
             </aside>
@@ -194,7 +200,8 @@ defmodule SymphonyElixirWeb.DashboardLive do
       assigns
       |> assign(:status, effective_status(assigns.agent, assigns.now))
       |> assign(:status_label, effective_status_label(assigns.agent, assigns.now))
-      |> assign(:issue_href, external_issue_url(assigns.agent.issue_url))
+      |> assign(:issue_resource, issue_resource(assigns.agent.issue_url, assigns.agent.issue_identifier))
+      |> assign(:pull_request, pull_request(assigns.agent[:pull_request_url]))
 
     ~H"""
     <section
@@ -215,17 +222,30 @@ defmodule SymphonyElixirWeb.DashboardLive do
             </span>
           </div>
         </div>
-        <%= if @issue_href do %>
+        <nav class="resource-links" aria-label="Agent resources">
           <a
-            class="issue-link"
-            href={@issue_href}
+            :if={@issue_resource}
+            class="resource-link"
+            href={@issue_resource.href}
             target="_blank"
             rel="noopener noreferrer"
-            aria-label={"Open #{@agent.issue_identifier} in the issue tracker"}
+            aria-label={@issue_resource.label}
           >
-            Open issue
+            <span aria-hidden="true"><%= @issue_resource.source %></span>
+            <strong><%= @agent.issue_identifier %></strong>
           </a>
-        <% end %>
+          <a
+            :if={@pull_request}
+            class="resource-link"
+            href={@pull_request.href}
+            target="_blank"
+            rel="noopener noreferrer"
+            aria-label={@pull_request.label}
+          >
+            <span aria-hidden="true">GitHub</span>
+            <strong><%= @pull_request.label %></strong>
+          </a>
+        </nav>
       </header>
 
       <%= if @status == "unavailable" do %>
@@ -239,7 +259,7 @@ defmodule SymphonyElixirWeb.DashboardLive do
           <p class="panel-kicker">Codex update</p>
           <h3 id="current-activity-title"><%= @agent.activity %></h3>
           <p class="activity-meta">
-            <%= @agent.activity_at || @agent.relevant_at || "Timestamp not reported" %>
+            <.timestamp value={@agent.activity_at || @agent.relevant_at} />
           </p>
         </section>
 
@@ -248,7 +268,7 @@ defmodule SymphonyElixirWeb.DashboardLive do
             <strong>Retry attempt <%= @agent.attempt || "n/a" %></strong>
             <p><%= @agent.reason || "The last attempt did not complete." %></p>
             <dl class="inline-facts">
-              <div><dt>Next retry</dt><dd><%= @agent.due_at || "Not scheduled" %></dd></div>
+              <div><dt>Next retry</dt><dd><.timestamp value={@agent.due_at} fallback="Not scheduled" /></dd></div>
               <div><dt>Next action</dt><dd><%= @agent.next_action %></dd></div>
             </dl>
           </div>
@@ -259,7 +279,7 @@ defmodule SymphonyElixirWeb.DashboardLive do
             <strong>Approval or input needed</strong>
             <p><%= @agent.reason || "The agent is waiting for operator input." %></p>
             <dl class="inline-facts">
-              <div><dt>Blocked at</dt><dd><%= @agent.relevant_at || "Not reported" %></dd></div>
+              <div><dt>Blocked at</dt><dd><.timestamp value={@agent.relevant_at} fallback="Not reported" /></dd></div>
               <div><dt>Next action</dt><dd><%= @agent.next_action %></dd></div>
             </dl>
           </div>
@@ -270,7 +290,8 @@ defmodule SymphonyElixirWeb.DashboardLive do
         <div class="panel-heading log-heading">
           <div>
             <p class="panel-kicker">Selected session</p>
-            <h3 id="log-title">Live log tail</h3>
+            <h3 id="log-title">Live activity</h3>
+            <p class="log-description">Latest verified actions from this agent.</p>
           </div>
           <span class="log-count">
             <span
@@ -293,7 +314,7 @@ defmodule SymphonyElixirWeb.DashboardLive do
           tabindex="0"
         >
           <li :for={entry <- @agent.log_tail} class="log-line">
-            <time class="log-time mono" datetime={entry.at} title={entry.at}>
+            <time class="log-time" datetime={entry.at} title={entry.at}>
               <%= log_time(entry.at) %>
             </time>
             <span class="log-event"><%= log_event(entry.event) %></span>
@@ -302,6 +323,14 @@ defmodule SymphonyElixirWeb.DashboardLive do
         </ol>
         <p :if={@agent.log_tail == []} class="log-empty">
           No audit output is available for this session yet.
+        </p>
+        <p
+          :if={@agent.log_tail != []}
+          class="visually-hidden"
+          aria-live="polite"
+          aria-atomic="true"
+        >
+          Latest activity: <%= List.last(@agent.log_tail).message %>
         </p>
       </section>
 
@@ -316,7 +345,7 @@ defmodule SymphonyElixirWeb.DashboardLive do
         </div>
         <div>
           <dt>Last activity</dt>
-          <dd class="mono"><%= @agent.activity_at || "n/a" %></dd>
+          <dd><.timestamp value={@agent.activity_at} fallback="n/a" /></dd>
         </div>
       </dl>
 
@@ -464,6 +493,26 @@ defmodule SymphonyElixirWeb.DashboardLive do
 
   defp external_issue_url(_url), do: nil
 
+  defp issue_resource(url, issue_identifier) do
+    case external_issue_url(url) do
+      nil ->
+        nil
+
+      href ->
+        source = if URI.parse(href).host == "linear.app", do: "Linear", else: "Issue"
+        %{href: href, label: "#{source} #{issue_identifier}", source: source}
+    end
+  end
+
+  defp pull_request(url) when is_binary(url) do
+    case GitHubRepository.pull_request_url(url) do
+      {:ok, %{number: number}} -> %{href: url, label: "PR ##{number}"}
+      {:error, :invalid_pull_request_url} -> nil
+    end
+  end
+
+  defp pull_request(_url), do: nil
+
   defp effective_status(%{status: "running", activity_at: activity_at}, now) do
     if stale?(activity_at, now), do: "stale", else: "running"
   end
@@ -487,12 +536,28 @@ defmodule SymphonyElixirWeb.DashboardLive do
 
   defp stale?(_activity_at, _now), do: false
 
-  defp activity_time_label(agent, now) do
+  defp activity_time_prefix(agent, now) do
     case effective_status(agent, now) do
-      "retrying" -> "Next retry #{agent.due_at || "not scheduled"}"
-      "blocked" -> "Blocked #{agent.relevant_at || "at unknown time"}"
-      "stale" -> "No recent update · #{agent.activity_at}"
-      _ -> agent.activity_at || agent.relevant_at || "Timestamp not reported"
+      "retrying" -> "Next retry "
+      "blocked" -> "Blocked "
+      "stale" -> "Last update "
+      _ -> "Updated "
+    end
+  end
+
+  defp activity_timestamp(agent, now) do
+    case effective_status(agent, now) do
+      "retrying" -> agent.due_at
+      "blocked" -> agent.relevant_at
+      _ -> agent.activity_at || agent.relevant_at
+    end
+  end
+
+  defp activity_time_fallback(agent, now) do
+    case effective_status(agent, now) do
+      "retrying" -> "not scheduled"
+      "blocked" -> "at unknown time"
+      _ -> "Timestamp not reported"
     end
   end
 
@@ -544,15 +609,53 @@ defmodule SymphonyElixirWeb.DashboardLive do
   defp rate_limit_summary(rate_limits) when map_size(rate_limits) == 0, do: "Not reported"
   defp rate_limit_summary(_rate_limits), do: "Available in the current runtime snapshot"
 
-  defp log_time(nil), do: "--:--:--"
+  attr(:value, :any, required: true)
+  attr(:fallback, :string, default: "Timestamp not reported")
+
+  defp timestamp(assigns) do
+    assigns =
+      assigns
+      |> assign(:iso, timestamp_iso(assigns.value))
+      |> assign(:label, format_timestamp(assigns.value))
+
+    ~H"""
+    <%= if @iso && @label do %>
+      <time datetime={@iso} title={@iso}><%= @label %></time>
+    <% else %>
+      <%= @fallback %>
+    <% end %>
+    """
+  end
+
+  defp timestamp_iso(%DateTime{} = datetime), do: DateTime.to_iso8601(datetime)
+
+  defp timestamp_iso(timestamp) when is_binary(timestamp) do
+    case DateTime.from_iso8601(timestamp) do
+      {:ok, datetime, _offset} -> DateTime.to_iso8601(datetime)
+      _ -> nil
+    end
+  end
+
+  defp timestamp_iso(_timestamp), do: nil
+
+  defp format_timestamp(%DateTime{} = datetime),
+    do: Calendar.strftime(datetime, "%d %b %Y · %H:%M UTC")
+
+  defp format_timestamp(timestamp) when is_binary(timestamp) do
+    case DateTime.from_iso8601(timestamp) do
+      {:ok, datetime, _offset} -> format_timestamp(datetime)
+      _ -> nil
+    end
+  end
+
+  defp format_timestamp(_timestamp), do: nil
+
+  defp log_time(nil), do: "--"
 
   defp log_time(timestamp) when is_binary(timestamp) do
     case DateTime.from_iso8601(timestamp) do
       {:ok, datetime, _offset} ->
-        datetime
-        |> DateTime.to_time()
-        |> Time.truncate(:second)
-        |> Time.to_iso8601()
+        Calendar.strftime(datetime, "%d %b · %H:%M UTC")
 
       _ ->
         timestamp

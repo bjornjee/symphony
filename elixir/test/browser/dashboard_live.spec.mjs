@@ -138,11 +138,51 @@ test("dashboard states and live interactions remain observable", async ({page, r
     );
     await expect(page.getByText("Turns", {exact: true})).toBeVisible();
     await expect(page.getByText("Last activity", {exact: true})).toBeVisible();
+    await expect(
+      page.locator("#agent-detail").getByRole("link", {name: "Linear PIN-RUNNING"})
+    ).toBeVisible();
+    await expect(page.locator("#agent-detail").getByRole("link", {name: "PR #25"})).toBeVisible();
+    await expect(page.getByRole("heading", {name: "Live activity"})).toBeVisible();
+    await expect(page.locator("time[datetime]").first()).toContainText(/[A-Z][a-z]{2} 20\d{2}/);
+    await expect(page.locator("#agent-detail-log")).toHaveAttribute("aria-live", "off");
+    await expect(
+      page.locator('[aria-live="polite"]').filter({hasText: "Latest activity:"})
+    ).toBeAttached();
+
+    const activitySurface = await page.locator("#agent-detail-log").evaluate((element) => {
+      const style = getComputedStyle(element);
+      return {background: style.backgroundColor, fontFamily: style.fontFamily};
+    });
+
+    expect(activitySurface.background).toBe("rgb(255, 255, 255)");
+    expect(activitySurface.fontFamily).not.toContain("SFMono");
+
+    const issueLinkHeight = await page
+      .locator(".agent-row-resource-link")
+      .first()
+      .evaluate((element) => element.getBoundingClientRect().height);
+    expect(issueLinkHeight).toBeGreaterThanOrEqual(24);
     await expect(page.locator("#agent-detail-log .log-line")).toHaveCount(50);
     await expect(
       page.locator("#agent-detail-log").getByText("Streaming implementation output 60")
     ).toBeVisible();
     await expectNoHorizontalOverflow(page);
+    if (viewport.width <= 680) {
+      const fleetRail = page.locator(".agent-list");
+      const railMetrics = await fleetRail.evaluate((element) => ({
+        clientWidth: element.clientWidth,
+        scrollWidth: element.scrollWidth,
+        display: getComputedStyle(element).display,
+        snap: getComputedStyle(element).scrollSnapType
+      }));
+
+      expect(railMetrics.scrollWidth).toBeGreaterThan(railMetrics.clientWidth);
+      expect(railMetrics.display).toBe("flex");
+      expect(railMetrics.snap).toContain("x");
+      expect(
+        await page.locator("#agent-detail").evaluate((element) => element.getBoundingClientRect().top)
+      ).toBeLessThan(viewport.height);
+    }
     await captureState(page, "running", viewport);
     await page.locator("#agent-detail-log").scrollIntoViewIfNeeded();
     await captureState(page, "live-log", viewport);
