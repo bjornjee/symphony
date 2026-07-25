@@ -3,7 +3,7 @@ defmodule SymphonyElixirWeb.Presenter do
   Shared projections for the observability API and dashboard.
   """
 
-  alias SymphonyElixir.{Config, GitHubRepository, Orchestrator, StatusDashboard}
+  alias SymphonyElixir.{Config, GitHubRepository, Orchestrator, RunAudit, StatusDashboard}
 
   @audit_tail_bytes 64 * 1_024
   @audit_event_limit 50
@@ -107,6 +107,7 @@ defmodule SymphonyElixirWeb.Presenter do
 
     agent
     |> Map.put(:log_tail, audit_events)
+    |> Map.put(:audit_summary, read_audit_summary(Map.get(agent, :audit_events_path)))
     |> put_latest_pull_request(audit_events)
   end
 
@@ -238,6 +239,31 @@ defmodule SymphonyElixirWeb.Presenter do
   end
 
   defp read_audit_events(_path), do: []
+
+  defp read_audit_summary(path) when is_binary(path) and path != "" do
+    case RunAudit.summary_path(path) do
+      {:ok, summary} ->
+        %{
+          verification_profile: summary.verification_profile,
+          context_cache_hits: summary.cache.context.hits,
+          context_cache_misses: summary.cache.context.misses,
+          proof_cache_hits: summary.cache.proof.hits,
+          proof_cache_misses: summary.cache.proof.misses,
+          slowest_phase: summary.slowest_phase && summary.slowest_phase.phase,
+          slowest_phase_duration_ms: summary.slowest_phase && summary.slowest_phase.duration_ms,
+          budget_overrun_count: length(summary.budget_overruns),
+          max_budget_overrun_ms:
+            summary.budget_overruns
+            |> Enum.map(& &1.budget_overrun_ms)
+            |> Enum.max(fn -> 0 end)
+        }
+
+      _ ->
+        nil
+    end
+  end
+
+  defp read_audit_summary(_path), do: nil
 
   defp read_audit_tail(path, size) do
     offset = max(size - @audit_tail_bytes, 0)

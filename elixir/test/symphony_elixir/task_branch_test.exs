@@ -70,6 +70,35 @@ defmodule SymphonyElixir.TaskBranchTest do
              TaskBranch.ensure(ctx.workspace, ctx.issue, "fix", ctx.base_sha, "worker-a")
   end
 
+  test "preserves remote ancestry inspection failures as operational errors", ctx do
+    assert {:ok, _branch} = TaskBranch.ensure(ctx.workspace, ctx.issue, "fix", ctx.base_sha)
+
+    fake_bin = Path.join(ctx.workspace, "failing-ssh-bin")
+    fake_ssh = Path.join(fake_bin, "ssh")
+    previous_path = System.get_env("PATH")
+    File.mkdir_p!(fake_bin)
+
+    File.write!(fake_ssh, """
+    #!/bin/sh
+    for arg in "$@"; do remote_command="$arg"; done
+    case "$remote_command" in
+      *"branch"*"--show-current"*) eval "$remote_command" ;;
+      *"merge-base"*) exit 75 ;;
+      *) eval "$remote_command" ;;
+    esac
+    """)
+
+    File.chmod!(fake_ssh, 0o755)
+    System.put_env("PATH", fake_bin <> ":" <> (previous_path || ""))
+
+    on_exit(fn ->
+      if previous_path, do: System.put_env("PATH", previous_path), else: System.delete_env("PATH")
+    end)
+
+    assert {:error, {:task_branch_base_validation_failed, _branch, _base, 75}} =
+             TaskBranch.validate(ctx.workspace, ctx.issue, "fix", ctx.base_sha, "worker-a")
+  end
+
   test "switches to an existing task branch from the pinned base", ctx do
     expected = "fix/sym-42-repair-handoff-validation"
     System.cmd("git", ["-C", ctx.workspace, "branch", expected, ctx.base_sha])
@@ -96,7 +125,7 @@ defmodule SymphonyElixir.TaskBranchTest do
   test "rejects a task branch that does not descend from the pinned base", ctx do
     assert {:ok, _branch} = TaskBranch.ensure(ctx.workspace, ctx.issue, "fix", ctx.base_sha)
 
-    assert {:error, {:task_branch_base_mismatch, _branch, _base, _status}} =
+    assert {:error, {:task_branch_base_validation_failed, _branch, _base, _status}} =
              TaskBranch.ensure(
                ctx.workspace,
                ctx.issue,

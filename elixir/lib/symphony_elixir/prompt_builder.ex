@@ -39,6 +39,7 @@ defmodule SymphonyElixir.PromptBuilder do
 
     prompt =
       execution_prompt(issue, execution_plan)
+      |> maybe_append_execution_brief(execution_plan)
       |> maybe_append_workflow_profile(Keyword.get(opts, :workflow_profile))
 
     prompt
@@ -91,6 +92,58 @@ defmodule SymphonyElixir.PromptBuilder do
     """
     |> String.trim()
   end
+
+  defp maybe_append_execution_brief(prompt, execution_plan) when is_map(execution_plan) do
+    authority = Map.get(execution_plan, "candidate", execution_plan)
+    repository = Map.get(execution_plan, "repository", Map.get(authority, "repository", %{}))
+
+    brief = %{
+      "affected_paths" => execution_brief_paths(authority),
+      "base_sha" => Map.get(repository, "base_sha"),
+      "proof_commands" =>
+        authority
+        |> Map.get("proofs", [])
+        |> Enum.map(&Map.get(&1, "command"))
+        |> Enum.filter(&is_binary/1),
+      "verification_profile" => execution_brief_profile(authority)
+    }
+
+    """
+    #{prompt}
+
+    Compact execution brief (precomputed from the validated authority):
+    ```json
+    #{Jason.encode!(brief)}
+    ```
+
+    Treat this brief as the repository fact packet for the edit loop. Do not repeat discovery
+    commands for these facts unless the observed workspace contradicts the validated authority.
+    """
+    |> String.trim()
+  end
+
+  defp execution_brief_paths(%{"affected_paths" => paths}) when is_list(paths), do: paths
+
+  defp execution_brief_paths(authority) do
+    authority
+    |> Map.get("ordered_steps", [])
+    |> Enum.flat_map(&Map.get(&1, "affected_paths", []))
+    |> Enum.uniq()
+  end
+
+  defp execution_brief_profile(%{"verification_profile" => profile}), do: profile
+
+  defp execution_brief_profile(authority) do
+    authority
+    |> Map.get("ordered_steps", [])
+    |> Enum.map(&Map.get(&1, "verification_profile"))
+    |> Enum.max_by(&verification_profile_rank/1, fn -> "Full" end)
+  end
+
+  defp verification_profile_rank("Surgical"), do: 0
+  defp verification_profile_rank("Targeted"), do: 1
+  defp verification_profile_rank("Full"), do: 2
+  defp verification_profile_rank(_profile), do: 3
 
   defp maybe_append_completion_evidence_contract(
          prompt,

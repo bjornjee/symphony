@@ -45,11 +45,17 @@ defmodule SymphonyElixir.ImplementationReview do
   def required?(%{"execution_mode" => "simple", "verification_profile" => profile}), do: profile == "Full"
   def required?(_plan), do: true
 
+  @spec required?(map(), String.t()) :: boolean()
+  def required?(plan, effective_profile),
+    do: effective_profile == "Full" or required?(plan)
+
   @spec request(Path.t(), Issue.t(), TaskContract.t(), map(), String.t(), keyword()) ::
           {:ok, map()} | {:error, term()}
   def request(workspace, %Issue{} = issue, %TaskContract{} = contract, plan, ledger_key, opts \\ []) do
-    with true <- required?(plan) || {:error, :implementation_review_not_required},
-         {:ok, delivery} <- ExecutionControl.delivery_state(plan, ledger_key, workspace, opts),
+    with {:ok, delivery} <- ExecutionControl.delivery_state(plan, ledger_key, workspace, opts),
+         true <-
+           required?(plan, delivery.verification_profile.effective) ||
+             {:error, :implementation_review_not_required},
          {:ok, attempt} <- next_attempt(ledger_key),
          {:ok, snapshot} <- RepositoryReviewSnapshot.capture(workspace, plan_base(plan), Keyword.get(opts, :worker_host)),
          true <- snapshot.repository.digest == delivery.repository.digest || {:error, :implementation_review_state_drift},

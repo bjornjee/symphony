@@ -90,6 +90,46 @@ defmodule SymphonyElixir.DashboardVisualFixture.Orchestrator do
         events ++
           [
             Jason.encode!(%{
+              "event" => "execution_plan_approved",
+              "timestamp" =>
+                DateTime.utc_now()
+                |> DateTime.add(-24, :second)
+                |> DateTime.truncate(:second)
+                |> DateTime.to_iso8601(),
+              "verification_profile" => "Full"
+            }),
+            Jason.encode!(%{
+              "event" => "context_cache_result",
+              "timestamp" =>
+                DateTime.utc_now()
+                |> DateTime.add(-23, :second)
+                |> DateTime.truncate(:second)
+                |> DateTime.to_iso8601(),
+              "cache" => "execution_context",
+              "cache_status" => "miss"
+            }),
+            Jason.encode!(%{
+              "event" => "proof_completed",
+              "timestamp" =>
+                DateTime.utc_now()
+                |> DateTime.add(-22, :second)
+                |> DateTime.truncate(:second)
+                |> DateTime.to_iso8601(),
+              "cache" => "proof",
+              "cache_status" => "hit"
+            }),
+            Jason.encode!(%{
+              "event" => "phase_timing",
+              "timestamp" =>
+                DateTime.utc_now()
+                |> DateTime.add(-21, :second)
+                |> DateTime.truncate(:second)
+                |> DateTime.to_iso8601(),
+              "phase" => "planning",
+              "duration_ms" => 12_500,
+              "budget_overrun_ms" => 2_500
+            }),
+            Jason.encode!(%{
               "event" => "pull_request_published",
               "timestamp" =>
                 DateTime.utc_now()

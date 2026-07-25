@@ -152,7 +152,7 @@ defmodule SymphonyElixir.PlanningArtifact do
       "repository" => classification["repository"],
       "affected_paths" => classification["affected_paths"],
       "proofs" => classification["proofs"],
-      "verification_profile" => "Targeted"
+      "verification_profile" => simple_verification_profile(classification["workflow"])
     }
 
     execution_plan = Map.put(semantic, "plan_digest", digest(semantic))
@@ -171,6 +171,9 @@ defmodule SymphonyElixir.PlanningArtifact do
         result
     end
   end
+
+  defp simple_verification_profile("chore"), do: "Surgical"
+  defp simple_verification_profile(_workflow), do: "Targeted"
 
   @spec read_candidate(Path.t(), 1..3, String.t() | nil) :: :missing | {:ok, map()} | {:error, term()}
   def read_candidate(workspace, revision, worker_host \\ nil) when revision in 1..3 do
