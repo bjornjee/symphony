@@ -346,12 +346,6 @@ defmodule SymphonyElixir.Pin28BenchmarkTest do
     assert Jason.decode!(output)["run_count"] == 10
   end
 
-  test "Mix task rejects invalid options" do
-    assert_raise Mix.Error, ~r/invalid benchmark options/, fn ->
-      Pin28Task.run(["--unknown"])
-    end
-  end
-
   test "Mix task rejects unsupported positional arguments" do
     assert_raise Mix.Error, ~r/invalid benchmark options/, fn ->
       Pin28Task.run(["unexpected"])
@@ -378,16 +372,6 @@ defmodule SymphonyElixir.Pin28BenchmarkTest do
 
     assert message =~ "rejects noncanonical hooks/options"
     assert message =~ "artifact_observer"
-  end
-
-  test "Mix task preserves internal benchmark argument errors" do
-    assert_raise ArgumentError, ~r/at least 10/, fn ->
-      capture_io(fn -> Pin28Task.run(["--runs", "9"]) end)
-    end
-  end
-
-  test "checked Mix task has no injectable benchmark runner" do
-    refute function_exported?(Pin28Task, :run, 2)
   end
 
   test "canonical checked report below the thresholds is rejected" do

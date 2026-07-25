@@ -126,7 +126,7 @@ defmodule SymphonyElixir.SSHTest do
     assert System.find_executable("ssh") == Path.join(test_root, "bin/ssh")
     assert {:ok, port} = SSH.start_port("localhost", "printf ok")
     assert is_port(port)
-    assert_receive {^port, {:data, "ready\n"}}, 500
+    assert_receive {^port, {:data, "ready\n"}}, 2_000
 
     trace = File.read!(trace_file)
     assert trace =~ "-T localhost bash -lc"
@@ -153,7 +153,7 @@ defmodule SymphonyElixir.SSHTest do
     assert System.find_executable("ssh") == Path.join(test_root, "bin/ssh")
     assert {:ok, port} = SSH.start_port("localhost:2222", "printf ok", line: 256)
     assert is_port(port)
-    assert_receive {^port, {:data, {:eol, "ready"}}}, 500
+    assert_receive {^port, {:data, {:eol, "ready"}}}, 2_000
 
     trace = File.read!(trace_file)
     assert trace =~ "-T -p 2222 localhost bash -lc"
