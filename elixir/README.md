@@ -109,6 +109,18 @@ mise exec -- mix build
 mise exec -- ./bin/symphony ./workflow.md
 ```
 
+When dogfooding Symphony against this repository's configured Linear project,
+use the managed targets from the repository root instead:
+
+```bash
+make symphony-up
+make symphony-status
+```
+
+See [`../docs/symphony-linear-setup.md`](../docs/symphony-linear-setup.md) for
+worktree-safe environment discovery and the status, logs, restart, down, and
+foreground commands.
+
 ## Configuration
 
 Pass a custom workflow file path to `./bin/symphony` when starting the service:
