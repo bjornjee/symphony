@@ -3,7 +3,7 @@ defmodule SymphonyElixir.Linear.TaskContract do
   Deterministically validates and fingerprints a Codex Agent Task v1 issue.
   """
 
-  alias SymphonyElixir.Linear.Issue
+  alias SymphonyElixir.Linear.{Issue, TeamContract}
 
   @version 1
   @required_headings [
@@ -14,11 +14,11 @@ defmodule SymphonyElixir.Linear.TaskContract do
     "Verification",
     "Risk"
   ]
-  @optional_headings ["Notes For Agent"]
+  @optional_headings ["Notes For Agent", "Team"]
   @all_headings @required_headings ++ @optional_headings
   @max_acceptance_criteria 100
 
-  defstruct [:version, :digest, :title, :description, :sections, :acceptance_criteria, :source_updated_at]
+  defstruct [:version, :digest, :title, :description, :sections, :acceptance_criteria, :source_updated_at, :team]
 
   @type acceptance_criterion :: %{id: String.t(), text: String.t()}
 
@@ -29,11 +29,12 @@ defmodule SymphonyElixir.Linear.TaskContract do
           description: String.t(),
           sections: %{required(String.t()) => String.t()},
           acceptance_criteria: [acceptance_criterion()],
-          source_updated_at: DateTime.t() | nil
+          source_updated_at: DateTime.t() | nil,
+          team: TeamContract.t() | nil
         }
 
-  @spec from_issue(Issue.t()) :: {:ok, t()} | {:error, [String.t()]}
-  def from_issue(%Issue{} = issue) do
+  @spec from_issue(Issue.t(), keyword()) :: {:ok, t()} | {:error, [String.t()]}
+  def from_issue(%Issue{} = issue, opts \\ []) do
     title = canonicalize_title(issue.title)
     description = canonicalize_description(issue.description)
     {headings, scan_errors} = scan_headings(description)
@@ -43,20 +44,23 @@ defmodule SymphonyElixir.Linear.TaskContract do
       scan_errors ++
         title_errors(title) ++
         heading_errors(headings) ++
-        section_errors(sections)
+        section_errors(sections) ++
+        team_label_section_errors(issue, sections)
 
     case errors do
       [] ->
-        {:ok,
-         %__MODULE__{
-           version: @version,
-           digest: digest(title, description),
-           title: title,
-           description: description,
-           sections: sections,
-           acceptance_criteria: parse_acceptance_criteria(Map.fetch!(sections, "Acceptance Criteria")),
-           source_updated_at: issue.updated_at
-         }}
+        contract = %__MODULE__{
+          version: @version,
+          digest: digest(title, description),
+          title: title,
+          description: description,
+          sections: sections,
+          acceptance_criteria: parse_acceptance_criteria(Map.fetch!(sections, "Acceptance Criteria")),
+          source_updated_at: issue.updated_at,
+          team: nil
+        }
+
+        maybe_parse_team(contract, issue, opts)
 
       errors ->
         {:error, Enum.uniq(errors)}
@@ -65,6 +69,28 @@ defmodule SymphonyElixir.Linear.TaskContract do
 
   @spec version() :: pos_integer()
   def version, do: @version
+
+  defp maybe_parse_team(%__MODULE__{sections: %{"Team" => section}} = contract, issue, opts) do
+    trusted_registry = Keyword.get(opts, :team_repository_registry, %{})
+
+    case TeamContract.parse(section, issue.identifier, contract.digest, trusted_registry) do
+      {:ok, team} -> {:ok, %{contract | team: team}}
+      {:error, errors} -> {:error, errors}
+    end
+  end
+
+  defp maybe_parse_team(contract, _issue, _opts), do: {:ok, contract}
+
+  defp team_label_section_errors(issue, sections) do
+    label? = Issue.has_label?(issue, "codex-team")
+    section? = Map.has_key?(sections, "Team")
+
+    case {label?, section?} do
+      {true, false} -> ["The codex-team label requires a ## Team section."]
+      {false, true} -> ["## Team requires the codex-team label."]
+      _ -> []
+    end
+  end
 
   defp canonicalize_title(title) when is_binary(title) do
     title

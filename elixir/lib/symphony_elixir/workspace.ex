@@ -31,6 +31,148 @@ defmodule SymphonyElixir.Workspace do
     end
   end
 
+  @spec create_for_repository(map() | String.t() | nil, map(), worker_host()) ::
+          {:ok, Path.t()} | {:error, term()}
+  def create_for_repository(issue_or_identifier, trusted_config, worker_host \\ nil)
+      when is_map(trusted_config) do
+    issue_context = issue_context(issue_or_identifier)
+    root = get_in(trusted_config, ["workspace", "root"])
+    hooks = Map.get(trusted_config, "hooks", %{})
+
+    if is_binary(root) and String.trim(root) != "" and is_map(hooks) do
+      try do
+        safe_id = safe_identifier(issue_context.issue_identifier)
+
+        with {:ok, workspace} <- repository_workspace_path(safe_id, root, worker_host),
+             :ok <- validate_repository_workspace_path(workspace, root, worker_host),
+             {:ok, workspace, created?} <- ensure_repository_workspace(workspace, worker_host, hooks),
+             :ok <- maybe_run_repository_after_create(workspace, issue_context, created?, hooks, worker_host) do
+          {:ok, workspace}
+        end
+      rescue
+        error in [ArgumentError, ErlangError, File.Error] -> {:error, error}
+      end
+    else
+      {:error, :invalid_team_repository_config}
+    end
+  end
+
+  @spec run_repository_before_run_hook(Path.t(), map() | String.t() | nil, map(), worker_host()) ::
+          :ok | {:error, term()}
+  def run_repository_before_run_hook(workspace, issue_or_identifier, trusted_config, worker_host \\ nil)
+      when is_binary(workspace) and is_map(trusted_config) do
+    run_repository_hook(workspace, issue_or_identifier, trusted_config, "before_run", worker_host)
+  end
+
+  @spec run_repository_after_run_hook(Path.t(), map() | String.t() | nil, map(), worker_host()) :: :ok
+  def run_repository_after_run_hook(workspace, issue_or_identifier, trusted_config, worker_host \\ nil)
+      when is_binary(workspace) and is_map(trusted_config) do
+    run_repository_hook(workspace, issue_or_identifier, trusted_config, "after_run", worker_host)
+    |> ignore_hook_failure()
+  end
+
+  defp run_repository_hook(workspace, issue_or_identifier, trusted_config, hook_name, worker_host) do
+    hooks = Map.get(trusted_config, "hooks", %{})
+
+    case Map.get(hooks, hook_name) do
+      nil ->
+        :ok
+
+      command when is_binary(command) ->
+        run_hook(
+          command,
+          workspace,
+          issue_context(issue_or_identifier),
+          hook_name,
+          worker_host,
+          repository_hook_timeout(hooks)
+        )
+
+      _other ->
+        {:error, {:invalid_team_repository_hook, hook_name}}
+    end
+  end
+
+  defp repository_workspace_path(safe_id, root, nil) do
+    root |> Path.join(safe_id) |> PathSafety.canonicalize()
+  end
+
+  defp repository_workspace_path(safe_id, root, worker_host) when is_binary(worker_host) do
+    {:ok, Path.join(root, safe_id)}
+  end
+
+  defp validate_repository_workspace_path(workspace, _root, worker_host) when is_binary(worker_host) do
+    validate_workspace_path(workspace, worker_host)
+  end
+
+  defp validate_repository_workspace_path(workspace, root, nil) do
+    expanded_workspace = Path.expand(workspace)
+    expanded_root = Path.expand(root)
+
+    with {:ok, canonical_workspace} <- PathSafety.canonicalize(expanded_workspace),
+         {:ok, canonical_root} <- PathSafety.canonicalize(expanded_root) do
+      cond do
+        canonical_workspace == canonical_root ->
+          {:error, {:workspace_equals_root, canonical_workspace, canonical_root}}
+
+        String.starts_with?(canonical_workspace <> "/", canonical_root <> "/") ->
+          :ok
+
+        String.starts_with?(expanded_workspace <> "/", expanded_root <> "/") ->
+          {:error, {:workspace_symlink_escape, expanded_workspace, canonical_root}}
+
+        true ->
+          {:error, {:workspace_outside_root, canonical_workspace, canonical_root}}
+      end
+    else
+      {:error, {:path_canonicalize_failed, path, reason}} -> {:error, {:workspace_path_unreadable, path, reason}}
+    end
+  end
+
+  defp ensure_repository_workspace(workspace, nil, _hooks), do: ensure_workspace(workspace, nil)
+
+  defp ensure_repository_workspace(workspace, worker_host, hooks) when is_binary(worker_host) do
+    script =
+      [
+        "set -eu",
+        remote_shell_assign("workspace", workspace),
+        "if [ -d \"$workspace\" ]; then created=0;",
+        "elif [ -e \"$workspace\" ]; then rm -rf \"$workspace\"; mkdir -p \"$workspace\"; created=1;",
+        "else mkdir -p \"$workspace\"; created=1; fi",
+        "cd \"$workspace\"",
+        "printf '%s\\t%s\\t%s\\n' '#{@remote_workspace_marker}' \"$created\" \"$(pwd -P)\""
+      ]
+      |> Enum.join("\n")
+
+    case run_remote_command(worker_host, script, repository_hook_timeout(hooks)) do
+      {:ok, {output, 0}} -> parse_remote_workspace_output(output)
+      {:ok, {output, status}} -> {:error, {:workspace_prepare_failed, worker_host, status, output}}
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  defp maybe_run_repository_after_create(_workspace, _issue_context, false, _hooks, _worker_host), do: :ok
+
+  defp maybe_run_repository_after_create(workspace, issue_context, true, hooks, worker_host) do
+    case Map.get(hooks, "after_create") do
+      nil ->
+        :ok
+
+      command when is_binary(command) ->
+        run_hook(command, workspace, issue_context, "after_create", worker_host, repository_hook_timeout(hooks))
+
+      _other ->
+        {:error, {:invalid_team_repository_hook, "after_create"}}
+    end
+  end
+
+  defp repository_hook_timeout(hooks) do
+    case Map.get(hooks, "timeout_ms") do
+      timeout when is_integer(timeout) and timeout > 0 -> timeout
+      _other -> Config.settings!().hooks.timeout_ms
+    end
+  end
+
   defp ensure_workspace(workspace, nil) do
     cond do
       File.dir?(workspace) ->
@@ -292,8 +434,14 @@ defmodule SymphonyElixir.Workspace do
   defp ignore_hook_failure({:error, _reason}), do: :ok
 
   defp run_hook(command, workspace, issue_context, hook_name, nil) do
-    timeout_ms = Config.settings!().hooks.timeout_ms
+    run_hook(command, workspace, issue_context, hook_name, nil, Config.settings!().hooks.timeout_ms)
+  end
 
+  defp run_hook(command, workspace, issue_context, hook_name, worker_host) when is_binary(worker_host) do
+    run_hook(command, workspace, issue_context, hook_name, worker_host, Config.settings!().hooks.timeout_ms)
+  end
+
+  defp run_hook(command, workspace, issue_context, hook_name, nil, timeout_ms) do
     Logger.info("Running workspace hook hook=#{hook_name} #{issue_log_context(issue_context)} workspace=#{workspace} worker_host=local")
 
     task =
@@ -314,9 +462,8 @@ defmodule SymphonyElixir.Workspace do
     end
   end
 
-  defp run_hook(command, workspace, issue_context, hook_name, worker_host) when is_binary(worker_host) do
-    timeout_ms = Config.settings!().hooks.timeout_ms
-
+  defp run_hook(command, workspace, issue_context, hook_name, worker_host, timeout_ms)
+       when is_binary(worker_host) do
     Logger.info("Running workspace hook hook=#{hook_name} #{issue_log_context(issue_context)} workspace=#{workspace} worker_host=#{worker_host}")
 
     case run_remote_command(worker_host, "cd #{shell_escape(workspace)} && #{command}", timeout_ms) do

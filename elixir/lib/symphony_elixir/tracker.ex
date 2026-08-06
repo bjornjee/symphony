@@ -11,6 +11,7 @@ defmodule SymphonyElixir.Tracker do
   @callback create_comment(String.t(), String.t()) :: :ok | {:error, term()}
   @callback create_comment(String.t(), String.t(), String.t()) :: :ok | {:error, term()}
   @callback fetch_comment(String.t(), String.t()) :: {:ok, %{id: String.t(), body: String.t()} | nil} | {:error, term()}
+  @callback update_comment(String.t(), String.t()) :: :ok | {:error, term()}
   @callback update_issue_state(String.t(), String.t()) :: :ok | {:error, term()}
   @callback cleanup_issue_labels(term(), [String.t()]) :: :ok | {:error, term()}
 
@@ -43,6 +44,11 @@ defmodule SymphonyElixir.Tracker do
           {:ok, %{id: String.t(), body: String.t()} | nil} | {:error, term()}
   def fetch_comment(issue_id, comment_id) do
     adapter().fetch_comment(issue_id, comment_id)
+  end
+
+  @spec update_comment(String.t(), String.t()) :: :ok | {:error, term()}
+  def update_comment(comment_id, body) do
+    adapter().update_comment(comment_id, body)
   end
 
   @spec update_issue_state(String.t(), String.t()) :: :ok | {:error, term()}

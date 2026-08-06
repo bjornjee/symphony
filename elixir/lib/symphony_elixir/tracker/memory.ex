@@ -58,6 +58,21 @@ defmodule SymphonyElixir.Tracker.Memory do
     end
   end
 
+  @spec update_comment(String.t(), String.t()) :: :ok | {:error, term()}
+  def update_comment(comment_id, body) do
+    comments = Process.get({__MODULE__, :comments}, %{})
+
+    updated =
+      Map.new(comments, fn
+        {{issue_id, ^comment_id}, _old_body} -> {{issue_id, comment_id}, body}
+        entry -> entry
+      end)
+
+    Process.put({__MODULE__, :comments}, updated)
+    send_event({:memory_tracker_comment_updated, comment_id, body})
+    :ok
+  end
+
   @spec update_issue_state(String.t(), String.t()) :: :ok | {:error, term()}
   def update_issue_state(issue_id, state_name) do
     updated_issues =

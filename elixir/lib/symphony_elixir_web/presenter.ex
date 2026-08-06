@@ -24,6 +24,7 @@ defmodule SymphonyElixirWeb.Presenter do
             retrying: length(snapshot.retrying),
             blocked: length(Map.get(snapshot, :blocked, []))
           },
+          teams: Enum.map(Map.get(snapshot, :teams, []), &team_payload/1),
           running: Enum.map(snapshot.running, &running_entry_payload/1),
           retrying: Enum.map(snapshot.retrying, &retry_entry_payload/1),
           blocked: Enum.map(Map.get(snapshot, :blocked, []), &blocked_entry_payload/1),
@@ -70,10 +71,9 @@ defmodule SymphonyElixirWeb.Presenter do
   end
 
   @doc """
-  Projects the existing observability payload into dashboard-only agent summaries.
+  Projects the observability payload into dashboard-only agent summaries.
 
-  This deliberately leaves `state_payload/2` and `issue_payload/3` unchanged for API
-  consumers. Audit history is not read while building the overview.
+  Audit history is not read while building the overview.
   """
   @spec dashboard_agents(map()) :: [map()]
   def dashboard_agents(payload) when is_map(payload) do
@@ -135,6 +135,47 @@ defmodule SymphonyElixirWeb.Presenter do
       recent_events: recent_events_payload(running || blocked),
       last_error: (blocked && blocked.error) || (retry && retry.error),
       tracked: %{}
+    }
+  end
+
+  defp team_payload(team) do
+    agents =
+      team
+      |> Map.get(:agents, %{})
+      |> Enum.map(fn {_agent_id, agent} ->
+        %{
+          agent_id: agent[:agent_id],
+          role: agent[:role],
+          repository: agent[:repository],
+          phase: agent[:phase] || agent[:status],
+          status: agent[:status],
+          thread_id: agent[:thread_id],
+          latest_session_id: agent[:latest_session_id],
+          workspace: agent[:workspace],
+          pr_url: agent[:pr_url],
+          latest_event: meaningful_team_event(agent[:latest_event])
+        }
+      end)
+      |> Enum.sort_by(& &1.agent_id)
+
+    %{
+      request_id: team[:request_id],
+      issue_id: team[:issue_id],
+      identifier: team[:identifier],
+      agents: agents,
+      latest_event: team |> Map.get(:events, []) |> List.last() |> meaningful_team_event()
+    }
+  end
+
+  defp meaningful_team_event(nil), do: nil
+
+  defp meaningful_team_event(event) when is_map(event) do
+    %{
+      id: event[:id],
+      sender: event[:sender],
+      recipient: event[:recipient],
+      kind: event[:kind],
+      message: event[:message]
     }
   end
 

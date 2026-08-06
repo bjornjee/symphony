@@ -311,6 +311,22 @@ defmodule SymphonyElixir.Config.Schema do
     end
   end
 
+  defmodule Team do
+    @moduledoc false
+    use Ecto.Schema
+    import Ecto.Changeset
+
+    @primary_key false
+    embedded_schema do
+      field(:repositories, :map, default: %{})
+    end
+
+    @spec changeset(%__MODULE__{}, map()) :: Ecto.Changeset.t()
+    def changeset(schema, attrs) do
+      cast(schema, attrs, [:repositories], empty_values: [])
+    end
+  end
+
   defmodule Server do
     @moduledoc false
     use Ecto.Schema
@@ -339,6 +355,7 @@ defmodule SymphonyElixir.Config.Schema do
     embeds_one(:codex, Codex, on_replace: :update, defaults_to_struct: true)
     embeds_one(:hooks, Hooks, on_replace: :update, defaults_to_struct: true)
     embeds_one(:observability, Observability, on_replace: :update, defaults_to_struct: true)
+    embeds_one(:team, Team, on_replace: :update, defaults_to_struct: true)
     embeds_one(:server, Server, on_replace: :update, defaults_to_struct: true)
   end
 
@@ -431,6 +448,7 @@ defmodule SymphonyElixir.Config.Schema do
     |> cast_embed(:codex, with: &Codex.changeset/2)
     |> cast_embed(:hooks, with: &Hooks.changeset/2)
     |> cast_embed(:observability, with: &Observability.changeset/2)
+    |> cast_embed(:team, with: &Team.changeset/2)
     |> cast_embed(:server, with: &Server.changeset/2)
   end
 

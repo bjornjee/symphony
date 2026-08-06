@@ -162,4 +162,190 @@ defmodule SymphonyElixir.TaskContractTest do
 
     assert {:ok, _contract} = TaskContract.from_issue(issue(%{description: description}))
   end
+
+  describe "Team Mode" do
+    test "parses a trusted bounded repository contract" do
+      team_issue =
+        issue(%{
+          labels: ["codex-ready", "codex-team"],
+          description: valid_description() <> "\n\n## Team\n" <> valid_team_yaml()
+        })
+
+      assert {:ok, contract} =
+               TaskContract.from_issue(team_issue,
+                 team_repository_registry: team_repository_registry()
+               )
+
+      assert contract.team.request_id == "PIN-14"
+      assert contract.team.validation_goal == "The changes work together."
+      assert contract.team.invariants == ["Infrastructure lands first."]
+
+      assert Enum.map(contract.team.repositories, &{&1.agent_id, &1.workflow}) == [
+               {"repo:application", "application"},
+               {"repo:infrastructure", "infrastructure"}
+             ]
+
+      assert hd(contract.team.repositories).trusted_config ==
+               team_repository_registry()["application"]
+    end
+
+    test "requires the label and section to appear together" do
+      section_only = issue(%{description: valid_description() <> "\n\n## Team\n" <> valid_team_yaml()})
+      label_only = issue(%{labels: ["codex-ready", "codex-team"]})
+
+      assert {:error, section_errors} = TaskContract.from_issue(section_only)
+      assert "## Team requires the codex-team label." in section_errors
+
+      assert {:error, label_errors} = TaskContract.from_issue(label_only)
+      assert "The codex-team label requires a ## Team section." in label_errors
+    end
+
+    test "rejects unknown and duplicate workflows" do
+      unknown = String.replace(valid_team_yaml(), "workflow: application", "workflow: unknown")
+
+      duplicate =
+        String.replace(valid_team_yaml(), "workflow: infrastructure", "workflow: application")
+
+      assert {:error, unknown_errors} =
+               TaskContract.from_issue(team_issue(unknown),
+                 team_repository_registry: team_repository_registry()
+               )
+
+      assert "Unknown Team workflow: unknown" in unknown_errors
+
+      assert {:error, duplicate_errors} =
+               TaskContract.from_issue(team_issue(duplicate),
+                 team_repository_registry: team_repository_registry()
+               )
+
+      assert "Team repositories must use unique workflows." in duplicate_errors
+    end
+
+    test "rejects untrusted repository configuration and empty required fields" do
+      injected =
+        valid_team_yaml()
+        |> String.replace("    change: Add API behavior.", "    url: https://example.invalid/repo.git\n    change: ''")
+        |> String.replace("validation_goal: The changes work together.", "validation_goal: ''")
+        |> String.replace("invariants:\n  - Infrastructure lands first.", "invariants: []")
+
+      assert {:error, errors} =
+               TaskContract.from_issue(team_issue(injected),
+                 team_repository_registry: team_repository_registry()
+               )
+
+      assert "Team repository application contains unsupported keys: url" in errors
+      assert "Team repository application change must be non-empty." in errors
+      assert "Team validation_goal must be non-empty." in errors
+      assert "Team invariants must contain at least one non-empty item." in errors
+    end
+
+    test "requires two to eight repositories and non-empty acceptance and verification lists" do
+      one_repository =
+        """
+        repositories:
+          - workflow: application
+            change: Add API behavior.
+            acceptance: []
+            verification: []
+        validation_goal: The changes work together.
+        invariants:
+          - The API remains compatible.
+        """
+
+      assert {:error, errors} =
+               TaskContract.from_issue(team_issue(one_repository),
+                 team_repository_registry: team_repository_registry()
+               )
+
+      assert "Team mode requires between 2 and 8 repositories." in errors
+      assert "Team repository application acceptance must contain at least one non-empty item." in errors
+      assert "Team repository application verification must contain at least one non-empty item." in errors
+    end
+
+    test "fails closed on malformed YAML shapes and invalid trusted registry entries" do
+      assert {:error, ["Team YAML is invalid."]} =
+               TaskContract.from_issue(team_issue("["),
+                 team_repository_registry: team_repository_registry()
+               )
+
+      assert {:error, ["Team YAML must decode to a map."]} =
+               TaskContract.from_issue(team_issue("[]"),
+                 team_repository_registry: team_repository_registry()
+               )
+
+      invalid_shapes = """
+      repositories:
+        - not-a-map
+        - workflow: ''
+          change: 42
+          acceptance: not-a-list
+          verification:
+            - ''
+      validation_goal: Goal
+      invariants:
+        - invariant
+      """
+
+      assert {:error, shape_errors} =
+               TaskContract.from_issue(team_issue(invalid_shapes),
+                 team_repository_registry: team_repository_registry()
+               )
+
+      assert "Team repository at index 1 must be a map." in shape_errors
+      assert "Team repository at index 2 workflow must be non-empty." in shape_errors
+      assert "Team repository at index 2 change must be non-empty." in shape_errors
+      assert "Team repository at index 2 acceptance must contain at least one non-empty item." in shape_errors
+      assert "Team repository at index 2 verification must contain at least one non-empty item." in shape_errors
+
+      invalid_registry = Map.put(team_repository_registry(), "application", "not-a-config-map")
+
+      assert {:error, registry_errors} =
+               TaskContract.from_issue(team_issue(valid_team_yaml()),
+                 team_repository_registry: invalid_registry
+               )
+
+      assert "Invalid trusted Team workflow: application" in registry_errors
+    end
+  end
+
+  defp team_issue(team_yaml) do
+    issue(%{
+      labels: ["codex-ready", "codex-team"],
+      description: valid_description() <> "\n\n## Team\n" <> team_yaml
+    })
+  end
+
+  defp valid_team_yaml do
+    """
+    repositories:
+      - workflow: application
+        change: Add API behavior.
+        acceptance:
+          - Existing callers remain compatible.
+        verification:
+          - mix test
+      - workflow: infrastructure
+        change: Deploy supporting configuration.
+        acceptance:
+          - The application can use the configuration.
+        verification:
+          - terraform validate
+    validation_goal: The changes work together.
+    invariants:
+      - Infrastructure lands first.
+    """
+  end
+
+  defp team_repository_registry do
+    %{
+      "application" => %{
+        "workspace" => %{"root" => "/workspaces/application"},
+        "hooks" => %{"after_create" => "git clone app ."}
+      },
+      "infrastructure" => %{
+        "workspace" => %{"root" => "/workspaces/infrastructure"},
+        "hooks" => %{"after_create" => "git clone infra ."}
+      }
+    }
+  end
 end

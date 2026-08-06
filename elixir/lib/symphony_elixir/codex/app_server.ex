@@ -24,6 +24,8 @@ defmodule SymphonyElixir.Codex.AppServer do
   @mcp_status_id 8
   @capability_runtime_probe_id 9
   @playwright_runtime_probe_id 10
+  @thread_name_set_id 21
+  @turn_steer_id 22
   @capability_probe_timeout_ms 30_000
   @required_playwright_tools ~w(
     browser_close
@@ -55,7 +57,8 @@ defmodule SymphonyElixir.Codex.AppServer do
           thread_id: String.t(),
           instruction_sources: [map()],
           workspace: Path.t(),
-          worker_host: String.t() | nil
+          worker_host: String.t() | nil,
+          owner: pid()
         }
 
   @spec run(Path.t(), String.t(), map(), keyword()) :: {:ok, map()} | {:error, term()}
@@ -97,7 +100,8 @@ defmodule SymphonyElixir.Codex.AppServer do
            thread_id: thread_id,
            instruction_sources: instruction_sources,
            workspace: expanded_workspace,
-           worker_host: worker_host
+           worker_host: worker_host,
+           owner: self()
          }}
       else
         {:error, reason} ->
@@ -329,6 +333,70 @@ defmodule SymphonyElixir.Codex.AppServer do
 
   def set_goal_status(%{thread_id: thread_id}, status) when is_binary(thread_id) do
     {:error, {:unsupported_goal_status, status}}
+  end
+
+  @spec set_thread_name(session(), String.t()) :: :ok | {:error, term()}
+  def set_thread_name(%{port: port, thread_id: thread_id, owner: owner}, name)
+      when is_binary(thread_id) and is_binary(name) and owner == self() do
+    name = String.trim(name)
+
+    if name == "" do
+      {:error, :empty_thread_name}
+    else
+      send_message(port, %{
+        "method" => "thread/name/set",
+        "id" => @thread_name_set_id,
+        "params" => %{"threadId" => thread_id, "name" => name}
+      })
+
+      case await_response(port, @thread_name_set_id) do
+        {:ok, _response} -> :ok
+        other -> other
+      end
+    end
+  end
+
+  def set_thread_name(%{owner: _owner}, _name), do: {:error, :not_session_owner}
+
+  @spec steer_turn(session(), String.t(), String.t()) :: :ok | {:error, term()}
+  def steer_turn(%{owner: owner} = session, expected_turn_id, message)
+      when is_pid(owner) and is_binary(expected_turn_id) and is_binary(message) do
+    cond do
+      owner == self() ->
+        do_steer_turn(session.port, session.thread_id, expected_turn_id, message)
+
+      not Process.alive?(owner) ->
+        {:error, :session_owner_unavailable}
+
+      true ->
+        ref = make_ref()
+        send(owner, {:app_server_steer, self(), ref, session.thread_id, expected_turn_id, message})
+
+        receive do
+          {:app_server_steer_result, ^ref, result} -> result
+        after
+          Config.settings!().codex.read_timeout_ms + 1_000 -> {:error, :steer_timeout}
+        end
+    end
+  end
+
+  defp do_steer_turn(port, thread_id, expected_turn_id, message) do
+    send_message(port, %{
+      "method" => "turn/steer",
+      "id" => @turn_steer_id,
+      "params" => %{
+        "threadId" => thread_id,
+        "expectedTurnId" => expected_turn_id,
+        "input" => [%{"type" => "text", "text" => message}]
+      }
+    })
+
+    case await_response(port, @turn_steer_id) do
+      {:ok, %{"turnId" => ^expected_turn_id}} -> :ok
+      {:ok, %{"turnId" => actual_turn_id}} -> {:error, {:steered_turn_mismatch, expected_turn_id, actual_turn_id}}
+      {:ok, response} -> {:error, {:invalid_turn_steer_response, response}}
+      other -> other
+    end
   end
 
   defp send_goal_update(port, params) do
@@ -882,6 +950,13 @@ defmodule SymphonyElixir.Codex.AppServer do
 
   defp receive_loop(port, on_message, timeout_ms, pending_line, tool_executor, auto_approve_requests) do
     receive do
+      {:app_server_steer, caller, ref, thread_id, expected_turn_id, message}
+      when is_pid(caller) and is_reference(ref) and is_binary(thread_id) and is_binary(expected_turn_id) and
+             is_binary(message) ->
+        result = do_steer_turn(port, thread_id, expected_turn_id, message)
+        send(caller, {:app_server_steer_result, ref, result})
+        receive_loop(port, on_message, timeout_ms, pending_line, tool_executor, auto_approve_requests)
+
       {^port, {:data, {:eol, chunk}}} ->
         complete_line = pending_line <> to_string(chunk)
         handle_incoming(port, on_message, complete_line, timeout_ms, tool_executor, auto_approve_requests)

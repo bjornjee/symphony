@@ -56,6 +56,18 @@ defmodule SymphonyElixir.WorkflowBootstrapTest do
       assert {:ok, %{config: config, prompt: prompt}} = Workflow.load(alpha_workflow_path)
       assert get_in(config, ["tracker", "required_labels"]) == ["codex-ready"]
       assert get_in(config, ["agent", "max_turns"]) == 12
+
+      assert get_in(config, ["team", "repositories", "alpha"]) == %{
+               "hooks" => %{"after_create" => "git clone 'git@github.com:example/alpha.git' ."},
+               "workspace" => %{"root" => "~/Code/bjornjee/worktrees/alpha"}
+             }
+
+      assert get_in(config, ["team", "repositories", "symphony"]) == %{
+               "hooks" => %{"after_create" => "git clone 'git@github.com:bjornjee/symphony.git' ."},
+               "workspace" => %{"root" => "~/Code/bjornjee/worktrees/symphony"}
+             }
+
+      refute get_in(config, ["team", "repositories", "alpha", "repository"])
       assert String.trim(prompt) == "You are working on Linear issue `{{ issue.identifier }}`."
     end)
   end
@@ -86,6 +98,90 @@ defmodule SymphonyElixir.WorkflowBootstrapTest do
       assert {:error, {:bootstrap_outputs_stale, [^output_path]}} =
                WorkflowBootstrap.bootstrap(manifest_path, check: true)
     end)
+  end
+
+  test "rejects malformed manifests and duplicate trusted repository names" do
+    in_temp_dir(fn root ->
+      missing = Path.join(root, "missing.yml")
+      assert {:error, {:bootstrap_manifest_not_found, ^missing, :enoent}} = WorkflowBootstrap.bootstrap(missing)
+
+      manifest_path = Path.join(root, "workflow-manifest.yml")
+      File.write!(manifest_path, "[]")
+      assert {:error, :bootstrap_manifest_not_a_map} = WorkflowBootstrap.bootstrap(manifest_path)
+
+      File.write!(manifest_path, "workflows: [")
+      assert {:error, {:bootstrap_manifest_parse_error, _reason}} = WorkflowBootstrap.bootstrap(manifest_path)
+
+      File.write!(manifest_path, """
+      prompt: Coordinate safely.
+      workflows:
+        - name: duplicate
+          output_path: one/workflow.md
+          repository:
+            url: git@github.com:example/one.git
+        - name: duplicate
+          output_path: two/workflow.md
+          repository:
+            url: git@github.com:example/two.git
+      """)
+
+      assert {:error, {:bootstrap_duplicate_workflow_name, "duplicate"}} =
+               WorkflowBootstrap.bootstrap(manifest_path)
+    end)
+  end
+
+  test "rejects missing and malformed workflow definitions" do
+    in_temp_dir(fn root ->
+      manifest_path = Path.join(root, "workflow-manifest.yml")
+
+      File.write!(manifest_path, "prompt: Prompt\nworkflows: missing\n")
+      assert {:error, :bootstrap_workflows_missing} = WorkflowBootstrap.bootstrap(manifest_path)
+
+      File.write!(manifest_path, "prompt: Prompt\nworkflows:\n  - output_path: workflow.md\n")
+      assert {:error, :bootstrap_workflow_name_missing} = WorkflowBootstrap.bootstrap(manifest_path)
+
+      File.write!(manifest_path, "prompt: Prompt\nworkflows:\n  - invalid\n")
+      assert {:error, :bootstrap_workflow_not_a_map} = WorkflowBootstrap.bootstrap(manifest_path)
+    end)
+  end
+
+  test "renders nested and scalar YAML values without losing their types" do
+    rendered =
+      WorkflowBootstrap.render_workflow(
+        %{
+          "enabled" => true,
+          "disabled" => false,
+          "missing" => nil,
+          "retries" => 3,
+          "matrix" => [
+            %{"name" => "application", "required" => true},
+            %{"name" => "infrastructure", "required" => false}
+          ],
+          "mixed" => ["alpha", 2, true, false, nil],
+          "notes" => "first line\nsecond line"
+        },
+        "Prompt"
+      )
+
+    assert {:ok, config} =
+             YamlElixir.read_from_string(
+               rendered
+               |> String.split("---\n", parts: 3)
+               |> Enum.at(1)
+             )
+
+    assert config == %{
+             "disabled" => false,
+             "enabled" => true,
+             "matrix" => [
+               %{"name" => "application", "required" => true},
+               %{"name" => "infrastructure", "required" => false}
+             ],
+             "missing" => nil,
+             "mixed" => ["alpha", 2, true, false, nil],
+             "notes" => "first line\nsecond line\n",
+             "retries" => 3
+           }
   end
 
   defp in_temp_dir(fun) do

@@ -25,6 +25,18 @@ defmodule SymphonyElixir.Codex.DynamicTool do
       }
     }
   }
+  @team_send_tool "team_send"
+  @team_send_kinds ~w(update handoff check blocker)
+  @team_send_input_schema %{
+    "type" => "object",
+    "additionalProperties" => false,
+    "required" => ["recipient", "kind", "message"],
+    "properties" => %{
+      "recipient" => %{"type" => "string", "minLength" => 1},
+      "kind" => %{"type" => "string", "enum" => @team_send_kinds},
+      "message" => %{"type" => "string", "minLength" => 1, "maxLength" => 4_096}
+    }
+  }
 
   @spec execute(String.t() | nil, term(), keyword()) :: map()
   def execute(tool, arguments, opts \\ []) do
@@ -32,25 +44,108 @@ defmodule SymphonyElixir.Codex.DynamicTool do
       @linear_graphql_tool ->
         execute_linear_graphql(arguments, opts)
 
+      @team_send_tool ->
+        execute_team_send(arguments, opts)
+
       other ->
         failure_response(%{
           "error" => %{
             "message" => "Unsupported dynamic tool: #{inspect(other)}.",
-            "supportedTools" => supported_tool_names()
+            "supportedTools" => supported_tool_names(opts)
           }
         })
     end
   end
 
-  @spec tool_specs() :: [map()]
-  def tool_specs do
-    [
+  @spec tool_specs(keyword()) :: [map()]
+  def tool_specs(opts \\ []) do
+    specs = [
       %{
         "name" => @linear_graphql_tool,
         "description" => @linear_graphql_description,
         "inputSchema" => @linear_graphql_input_schema
       }
     ]
+
+    if Keyword.get(opts, :team_send, false) do
+      specs ++
+        [
+          %{
+            "name" => @team_send_tool,
+            "description" => "Send a bounded update, handoff, check, or blocker to another agent in this Team Mode request.",
+            "inputSchema" => @team_send_input_schema
+          }
+        ]
+    else
+      specs
+    end
+  end
+
+  defp execute_team_send(arguments, opts) do
+    callback = Keyword.get(opts, :team_send)
+
+    with {:ok, recipient, kind, message} <- normalize_team_send_arguments(arguments),
+         true <- is_function(callback, 3) || {:error, :team_send_unavailable},
+         {:ok, event} <- callback.(recipient, kind, message) do
+      event_id = Map.get(event, :id) || Map.get(event, "id")
+      dynamic_tool_response(true, encode_payload(%{"eventId" => event_id}))
+    else
+      {:error, reason} -> failure_response(team_send_error_payload(reason))
+    end
+  end
+
+  defp normalize_team_send_arguments(arguments) when is_map(arguments) do
+    recipient = Map.get(arguments, "recipient") || Map.get(arguments, :recipient)
+    kind = Map.get(arguments, "kind") || Map.get(arguments, :kind)
+    message = Map.get(arguments, "message") || Map.get(arguments, :message)
+
+    case {normalize_team_recipient(recipient), normalize_team_kind(kind), normalize_team_message(message)} do
+      {{:ok, recipient}, {:ok, kind}, {:ok, message}} -> {:ok, recipient, kind, message}
+      _invalid -> {:error, :invalid_team_send_arguments}
+    end
+  end
+
+  defp normalize_team_send_arguments(_arguments), do: {:error, :invalid_team_send_arguments}
+
+  defp normalize_team_recipient(recipient) when is_binary(recipient) do
+    case String.trim(recipient) do
+      "" -> :error
+      recipient -> {:ok, recipient}
+    end
+  end
+
+  defp normalize_team_recipient(_recipient), do: :error
+
+  defp normalize_team_kind(kind) when kind in @team_send_kinds, do: {:ok, kind}
+  defp normalize_team_kind(_kind), do: :error
+
+  defp normalize_team_message(message) when is_binary(message) and byte_size(message) <= 4_096 do
+    case String.trim(message) do
+      "" -> :error
+      _content -> {:ok, message}
+    end
+  end
+
+  defp normalize_team_message(_message), do: :error
+
+  defp team_send_error_payload(:invalid_team_send_arguments) do
+    %{"error" => %{"code" => "invalid_team_send_arguments", "message" => "`team_send` arguments are invalid."}}
+  end
+
+  defp team_send_error_payload(:recipient_completed) do
+    %{"error" => %{"code" => "recipient_completed", "message" => "Team message recipient has already completed."}}
+  end
+
+  defp team_send_error_payload(:unknown_recipient) do
+    %{"error" => %{"code" => "unknown_recipient", "message" => "Team message recipient is unknown."}}
+  end
+
+  defp team_send_error_payload(reason) when is_atom(reason) do
+    %{"error" => %{"code" => Atom.to_string(reason), "message" => "Team message was not delivered."}}
+  end
+
+  defp team_send_error_payload(_reason) do
+    %{"error" => %{"code" => "delivery_failed", "message" => "Team message was not delivered."}}
   end
 
   defp execute_linear_graphql(arguments, opts) do
@@ -203,7 +298,7 @@ defmodule SymphonyElixir.Codex.DynamicTool do
     }
   end
 
-  defp supported_tool_names do
-    Enum.map(tool_specs(), & &1["name"])
+  defp supported_tool_names(opts) do
+    Enum.map(tool_specs(team_send: Keyword.has_key?(opts, :team_send)), & &1["name"])
   end
 end

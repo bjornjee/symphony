@@ -573,7 +573,8 @@ defmodule SymphonyElixir.ExtensionsTest do
                "total_tokens" => 12,
                "seconds_running" => 42.5
              },
-             "rate_limits" => %{"primary" => %{"remaining" => 11}}
+             "rate_limits" => %{"primary" => %{"remaining" => 11}},
+             "teams" => []
            }
 
     conn = get(build_conn(), "/api/v1/MT-HTTP")
@@ -1080,9 +1081,48 @@ defmodule SymphonyElixir.ExtensionsTest do
     on_exit(fn -> File.rm(audit_events_path) end)
 
     snapshot =
-      update_in(static_snapshot(), [:running, Access.at(0)], fn running ->
+      static_snapshot()
+      |> update_in([:running, Access.at(0)], fn running ->
         %{running | audit_events_path: audit_events_path}
       end)
+      |> Map.put(:teams, [
+        %{
+          request_id: "PIN-42",
+          issue_id: "issue-team",
+          identifier: "PIN-42",
+          agents: %{
+            "coordinator" => %{
+              agent_id: "coordinator",
+              role: "coordinator",
+              repository: nil,
+              status: "waiting",
+              thread_id: "thread-coordinator",
+              latest_session_id: "session-coordinator",
+              workspace: "/workspaces/teams/PIN-42",
+              pr_url: nil,
+              latest_event: nil
+            },
+            "repo:application" => %{
+              agent_id: "repo:application",
+              role: "implementer",
+              repository: "application",
+              status: "completed",
+              thread_id: "thread-application",
+              latest_session_id: "session-application",
+              workspace: "/workspaces/application/PIN-42",
+              pr_url: "https://github.com/example/application/pull/42",
+              latest_event: %{
+                id: 1,
+                sender: "repo:application",
+                recipient: "coordinator",
+                kind: "handoff",
+                message: "Application PR is ready."
+              }
+            }
+          },
+          events: []
+        }
+      ])
 
     {:ok, orchestrator_pid} =
       StaticOrchestrator.start_link(
@@ -1109,6 +1149,12 @@ defmodule SymphonyElixir.ExtensionsTest do
     assert html =~ ~s(aria-label="Issue MT-HTTP")
     assert html =~ "rendered"
     assert html =~ "turn blocked: waiting for user input"
+    assert html =~ "Teams"
+    assert html =~ "PIN-42"
+    assert html =~ "repo:application"
+    assert html =~ "thread-application"
+    assert html =~ "Application PR is ready."
+    assert html =~ ~s(href="https://github.com/example/application/pull/42")
     assert html =~ ~s(id="agent-detail-runtime")
     assert html =~ "<dt>Runtime</dt>"
     refute html =~ ~r/id="agent-detail-runtime"[^>]*>\d+m \d+s/

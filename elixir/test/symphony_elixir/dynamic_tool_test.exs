@@ -22,6 +22,61 @@ defmodule SymphonyElixir.Codex.DynamicToolTest do
     assert description =~ "Linear"
   end
 
+  test "team_send is opt-in and Symphony supplies sender identity through the callback" do
+    assert Enum.map(DynamicTool.tool_specs(team_send: true), & &1["name"]) == [
+             "linear_graphql",
+             "team_send"
+           ]
+
+    test_pid = self()
+
+    response =
+      DynamicTool.execute(
+        "team_send",
+        %{
+          "recipient" => "repo:infrastructure",
+          "kind" => "handoff",
+          "message" => "Configuration is ready."
+        },
+        team_send: fn recipient, kind, message ->
+          send(test_pid, {:team_send, recipient, kind, message})
+          {:ok, %{id: 7}}
+        end
+      )
+
+    assert_received {:team_send, "repo:infrastructure", "handoff", "Configuration is ready."}
+    assert response["success"]
+    assert Jason.decode!(response["output"]) == %{"eventId" => 7}
+  end
+
+  test "team_send validates arguments and returns deterministic routing errors" do
+    oversized = String.duplicate("x", 4_097)
+
+    invalid =
+      DynamicTool.execute("team_send", %{
+        "recipient" => "repo:application",
+        "kind" => "other",
+        "message" => oversized
+      })
+
+    refute invalid["success"]
+    assert Jason.decode!(invalid["output"])["error"]["code"] == "invalid_team_send_arguments"
+
+    completed =
+      DynamicTool.execute(
+        "team_send",
+        %{"recipient" => "repo:application", "kind" => "update", "message" => "late"},
+        team_send: fn _recipient, _kind, _message -> {:error, :recipient_completed} end
+      )
+
+    refute completed["success"]
+
+    assert Jason.decode!(completed["output"])["error"] == %{
+             "code" => "recipient_completed",
+             "message" => "Team message recipient has already completed."
+           }
+  end
+
   test "unsupported tools return a failure payload with the supported tool list" do
     response = DynamicTool.execute("not_a_real_tool", %{})
 

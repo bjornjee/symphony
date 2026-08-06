@@ -7,7 +7,7 @@ defmodule SymphonyElixir.Orchestrator do
   require Logger
   import Bitwise, only: [<<<: 2]
 
-  alias SymphonyElixir.{AgentRunner, Config, RunAudit, StatusDashboard, Tracker, Workspace}
+  alias SymphonyElixir.{AgentRunner, Config, RunAudit, StatusDashboard, TeamRunner, Tracker, Workspace}
   alias SymphonyElixir.Linear.{Issue, TaskContract}
 
   @continuation_retry_delay_ms 1_000
@@ -171,6 +171,38 @@ defmodule SymphonyElixir.Orchestrator do
 
         notify_dashboard()
         {:noreply, %{state | running: Map.put(running, issue_id, updated_running_entry)}}
+    end
+  end
+
+  def handle_info({:team_runtime_info, issue_id, team}, %{running: running} = state)
+      when is_binary(issue_id) and is_map(team) do
+    case Map.get(running, issue_id) do
+      nil ->
+        {:noreply, state}
+
+      running_entry ->
+        notify_dashboard()
+        updated = Map.put(running_entry, :team, team)
+        {:noreply, %{state | running: Map.put(running, issue_id, updated)}}
+    end
+  end
+
+  def handle_info({:team_completion_info, issue_id, summary}, %{running: running} = state)
+      when is_binary(issue_id) and is_map(summary) do
+    case Map.get(running, issue_id) do
+      nil ->
+        {:noreply, state}
+
+      running_entry ->
+        completion_info = %{continuation: :done, issue_active: false, issue_routable: false, team: summary}
+
+        updated =
+          running_entry
+          |> Map.put(:team_completion, summary)
+          |> Map.put(:completion_info, completion_info)
+
+        notify_dashboard()
+        {:noreply, %{state | running: Map.put(running, issue_id, updated)}}
     end
   end
 
@@ -469,6 +501,16 @@ defmodule SymphonyElixir.Orchestrator do
   @spec select_worker_host_for_test(term(), String.t() | nil) :: String.t() | nil | :no_worker_capacity
   def select_worker_host_for_test(%State{} = state, preferred_worker_host) do
     select_worker_host(state, preferred_worker_host)
+  end
+
+  @doc false
+  @spec runner_for_contract_for_test(TaskContract.t()) :: module()
+  def runner_for_contract_for_test(%TaskContract{} = contract), do: runner_module(contract)
+
+  @doc false
+  @spec reservation_fits_for_test(TaskContract.t(), term()) :: boolean()
+  def reservation_fits_for_test(%TaskContract{} = contract, %State{} = state) do
+    reservation_fits?(contract, state)
   end
 
   defp reconcile_running_issue_states([], state, _active_states, _terminal_states), do: state
@@ -939,12 +981,14 @@ defmodule SymphonyElixir.Orchestrator do
   defp running_issue_count_for_state(running, issue_state) when is_map(running) do
     normalized_state = normalize_issue_state(issue_state)
 
-    Enum.count(running, fn
-      {_id, %{issue: %Issue{state: state_name}}} ->
-        normalize_issue_state(state_name) == normalized_state
+    Enum.reduce(running, 0, fn
+      {_id, %{issue: %Issue{state: state_name}} = entry}, total ->
+        if normalize_issue_state(state_name) == normalized_state,
+          do: total + Map.get(entry, :reserved_slots, 1),
+          else: total
 
-      _ ->
-        false
+      _entry, total ->
+        total
     end)
   end
 
@@ -1063,9 +1107,14 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   defp dispatch_validated_contract(state, issue, attempt, preferred_worker_host, claim, dispatch) do
-    case TaskContract.from_issue(issue) do
+    case TaskContract.from_issue(issue, team_repository_registry: Config.team_repository_registry()) do
       {:ok, contract} ->
-        claim_validated_issue(state, issue, contract, attempt, preferred_worker_host, claim, dispatch)
+        if reservation_fits?(contract, state) do
+          claim_validated_issue(state, issue, contract, attempt, preferred_worker_host, claim, dispatch)
+        else
+          Logger.debug("Waiting for scheduler capacity before dispatching #{issue_context(issue)}")
+          state
+        end
 
       {:error, errors} ->
         Logger.warning("Skipping dispatch; invalid task contract for #{issue_context(issue)}: #{Enum.join(errors, "; ")}")
@@ -1106,9 +1155,11 @@ defmodule SymphonyElixir.Orchestrator do
   defp spawn_issue_on_worker_host(%State{} = state, issue, contract, attempt, recipient, worker_host) do
     dispatch_started_at = DateTime.utc_now()
     dispatch_started_timing = RunAudit.now()
+    runner = runner_module(contract)
+    reserved_slots = reserved_slots(contract, state.max_concurrent_agents)
 
     case Task.Supervisor.start_child(SymphonyElixir.TaskSupervisor, fn ->
-           AgentRunner.run(issue, recipient,
+           runner.run(issue, recipient,
              attempt: attempt,
              dispatch_started_timing: dispatch_started_timing,
              worker_host: worker_host,
@@ -1142,6 +1193,8 @@ defmodule SymphonyElixir.Orchestrator do
             codex_last_reported_total_tokens: 0,
             turn_count: 0,
             retry_attempt: normalize_retry_attempt(attempt),
+            reserved_slots: reserved_slots,
+            team: nil,
             started_at: dispatch_started_at
           })
 
@@ -1588,9 +1641,9 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   defp running_worker_host_count(running, worker_host) when is_map(running) and is_binary(worker_host) do
-    Enum.count(running, fn
-      {_issue_id, %{worker_host: ^worker_host}} -> true
-      _ -> false
+    Enum.reduce(running, 0, fn
+      {_issue_id, %{worker_host: ^worker_host} = entry}, total -> total + Map.get(entry, :reserved_slots, 1)
+      _entry, total -> total
     end)
   end
 
@@ -1639,11 +1692,26 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   defp available_slots(%State{} = state) do
+    used_slots = Enum.reduce(state.running, 0, fn {_issue_id, entry}, total -> total + Map.get(entry, :reserved_slots, 1) end)
+
     max(
       (state.max_concurrent_agents || Config.settings!().agent.max_concurrent_agents) -
-        map_size(state.running),
+        used_slots,
       0
     )
+  end
+
+  defp runner_module(%TaskContract{team: %SymphonyElixir.Linear.TeamContract{}}), do: TeamRunner
+  defp runner_module(%TaskContract{}), do: AgentRunner
+
+  defp reserved_slots(%TaskContract{team: %SymphonyElixir.Linear.TeamContract{repositories: repositories}}, max_slots) do
+    min(length(repositories), max_slots || Config.settings!().agent.max_concurrent_agents)
+  end
+
+  defp reserved_slots(%TaskContract{}, _max_slots), do: 1
+
+  defp reservation_fits?(%TaskContract{} = contract, %State{} = state) do
+    reserved_slots(contract, state.max_concurrent_agents) <= available_slots(state)
   end
 
   @spec request_refresh() :: map() | :unavailable
@@ -1706,8 +1774,19 @@ defmodule SymphonyElixir.Orchestrator do
           last_codex_timestamp: metadata.last_codex_timestamp,
           last_codex_message: metadata.last_codex_message,
           last_codex_event: metadata.last_codex_event,
+          team: Map.get(metadata, :team),
           runtime_seconds: running_seconds(metadata.started_at, now)
         }
+      end)
+
+    teams =
+      running
+      |> Enum.flat_map(fn
+        %{team: %{request_id: request_id} = team, issue_id: issue_id, identifier: identifier} ->
+          [Map.merge(team, %{request_id: request_id, issue_id: issue_id, identifier: identifier})]
+
+        _entry ->
+          []
       end)
 
     retrying =
@@ -1753,6 +1832,7 @@ defmodule SymphonyElixir.Orchestrator do
     {:reply,
      %{
        running: running,
+       teams: teams,
        retrying: retrying,
        blocked: blocked,
        codex_totals: state.codex_totals,

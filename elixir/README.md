@@ -29,6 +29,20 @@ This directory contains the current Elixir/OTP implementation of Symphony, based
 During app-server sessions, Symphony also serves a client-side `linear_graphql` tool so that repo
 skills can make raw Linear GraphQL calls.
 
+Issues carrying both `codex-ready` and `codex-team` use explicit Team Mode. The
+final `## Team` YAML section names two to eight trusted workflow entries from
+the bootstrap manifest. Symphony reserves bounded scheduler capacity, runs one
+resumable coordinator between repository waves, and gives every repository an
+isolated workspace, top-level Codex thread, normal proof gates, and its own PR.
+Member planning remains classification-driven: simple work executes directly,
+while planned work blocks before edits on a fresh, read-only, high-effort
+principal-architect review focused on the simplest invariant-preserving design.
+The coordinator and members may exchange bounded request-local events through
+`team_send`; Symphony keeps that chatter out of Linear and updates one Team
+execution comment instead. See
+[`docs/codex-agent-task-contract.md`](../docs/codex-agent-task-contract.md#team-mode)
+for the exact issue shape and rollback procedure.
+
 Before the first agent turn, Symphony resolves runtime capabilities separately from global
 configuration. Computer Use is probed independently and remains usable when its inherited plugin
 responds. Codex Browser is only marked usable when a backend is actually bound to the standalone
@@ -139,6 +153,13 @@ mise exec -- mix workflow.bootstrap --manifest ../workflow-manifest.yml --check
 Each `workflows[].output_path` receives a runnable `workflow.md`. The runtime
 still accepts one workflow file at a time; the manifest is the bootstrap source
 of truth for keeping project-specific workflow files consistent.
+
+Bootstrap also embeds a `team.repositories` registry into every generated
+workflow. Each manifest entry with `repository.url` becomes a trusted workflow
+name whose generated registry contains only the derived workspace and hook
+configuration needed to prepare that checkout. Team tickets may reference those
+names, but cannot override the registry or inject repository setup. A deployment
+needs at least two such manifest entries before it can accept a Team issue.
 
 Minimal example:
 
