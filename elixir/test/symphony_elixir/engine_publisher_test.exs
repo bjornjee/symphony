@@ -56,8 +56,7 @@ defmodule SymphonyElixir.EnginePublisherTest do
       end
     end
 
-    body = "## Why\nNeeded.\n\n## Summary\nChange.\n\n## Test plan\n`mix test test/example_test.exs`"
-    assert {:ok, published} = EnginePublisher.publish(ctx.workspace, ctx.plan, "feat: change readme", body, command_runner: runner)
+    assert {:ok, published} = EnginePublisher.publish(ctx.workspace, ctx.plan, "feat: change readme", body(), command_runner: runner)
     assert published["head_sha"] == ctx.head
     assert_receive {:command, "git", ["-C", _, "push", "origin", "feature/sym-1-test"]}
   end
@@ -108,8 +107,10 @@ defmodule SymphonyElixir.EnginePublisherTest do
   end
 
   test "rejects tool self-attribution", ctx do
-    body = "## Why\nGenerated with Codex\n## Summary\nx\n## Test plan\nmix test test/example_test.exs"
-    assert {:error, :pull_request_self_attribution} = EnginePublisher.publish(ctx.workspace, ctx.plan, "feat: change readme", body)
+    attributed_body = String.replace(body(), "Needed.", "Generated with Codex")
+
+    assert {:error, :pull_request_self_attribution} =
+             EnginePublisher.publish(ctx.workspace, ctx.plan, "feat: change readme", attributed_body)
   end
 
   test "rejects an incomplete pull request body", ctx do
@@ -118,8 +119,15 @@ defmodule SymphonyElixir.EnginePublisherTest do
                ctx.workspace,
                ctx.plan,
                "feat: change readme",
-               "## Why\n\n## Summary\nx\n## Test plan\nmix test test/example_test.exs"
+               String.replace(body(), "#### Alternatives\n\n- None considered.\n\n", "")
              )
+  end
+
+  test "rejects the legacy body that repository CI cannot validate", ctx do
+    legacy_body = "## Why\nNeeded.\n\n## Summary\nChange.\n\n## Test plan\n`mix test test/example_test.exs`"
+
+    assert {:error, :invalid_pull_request_body} =
+             EnginePublisher.publish(ctx.workspace, ctx.plan, "feat: change readme", legacy_body)
   end
 
   test "rejects a test plan that omits an approved proof", ctx do
@@ -128,7 +136,7 @@ defmodule SymphonyElixir.EnginePublisherTest do
                ctx.workspace,
                ctx.plan,
                "feat: change readme",
-               "## Why\nx\n## Summary\nmix test test/example_test.exs\n## Test plan\nnot the approved proof"
+               String.replace(body(), "mix test test/example_test.exs", "not the approved proof")
              )
   end
 
@@ -227,6 +235,50 @@ defmodule SymphonyElixir.EnginePublisherTest do
              )
   end
 
+  test "runs GitHub API commands on the controller for a remote workspace", ctx do
+    parent = self()
+
+    remote_runner = fn workspace, host, executable, args ->
+      send(parent, {:remote_command, host, executable, args})
+
+      case {executable, args} do
+        {"git", ["-C", ^workspace, "push", "origin", "feature/sym-1-test"]} ->
+          {:ok, {"", 0}}
+
+        {"git", ["-C", ^workspace | git_args]} ->
+          {:ok, System.cmd("git", ["-C", workspace | git_args], stderr_to_stdout: true)}
+      end
+    end
+
+    controller_runner = fn _workspace, host, "gh", args ->
+      send(parent, {:controller_command, host, "gh", args})
+
+      case args do
+        ["pr", "list" | _] -> {:ok, {"[]", 0}}
+        ["pr", "create" | _] -> {:ok, {"https://github.com/acme/repo/pull/1\n", 0}}
+        ["pr", "view" | _] -> {:ok, {Jason.encode!(readback(ctx)), 0}}
+      end
+    end
+
+    assert {:ok, _published} =
+             EnginePublisher.publish(
+               ctx.workspace,
+               ctx.plan,
+               "feat: change readme",
+               body(),
+               worker_host: "worker-a",
+               command_runner: remote_runner,
+               github_command_runner: controller_runner,
+               repository_capture: fn workspace, _worker_host ->
+                 SymphonyElixir.RepositoryFingerprint.capture(workspace, nil)
+               end
+             )
+
+    assert_receive {:remote_command, "worker-a", "git", ["-C", _, "push", "origin", _]}
+    assert_receive {:controller_command, nil, "gh", ["pr", "create" | _]}
+    refute_receive {:remote_command, _, "gh", _}
+  end
+
   test "requires at least one task commit", ctx do
     base = ctx.plan["repository"]["base_sha"]
     git(ctx.workspace, ["switch", "-q", "main"])
@@ -269,7 +321,27 @@ defmodule SymphonyElixir.EnginePublisherTest do
   end
 
   defp body do
-    "## Why\nNeeded.\n\n## Summary\nChange.\n\n## Test plan\n`mix test test/example_test.exs`"
+    """
+    #### Context
+
+    Needed.
+
+    #### TL;DR
+
+    *Change the readme.*
+
+    #### Summary
+
+    - Change the readme.
+
+    #### Alternatives
+
+    - None considered.
+
+    #### Test Plan
+
+    - [x] `mix test test/example_test.exs`
+    """
   end
 
   defp readback(ctx) do

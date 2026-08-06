@@ -46,6 +46,74 @@ defmodule SymphonyElixir.CoreTest do
     assert AgentRunner.goal_status_for_result_for_test({:error, :turn_timeout}) == "active"
   end
 
+  test "a native blocked goal stops missing-handoff continuation" do
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-native-goal-blocked-#{System.unique_integer([:positive])}"
+      )
+
+    try do
+      issue = audited_agent_fixture!(test_root, "MT-GOAL-BLOCKED")
+      codex_binary = Path.join(test_root, "fake-codex")
+      trace_file = Path.join(test_root, "turns.trace")
+
+      File.write!(codex_binary, """
+      #!/bin/sh
+      while IFS= read -r line; do
+        case "$line" in
+          *'"method":"initialize"'*)
+            printf '%s\n' '{"id":1,"result":{}}'
+            ;;
+          *'"method":"thread/start"'*)
+            printf '%s\n' '{"id":2,"result":{"thread":{"id":"thread-goal-blocked"},"instructionSources":[]}}'
+            ;;
+          *'"method":"thread/goal/set"'*)
+            printf '%s\n' '{"id":4,"result":{"goal":{"status":"active"}}}'
+            ;;
+          *'"method":"turn/start"'*)
+            printf '%s\n' turn >> "#{trace_file}"
+            printf '%s\n' '{"id":3,"result":{"turn":{"id":"turn-goal-blocked"}}}'
+            printf '%s\n' '{"method":"turn/plan/updated","params":{"plan":[{"step":"Implement and prove the task","status":"completed"}]}}'
+            printf '%s\n' '{"method":"thread/goal/updated","params":{"goal":{"status":"blocked"}}}'
+            printf '%s\n' '{"method":"turn/completed"}'
+            ;;
+        esac
+      done
+      """)
+
+      test_pid = self()
+
+      blocker = fn blocked_issue, _key_parts, _body, _opts ->
+        send(test_pid, {:native_goal_blocker, blocked_issue.id})
+        {:ok, "native-goal-blocked"}
+      end
+
+      missing_evidence = fn _workspace, _issue, _contract, _proofs, _opts ->
+        {:error, :completion_evidence_missing}
+      end
+
+      opts =
+        audited_agent_opts(issue,
+          max_turns: 3,
+          completion_evidence_validator: missing_evidence,
+          human_review_publisher: blocker
+        )
+
+      assert :ok = AgentRunner.run(issue, self(), opts)
+      assert_receive {:native_goal_blocker, issue_id}
+      assert issue_id == issue.id
+
+      assert_receive {:worker_completion_info, ^issue_id, completion_info}
+      assert completion_info.outcome == :human_review_required
+      assert completion_info.blocker_reason == :native_goal_blocked
+
+      assert File.read!(trace_file) |> String.split("\n", trim: true) == ["turn"]
+    after
+      File.rm_rf(test_root)
+    end
+  end
+
   test "config defaults and validation checks" do
     write_workflow_file!(Workflow.workflow_file_path(),
       tracker_api_token: nil,
@@ -789,6 +857,23 @@ defmodule SymphonyElixir.CoreTest do
              AgentRunner.continue_with_issue_for_test(issue, fetcher)
   end
 
+  test "agent runner can use a Team-local routing predicate for synthetic members" do
+    write_workflow_file!(Workflow.workflow_file_path(), tracker_required_labels: ["symphony", "codex-team"])
+
+    issue = %Issue{
+      id: "team-member-issue",
+      identifier: "PIN-33-application",
+      title: "Implement Team member scope",
+      state: "In Progress",
+      labels: ["codex-ready"]
+    }
+
+    fetcher = fn ["team-member-issue"] -> {:ok, [issue]} end
+
+    assert {:continue, ^issue} =
+             AgentRunner.continue_with_issue_for_test(issue, fetcher, fn _issue -> true end)
+  end
+
   test "normal worker exit schedules active-state continuation retry" do
     issue_id = "issue-resume"
     ref = make_ref()
@@ -1275,6 +1360,28 @@ defmodule SymphonyElixir.CoreTest do
     assert Orchestrator.select_worker_host_for_test(state, "worker-a") == "worker-a"
   end
 
+  test "select_worker_hosts_for_test reserves Team slots across per-host capacity" do
+    write_workflow_file!(Workflow.workflow_file_path(),
+      worker_ssh_hosts: ["worker-a", "worker-b"],
+      worker_max_concurrent_agents_per_host: 1
+    )
+
+    state = %Orchestrator.State{running: %{}}
+
+    assert Orchestrator.select_worker_hosts_for_test(state, "worker-a", 2) == [
+             "worker-a",
+             "worker-b"
+           ]
+
+    reserved = %Orchestrator.State{
+      running: %{
+        "team" => %{worker_host: "worker-a", worker_hosts: ["worker-a", "worker-b"], reserved_slots: 2}
+      }
+    }
+
+    assert Orchestrator.select_worker_host_for_test(reserved, nil) == :no_worker_capacity
+  end
+
   defp assert_due_after(due_at_ms, start_ms, min_delay_ms, max_delay_ms) do
     delay_ms = due_at_ms - start_ms
 
@@ -1353,6 +1460,9 @@ defmodule SymphonyElixir.CoreTest do
     assert prompt =~ "run_plan_proof"
     assert prompt =~ "request_implementation_review"
     assert prompt =~ "publish_pull_request"
+    assert prompt =~ "#### Context"
+    assert prompt =~ "#### Test Plan"
+    refute prompt =~ "`## Why`"
     refute prompt =~ "run_audit_command"
 
     for criterion <- contract.acceptance_criteria do
@@ -1678,6 +1788,37 @@ defmodule SymphonyElixir.CoreTest do
     refute AgentRunner.implementation_command_approval_for_test(
              workspace,
              put_in(safe_payload, ["params", "additionalPermissions"], %{"network" => %{"enabled" => true}})
+           )
+  end
+
+  test "implementation command approval permits bounded staging and commit chains for planned paths" do
+    workspace = Path.join(System.tmp_dir!(), "PIN-33")
+    execution_plan = %{"candidate" => %{"affected_paths" => ["docs/codex-agent-task-contract.md"]}}
+
+    payload = %{
+      "params" => %{
+        "command" =>
+          "/bin/bash -lc 'git add docs/codex-agent-task-contract.md && git diff --staged --check && " <>
+            "git diff --staged --name-only && git commit -F /tmp/pin-33-commit-message.txt'",
+        "cwd" => workspace,
+        "additionalPermissions" => nil,
+        "networkApprovalContext" => nil,
+        "proposedNetworkPolicyAmendments" => []
+      }
+    }
+
+    assert AgentRunner.implementation_command_approval_for_test(workspace, execution_plan, payload)
+
+    refute AgentRunner.implementation_command_approval_for_test(
+             workspace,
+             execution_plan,
+             put_in(payload, ["params", "command"], "git add README.md && git commit -F /tmp/message.txt")
+           )
+
+    refute AgentRunner.implementation_command_approval_for_test(
+             workspace,
+             execution_plan,
+             put_in(payload, ["params", "command"], "git add docs/codex-agent-task-contract.md && git push")
            )
   end
 

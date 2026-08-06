@@ -4,7 +4,7 @@ defmodule SymphonyElixir.TeamRunner do
   """
 
   alias SymphonyElixir.AgentRunner
-  alias SymphonyElixir.Codex.{AppServer, DynamicTool, ThreadIdentity}
+  alias SymphonyElixir.Codex.{AppServer, DynamicTool}
   alias SymphonyElixir.Config
   alias SymphonyElixir.Linear.{Issue, TaskContract, TeamContract}
   alias SymphonyElixir.TeamBus
@@ -40,8 +40,15 @@ defmodule SymphonyElixir.TeamRunner do
         raise RuntimeError, "TeamRunner requires codex-team and a valid ## Team contract"
 
       {:error, reason} ->
-        raise RuntimeError, "Team run failed for #{issue.identifier}: #{inspect(reason)}"
+        handle_run_failure(issue, update_recipient, reason)
     end
+  rescue
+    error ->
+      if is_pid(update_recipient) do
+        handle_run_failure(issue, update_recipient, {:team_runner_exception, Exception.message(error)})
+      else
+        reraise error, __STACKTRACE__
+      end
   end
 
   @spec run_with_contract(Issue.t(), TaskContract.t(), keyword()) :: {:ok, map()} | {:error, term()}
@@ -105,7 +112,7 @@ defmodule SymphonyElixir.TeamRunner do
   defp initial_state(team, bus) do
     %{
       bus: bus,
-      members: %{},
+      members: Map.new(team.repositories, &{&1.workflow, %{status: "pending"}}),
       started: MapSet.new(),
       retries: %{},
       coordinator_turn: 0,
@@ -133,34 +140,41 @@ defmodule SymphonyElixir.TeamRunner do
   defp run_wave(wave, issue, contract, state, member_runner, opts) do
     repositories = Map.new(contract.team.repositories, &{&1.workflow, &1})
     max_concurrency = min(length(wave), Keyword.get(opts, :max_concurrent_agents, Config.settings!().agent.max_concurrent_agents))
+    worker_slots = member_worker_slots(opts, max(max_concurrency, 1))
 
     task_results =
       wave
-      |> Task.async_stream(
-        fn workflow ->
-          repository = Map.fetch!(repositories, workflow)
-          member_issue = synthetic_member_issue(issue, contract, repository)
+      |> Enum.chunk_every(length(worker_slots))
+      |> Enum.flat_map(fn workflows ->
+        workflows
+        |> Enum.zip(worker_slots)
+        |> Task.async_stream(
+          fn {workflow, worker_host} ->
+            repository = Map.fetch!(repositories, workflow)
+            member_issue = synthetic_member_issue(issue, contract, repository)
 
-          member_opts =
-            opts
-            |> Keyword.put(:bus, state.bus)
-            |> Keyword.put(:team_parent_issue, issue)
-            |> Keyword.put(:planning_reviewer_role, @team_planning_reviewer_role)
-            |> Keyword.put(:planning_reviewer_effort, "high")
+            member_opts =
+              opts
+              |> Keyword.put(:worker_host, worker_host)
+              |> Keyword.put(:bus, state.bus)
+              |> Keyword.put(:team_parent_issue, issue)
+              |> Keyword.put(:planning_reviewer_role, @team_planning_reviewer_role)
+              |> Keyword.put(:planning_reviewer_effort, "high")
 
-          try do
-            member_runner.(repository, member_issue, member_opts)
-          catch
-            kind, reason -> {:error, {:member_exit, kind, reason}}
-          end
-        end,
-        max_concurrency: max(max_concurrency, 1),
-        ordered: true,
-        timeout: :infinity
-      )
-      |> Enum.map(fn
-        {:ok, result} -> result
-        {:exit, reason} -> {:error, {:member_exit, reason}}
+            try do
+              member_runner.(repository, member_issue, member_opts)
+            catch
+              kind, reason -> {:error, {:member_exit, kind, reason}}
+            end
+          end,
+          max_concurrency: length(workflows),
+          ordered: true,
+          timeout: :infinity
+        )
+        |> Enum.map(fn
+          {:ok, result} -> result
+          {:exit, reason} -> {:error, {:member_exit, reason}}
+        end)
       end)
 
     state =
@@ -172,6 +186,13 @@ defmodule SymphonyElixir.TeamRunner do
 
     notify_update(issue, state.bus, opts)
     {:ok, %{state | started: Enum.reduce(wave, state.started, &MapSet.put(&2, &1))}}
+  end
+
+  defp member_worker_slots(opts, max_concurrency) do
+    case Keyword.get(opts, :team_worker_hosts) do
+      hosts when is_list(hosts) and hosts != [] -> Enum.take(hosts, max_concurrency)
+      _other -> List.duplicate(Keyword.get(opts, :worker_host), max_concurrency)
+    end
   end
 
   defp record_member_result(state, workflow, {:ok, completion}) when is_map(completion) do
@@ -188,7 +209,7 @@ defmodule SymphonyElixir.TeamRunner do
 
   defp record_member_result(state, workflow, {:error, reason}) do
     attempts = Map.get(state.retries, workflow, 0) + 1
-    member = %{status: "blocked", reason: reason, attempts: attempts}
+    member = %{status: "blocked", reason: public_failure_reason(reason), attempts: attempts}
     TeamBus.mark_status(state.bus, "repo:" <> workflow, "blocked")
 
     %{
@@ -311,6 +332,10 @@ defmodule SymphonyElixir.TeamRunner do
     %{
       request_id: team.request_id,
       repositories: Enum.map(team.repositories, & &1.workflow),
+      implementors:
+        Enum.map(team.repositories, fn repository ->
+          Map.take(repository, [:workflow, :owned_paths, :change, :acceptance, :verification])
+        end),
       members: state.members,
       validation_goal: team.validation_goal,
       invariants: team.invariants,
@@ -335,6 +360,7 @@ defmodule SymphonyElixir.TeamRunner do
 
   @spec synthetic_member_issue(Issue.t(), TaskContract.t(), TeamContract.Repository.t()) :: Issue.t()
   def synthetic_member_issue(issue, contract, repository) do
+    owned_paths = Enum.map_join(repository.owned_paths, "\n", &"- #{&1}")
     acceptance = Enum.map_join(repository.acceptance, "\n", &"- [ ] #{&1}")
     verification = Enum.map_join(repository.verification, "\n", &"- #{&1}")
     invariants = Enum.map_join(contract.team.invariants, "\n", &"- #{&1}")
@@ -353,10 +379,10 @@ defmodule SymphonyElixir.TeamRunner do
 
     ## Scope
     In:
-    - #{repository.workflow} repository changes required by this Team entry
+    #{owned_paths}
 
     Out:
-    - Changes owned by other Team repositories
+    - All other repository paths
 
     ## Acceptance Criteria
     #{acceptance}
@@ -374,6 +400,7 @@ defmodule SymphonyElixir.TeamRunner do
     %{
       issue
       | id: "#{issue.id}:repo:#{repository.workflow}",
+        identifier: "#{issue.identifier}-#{repository.workflow}",
         title: "#{issue.title} [#{repository.workflow}]",
         description: description,
         labels: ["codex-ready"]
@@ -384,6 +411,7 @@ defmodule SymphonyElixir.TeamRunner do
     bus = Keyword.fetch!(opts, :bus)
     parent_issue = Keyword.fetch!(opts, :team_parent_issue)
     parent = self()
+    runner = Keyword.get(opts, :agent_runner, &AgentRunner.run/3)
     {:ok, member_contract} = TaskContract.from_issue(member_issue)
 
     team_send = fn recipient, kind, message ->
@@ -393,6 +421,8 @@ defmodule SymphonyElixir.TeamRunner do
     end
 
     observer = fn session, message ->
+      notify_activity(parent_issue, repository.agent_id, message, opts)
+
       case message do
         %{event: :session_started, turn_id: turn_id, session_id: session_id} ->
           TeamBus.register(bus, repository.agent_id, %{
@@ -419,8 +449,13 @@ defmodule SymphonyElixir.TeamRunner do
        }}
     end
 
+    human_review_publisher = fn _issue, _key_parts, _body, _publisher_opts ->
+      {:ok, "team-member-blocker"}
+    end
+
     runner_opts =
       opts
+      |> Keyword.delete(:publisher)
       |> Keyword.put(:task_contract, member_contract)
       |> Keyword.put(:reasoning_effort, "high")
       |> Keyword.put(:thread_name, "[#{member_issue.identifier} · #{repository.workflow}] implementer")
@@ -436,14 +471,23 @@ defmodule SymphonyElixir.TeamRunner do
       |> Keyword.put(:after_run_hook_runner, fn workspace, issue, worker_host ->
         Workspace.run_repository_after_run_hook(workspace, issue, repository.trusted_config, worker_host)
       end)
+      |> Keyword.put(:issue_fetcher, fn _ids -> {:ok, [member_issue]} end)
       |> Keyword.put(:issue_state_fetcher, fn _ids -> {:ok, [member_issue]} end)
+      |> Keyword.put(:issue_routable_predicate, fn _issue -> true end)
+      |> Keyword.put(:review_exhausted_handler, fn _issue, _contract, _candidate, _review ->
+        {:error, :plan_review_exhausted}
+      end)
+      |> Keyword.put(:human_review_publisher, human_review_publisher)
       |> Keyword.put(:handoff_publisher, handoff_publisher)
 
     try do
-      :ok = AgentRunner.run(member_issue, self(), runner_opts)
+      :ok = runner.(member_issue, self(), runner_opts)
       member_issue_id = member_issue.id
 
       receive do
+        {:worker_completion_info, ^member_issue_id, %{outcome: :human_review_required} = completion} ->
+          {:error, {:member_human_review_required, completion}}
+
         {:worker_completion_info, ^member_issue_id, completion} ->
           {:ok, Map.put(completion, :proof_fresh, true)}
       after
@@ -455,10 +499,11 @@ defmodule SymphonyElixir.TeamRunner do
   end
 
   defp default_coordinator_runner(issue, contract, bus, opts) do
-    fn mode, context -> run_coordinator_turn(issue, contract, bus, mode, context, opts) end
+    thread_key = {:team_coordinator_thread, make_ref()}
+    fn mode, context -> run_coordinator_turn(issue, contract, bus, mode, context, thread_key, opts) end
   end
 
-  defp run_coordinator_turn(issue, contract, bus, mode, context, opts) do
+  defp run_coordinator_turn(issue, contract, bus, mode, context, thread_key, opts) do
     worker_host = Keyword.get(opts, :worker_host)
     coordinator_issue = %{issue | identifier: "#{issue.identifier}-team-coordinator"}
 
@@ -468,10 +513,9 @@ defmodule SymphonyElixir.TeamRunner do
     }
 
     with {:ok, workspace} <- Workspace.create_for_repository(coordinator_issue, trusted_config, worker_host),
-         {:ok, session} <- start_coordinator_session(workspace, worker_host) do
+         {:ok, session} <- start_coordinator_session(workspace, worker_host, mode, thread_key) do
       try do
         with :ok <- AppServer.set_thread_name(session, "[#{issue.identifier} · team] coordinator"),
-             {:ok, _thread_id} <- ThreadIdentity.pin(workspace, session.thread_id, worker_host),
              :ok <- AppServer.set_goal(session, "Coordinate Team Mode request #{issue.identifier} without expanding its approved contract."),
              artifact_path <- coordinator_artifact_path(workspace, mode, context),
              prompt <- coordinator_prompt(mode, context, contract, artifact_path),
@@ -499,30 +543,49 @@ defmodule SymphonyElixir.TeamRunner do
     end
   end
 
-  defp start_coordinator_session(workspace, worker_host) do
+  defp start_coordinator_session(workspace, worker_host, :plan, thread_key) do
     opts = [worker_host: worker_host, dynamic_tools: team_send_tool_specs()]
 
-    case ThreadIdentity.read(workspace, worker_host) do
-      :missing -> AppServer.start_session(workspace, opts)
-      {:ok, thread_id} -> AppServer.start_session(workspace, Keyword.put(opts, :thread_id, thread_id))
-      {:error, reason} -> {:error, reason}
+    case AppServer.start_session(workspace, opts) do
+      {:ok, session} = result ->
+        Process.put(thread_key, session.thread_id)
+        result
+
+      {:error, _reason} = error ->
+        error
+    end
+  end
+
+  defp start_coordinator_session(workspace, worker_host, _mode, thread_key) do
+    opts = [worker_host: worker_host, dynamic_tools: team_send_tool_specs()]
+
+    case Process.get(thread_key) do
+      thread_id when is_binary(thread_id) ->
+        AppServer.start_session(workspace, Keyword.put(opts, :thread_id, thread_id))
+
+      _missing ->
+        {:error, :coordinator_thread_missing}
     end
   end
 
   defp coordinator_message_observer(issue, bus, session, opts) do
-    fn
-      %{event: :session_started, turn_id: turn_id, session_id: session_id} ->
-        TeamBus.register(bus, @coordinator_id, %{
-          thread_id: session.thread_id,
-          latest_session_id: session_id,
-          workspace: session.workspace,
-          steer: fn text -> AppServer.steer_turn(session, turn_id, text) end
-        })
+    fn message ->
+      notify_activity(issue, @coordinator_id, message, opts)
 
-        notify_update(issue, bus, opts)
+      case message do
+        %{event: :session_started, turn_id: turn_id, session_id: session_id} ->
+          TeamBus.register(bus, @coordinator_id, %{
+            thread_id: session.thread_id,
+            latest_session_id: session_id,
+            workspace: session.workspace,
+            steer: fn text -> AppServer.steer_turn(session, turn_id, text) end
+          })
 
-      _message ->
-        :ok
+          notify_update(issue, bus, opts)
+
+        _message ->
+          :ok
+      end
     end
   end
 
@@ -539,14 +602,28 @@ defmodule SymphonyElixir.TeamRunner do
   defp coordinator_prompt(mode, context, contract, artifact_path) do
     action =
       case mode do
-        :final -> "Record a global verdict as JSON: {\"verdict\":\"pass|fail\",\"summary\":\"...\"}."
-        _ -> "Record the execution decision as JSON. Use a waves array, or {\"action\":\"retry|human\",...}."
+        :plan ->
+          """
+          The declared repositories are the implementors. A pending member has not started yet.
+          Record a plan as JSON: {"waves":[["workflow-a","workflow-b"],...]}. Include every declared repository exactly once.
+          If sequencing truly requires operator input, record {"action":"human","reason":"..."}.
+          """
+
+        :after_wave ->
+          """
+          Record one JSON decision: {"action":"continue"}, {"action":"revise","waves":[...]},
+          {"action":"retry","repository":"..."}, or {"action":"human","reason":"..."}.
+          """
+
+        :final ->
+          "Record a global verdict as JSON: {\"verdict\":\"pass|fail\",\"summary\":\"...\"}."
       end
 
     """
     You are the coordinator for Team Mode request #{contract.team.request_id}.
     You may sequence only the declared repositories and may not change scope or invariants.
     Repositories: #{Jason.encode!(Enum.map(contract.team.repositories, & &1.workflow))}
+    Sealed implementor assignments: #{Jason.encode!(context.implementors)}
     Validation goal: #{contract.team.validation_goal}
     Invariants: #{Jason.encode!(contract.team.invariants)}
     Current bounded state: #{Jason.encode!(context)}
@@ -569,6 +646,11 @@ defmodule SymphonyElixir.TeamRunner do
 
   defp normalize_coordinator_result(:plan, waves) when is_list(waves), do: {:ok, waves}
   defp normalize_coordinator_result(:plan, %{"waves" => waves}) when is_list(waves), do: {:ok, waves}
+
+  defp normalize_coordinator_result(:plan, %{"action" => "human", "reason" => reason})
+       when is_binary(reason),
+       do: {:error, {:human_input_required, reason}}
+
   defp normalize_coordinator_result(:final, payload) when is_map(payload), do: {:ok, payload}
   defp normalize_coordinator_result(:after_wave, %{"action" => "continue"}), do: {:ok, :continue}
 
@@ -593,9 +675,36 @@ defmodule SymphonyElixir.TeamRunner do
     end
   end
 
+  defp notify_activity(issue, agent_id, message, opts) do
+    case Keyword.get(opts, :update_recipient) do
+      recipient when is_pid(recipient) ->
+        send(
+          recipient,
+          {:team_activity, issue.id,
+           %{
+             agent_id: agent_id,
+             event: Map.get(message, :event, :notification),
+             timestamp: Map.get(message, :timestamp, DateTime.utc_now())
+           }}
+        )
+
+      _other ->
+        :ok
+    end
+  end
+
   defp send_team_completion(recipient, issue, summary) when is_pid(recipient) do
     send(recipient, {:team_completion_info, issue.id, summary})
   end
 
   defp send_team_completion(_recipient, _issue, _summary), do: :ok
+
+  defp handle_run_failure(issue, recipient, reason) when is_pid(recipient) do
+    send(recipient, {:team_blocked_info, issue.id, %{reason: public_failure_reason(reason)}})
+    :ok
+  end
+
+  defp handle_run_failure(issue, _recipient, reason) do
+    raise RuntimeError, "Team run failed for #{issue.identifier}: #{inspect(reason)}"
+  end
 end

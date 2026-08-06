@@ -3,6 +3,8 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
+    # Codex workspace-write command proofs create nested user and mount namespaces.
+    privileged: true
     ports:
       - "${SYMPHONY_LIVE_DOCKER_WORKER_1_PORT}:22"
     volumes:
@@ -13,6 +15,7 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
+    privileged: true
     ports:
       - "${SYMPHONY_LIVE_DOCKER_WORKER_2_PORT}:22"
     volumes:

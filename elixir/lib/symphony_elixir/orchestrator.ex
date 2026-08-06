@@ -187,6 +187,35 @@ defmodule SymphonyElixir.Orchestrator do
     end
   end
 
+  def handle_info(
+        {:team_activity, issue_id, %{agent_id: agent_id, event: event, timestamp: %DateTime{} = timestamp}},
+        %{running: running} = state
+      )
+      when is_binary(issue_id) and is_binary(agent_id) do
+    case Map.get(running, issue_id) do
+      nil ->
+        {:noreply, state}
+
+      running_entry ->
+        updated =
+          Map.merge(running_entry, %{
+            last_codex_timestamp: timestamp,
+            last_codex_event: event,
+            last_codex_message: %{
+              event: :team_activity,
+              agent_id: agent_id,
+              member_event: event,
+              timestamp: timestamp
+            }
+          })
+
+        notify_dashboard()
+        {:noreply, %{state | running: Map.put(running, issue_id, updated)}}
+    end
+  end
+
+  def handle_info({:team_activity, _issue_id, _activity}, state), do: {:noreply, state}
+
   def handle_info({:team_completion_info, issue_id, summary}, %{running: running} = state)
       when is_binary(issue_id) and is_map(summary) do
     case Map.get(running, issue_id) do
@@ -200,6 +229,25 @@ defmodule SymphonyElixir.Orchestrator do
           running_entry
           |> Map.put(:team_completion, summary)
           |> Map.put(:completion_info, completion_info)
+
+        notify_dashboard()
+        {:noreply, %{state | running: Map.put(running, issue_id, updated)}}
+    end
+  end
+
+  def handle_info({:team_blocked_info, issue_id, %{reason: reason} = details}, %{running: running} = state)
+      when is_binary(issue_id) and is_binary(reason) do
+    case Map.get(running, issue_id) do
+      nil ->
+        {:noreply, state}
+
+      running_entry ->
+        completion = %{outcome: :needs_input, reason: reason}
+
+        updated =
+          running_entry
+          |> Map.put(:team_blocked, details)
+          |> Map.put(:completion, completion)
 
         notify_dashboard()
         {:noreply, %{state | running: Map.put(running, issue_id, updated)}}
@@ -501,6 +549,14 @@ defmodule SymphonyElixir.Orchestrator do
   @spec select_worker_host_for_test(term(), String.t() | nil) :: String.t() | nil | :no_worker_capacity
   def select_worker_host_for_test(%State{} = state, preferred_worker_host) do
     select_worker_host(state, preferred_worker_host)
+  end
+
+  @doc false
+  @spec select_worker_hosts_for_test(term(), String.t() | nil, pos_integer()) ::
+          [String.t() | nil] | :no_worker_capacity
+  def select_worker_hosts_for_test(%State{} = state, preferred_worker_host, slots)
+      when is_integer(slots) and slots > 0 do
+    select_worker_hosts(state, preferred_worker_host, slots)
   end
 
   @doc false
@@ -815,7 +871,8 @@ defmodule SymphonyElixir.Orchestrator do
   defp normalize_input_required_outcome(_outcome), do: nil
 
   defp blocker_error(running_entry, fallback) when is_map(running_entry) do
-    codex_event_blocker_error(Map.get(running_entry, :last_codex_event)) ||
+    team_blocker_error(Map.get(running_entry, :team_blocked)) ||
+      codex_event_blocker_error(Map.get(running_entry, :last_codex_event)) ||
       completion_blocker_error(Map.get(running_entry, :completion)) ||
       codex_message_blocker_error(Map.get(running_entry, :last_codex_message)) ||
       fallback
@@ -823,15 +880,23 @@ defmodule SymphonyElixir.Orchestrator do
 
   defp blocker_error(_running_entry, fallback), do: fallback
 
+  defp team_blocker_error(%{reason: reason}) when is_binary(reason) and reason != "", do: reason
+  defp team_blocker_error(_team_blocked), do: nil
+
   defp codex_event_blocker_error(:turn_input_required), do: "codex turn requires operator input"
   defp codex_event_blocker_error(:approval_required), do: "codex turn requires approval"
   defp codex_event_blocker_error(_event), do: nil
 
   defp completion_blocker_error(completion) do
     case input_required_completion_outcome(completion) do
-      outcome when outcome in [:input_required, :needs_input] -> "codex turn requires operator input"
-      :approval_required -> "codex turn requires approval"
-      nil -> nil
+      outcome when outcome in [:input_required, :needs_input] ->
+        "codex turn requires operator input"
+
+      :approval_required ->
+        "codex turn requires approval"
+
+      nil ->
+        nil
     end
   end
 
@@ -1141,28 +1206,31 @@ defmodule SymphonyElixir.Orchestrator do
 
   defp do_dispatch_issue(%State{} = state, issue, contract, attempt, preferred_worker_host) do
     recipient = self()
+    reserved_slots = reserved_slots(contract, state.max_concurrent_agents)
 
-    case select_worker_host(state, preferred_worker_host) do
+    case select_worker_hosts(state, preferred_worker_host, reserved_slots) do
       :no_worker_capacity ->
         Logger.debug("No SSH worker slots available for #{issue_context(issue)} preferred_worker_host=#{inspect(preferred_worker_host)}")
         state
 
-      worker_host ->
-        spawn_issue_on_worker_host(state, issue, contract, attempt, recipient, worker_host)
+      worker_hosts ->
+        spawn_issue_on_worker_hosts(state, issue, contract, attempt, recipient, worker_hosts)
     end
   end
 
-  defp spawn_issue_on_worker_host(%State{} = state, issue, contract, attempt, recipient, worker_host) do
+  defp spawn_issue_on_worker_hosts(%State{} = state, issue, contract, attempt, recipient, worker_hosts) do
     dispatch_started_at = DateTime.utc_now()
     dispatch_started_timing = RunAudit.now()
     runner = runner_module(contract)
     reserved_slots = reserved_slots(contract, state.max_concurrent_agents)
+    worker_host = List.first(worker_hosts)
 
     case Task.Supervisor.start_child(SymphonyElixir.TaskSupervisor, fn ->
            runner.run(issue, recipient,
              attempt: attempt,
              dispatch_started_timing: dispatch_started_timing,
              worker_host: worker_host,
+             team_worker_hosts: worker_hosts,
              task_contract: contract
            )
          end) do
@@ -1179,6 +1247,7 @@ defmodule SymphonyElixir.Orchestrator do
             issue: issue,
             plan_digest: contract.digest,
             worker_host: worker_host,
+            worker_hosts: worker_hosts,
             workspace_path: nil,
             session_id: nil,
             last_codex_message: nil,
@@ -1604,46 +1673,75 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   defp select_worker_host(%State{} = state, preferred_worker_host) do
-    case Config.settings!().worker.ssh_hosts do
-      [] ->
-        nil
-
-      hosts ->
-        available_hosts = Enum.filter(hosts, &worker_host_slots_available?(state, &1))
-
-        cond do
-          available_hosts == [] ->
-            :no_worker_capacity
-
-          preferred_worker_host_available?(preferred_worker_host, available_hosts) ->
-            preferred_worker_host
-
-          true ->
-            least_loaded_worker_host(state, available_hosts)
-        end
+    case select_worker_hosts(state, preferred_worker_host, 1) do
+      [worker_host] -> worker_host
+      :no_worker_capacity -> :no_worker_capacity
     end
   end
 
-  defp preferred_worker_host_available?(preferred_worker_host, hosts)
-       when is_binary(preferred_worker_host) and is_list(hosts) do
-    preferred_worker_host != "" and preferred_worker_host in hosts
+  defp select_worker_hosts(%State{} = state, preferred_worker_host, slots) do
+    case Config.settings!().worker.ssh_hosts do
+      [] -> List.duplicate(nil, slots)
+      hosts -> allocate_worker_hosts(state, hosts, preferred_worker_host, slots)
+    end
   end
 
-  defp preferred_worker_host_available?(_preferred_worker_host, _hosts), do: false
+  defp allocate_worker_hosts(%State{} = state, hosts, preferred_worker_host, slots) do
+    counts = Map.new(hosts, &{&1, running_worker_host_count(state.running, &1)})
+    limit = Config.settings!().worker.max_concurrent_agents_per_host
 
-  defp least_loaded_worker_host(%State{} = state, hosts) when is_list(hosts) do
-    hosts
-    |> Enum.with_index()
-    |> Enum.min_by(fn {host, index} ->
-      {running_worker_host_count(state.running, host), index}
+    Enum.reduce_while(1..slots, {[], counts}, fn slot, {selected, current_counts} ->
+      available = available_worker_hosts(hosts, current_counts, limit)
+
+      case available do
+        [] ->
+          {:halt, :no_worker_capacity}
+
+        available ->
+          host = select_available_worker_host(available, current_counts, preferred_worker_host, slot)
+
+          {:cont, {selected ++ [host], Map.update!(current_counts, host, &(&1 + 1))}}
+      end
     end)
+    |> case do
+      :no_worker_capacity -> :no_worker_capacity
+      {selected, _counts} -> selected
+    end
+  end
+
+  defp available_worker_hosts(hosts, counts, limit) do
+    Enum.filter(hosts, fn host ->
+      not (is_integer(limit) and limit > 0) or counts[host] < limit
+    end)
+  end
+
+  defp select_available_worker_host(available, counts, preferred_worker_host, 1) do
+    if preferred_worker_host in available,
+      do: preferred_worker_host,
+      else: least_loaded_worker_host(available, counts)
+  end
+
+  defp select_available_worker_host(available, counts, _preferred_worker_host, _slot) do
+    least_loaded_worker_host(available, counts)
+  end
+
+  defp least_loaded_worker_host(available, counts) do
+    available
+    |> Enum.with_index()
+    |> Enum.min_by(fn {candidate, index} -> {counts[candidate], index} end)
     |> elem(0)
   end
 
   defp running_worker_host_count(running, worker_host) when is_map(running) and is_binary(worker_host) do
     Enum.reduce(running, 0, fn
-      {_issue_id, %{worker_host: ^worker_host} = entry}, total -> total + Map.get(entry, :reserved_slots, 1)
-      _entry, total -> total
+      {_issue_id, %{worker_hosts: worker_hosts}}, total when is_list(worker_hosts) ->
+        total + Enum.count(worker_hosts, &(&1 == worker_host))
+
+      {_issue_id, %{worker_host: ^worker_host} = entry}, total ->
+        total + Map.get(entry, :reserved_slots, 1)
+
+      _entry, total ->
+        total
     end)
   end
 
@@ -1653,16 +1751,6 @@ defmodule SymphonyElixir.Orchestrator do
 
   defp worker_slots_available?(%State{} = state, preferred_worker_host) do
     select_worker_host(state, preferred_worker_host) != :no_worker_capacity
-  end
-
-  defp worker_host_slots_available?(%State{} = state, worker_host) when is_binary(worker_host) do
-    case Config.settings!().worker.max_concurrent_agents_per_host do
-      limit when is_integer(limit) and limit > 0 ->
-        running_worker_host_count(state.running, worker_host) < limit
-
-      _ ->
-        true
-    end
   end
 
   defp find_issue_by_id(issues, issue_id) when is_binary(issue_id) do

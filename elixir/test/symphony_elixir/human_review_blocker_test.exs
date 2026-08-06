@@ -85,6 +85,24 @@ defmodule SymphonyElixir.HumanReviewBlockerTest do
     assert Process.get({FakeTracker, :state}) == "Human Review"
   end
 
+  test "allows an enclosing workflow to own blocker publication" do
+    issue = %Issue{id: "synthetic:repo:docs", identifier: "PIN-1", title: "Blocked", state: "In Progress"}
+    parent = self()
+
+    publisher = fn published_issue, key_parts, body, opts ->
+      send(parent, {:published_locally, published_issue.id, key_parts, body, opts[:handoff_state]})
+      {:ok, "local-blocker"}
+    end
+
+    assert {:ok, "local-blocker"} =
+             HumanReviewBlocker.publish(issue, ["contract", "plan"], "## Agent Blocked",
+               handoff_state: "Human Review",
+               human_review_publisher: publisher
+             )
+
+    assert_received {:published_locally, "synthetic:repo:docs", ["contract", "plan"], "## Agent Blocked", "Human Review"}
+  end
+
   test "does not overwrite a state advanced by a human" do
     issue = %Issue{id: "issue-1", identifier: "PIN-1", title: "Blocked", state: "In Progress"}
     opts = [tracker: FakeTracker, handoff_state: "Human Review"]

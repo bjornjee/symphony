@@ -31,9 +31,15 @@ skills can make raw Linear GraphQL calls.
 
 Issues carrying both `codex-ready` and `codex-team` use explicit Team Mode. The
 final `## Team` YAML section names two to eight trusted workflow entries from
-the bootstrap manifest. Symphony reserves bounded scheduler capacity, runs one
+the bootstrap manifest and gives each entry explicit repository-relative path
+ownership. Multiple entries may target one repository only when those paths are
+mutually exclusive. Symphony reserves bounded scheduler capacity, runs one
 resumable coordinator between repository waves, and gives every repository an
 isolated workspace, top-level Codex thread, normal proof gates, and its own PR.
+Workflow aliases are part of each synthetic member identifier, so aliases for
+one repository also receive distinct workspace and branch identities even when
+the parent title is long. Remote workers need Git push credentials; GitHub API
+operations run on the Symphony controller and use its `gh` authentication.
 Member planning remains classification-driven: simple work executes directly,
 while planned work blocks before edits on a fresh, read-only, high-effort
 principal-architect review focused on the simplest invariant-preserving design.

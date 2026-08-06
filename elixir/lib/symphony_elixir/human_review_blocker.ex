@@ -7,6 +7,14 @@ defmodule SymphonyElixir.HumanReviewBlocker do
 
   @spec publish(Issue.t(), [String.t()], String.t(), keyword()) :: {:ok, String.t()} | {:error, term()}
   def publish(%Issue{} = issue, key_parts, body, opts \\ []) when is_list(key_parts) and is_binary(body) do
+    case Keyword.get(opts, :human_review_publisher) do
+      publisher when is_function(publisher, 4) -> publisher.(issue, key_parts, body, opts)
+      nil -> publish_to_tracker(issue, key_parts, body, opts)
+      _other -> {:error, :invalid_human_review_publisher}
+    end
+  end
+
+  defp publish_to_tracker(issue, key_parts, body, opts) do
     id = deterministic_uuid([issue.id | key_parts])
     tracker = Keyword.get(opts, :tracker, Tracker)
     state = Keyword.get_lazy(opts, :handoff_state, fn -> Config.settings!().tracker.handoff_state end)

@@ -43,6 +43,14 @@ defmodule SymphonyElixir.AgentRunner do
   end
 
   @doc false
+  @spec continue_with_issue_for_test(Issue.t(), ([String.t()] -> term()), (Issue.t() -> boolean())) ::
+          {:continue, Issue.t()} | {:done, Issue.t()} | {:error, term()}
+  def continue_with_issue_for_test(%Issue{} = issue, issue_state_fetcher, issue_routable_predicate)
+      when is_function(issue_state_fetcher, 1) and is_function(issue_routable_predicate, 1) do
+    continue_with_issue?(issue, nil, issue_state_fetcher, issue_routable_predicate)
+  end
+
+  @doc false
   @spec continue_with_issue_for_test(Issue.t(), TaskContract.t(), ([String.t()] -> term())) ::
           {:continue, Issue.t()} | {:done, Issue.t()} | {:error, term()}
   def continue_with_issue_for_test(%Issue{} = issue, %TaskContract{} = contract, issue_state_fetcher)
@@ -59,7 +67,12 @@ defmodule SymphonyElixir.AgentRunner do
   @doc false
   @spec implementation_command_approval_for_test(Path.t(), map()) :: boolean()
   def implementation_command_approval_for_test(workspace, payload) do
-    implementation_command_approval?(workspace, payload)
+    implementation_command_approval?(workspace, %{}, payload)
+  end
+
+  @spec implementation_command_approval_for_test(Path.t(), map(), map()) :: boolean()
+  def implementation_command_approval_for_test(workspace, execution_plan, payload) do
+    implementation_command_approval?(workspace, execution_plan, payload)
   end
 
   @doc false
@@ -378,8 +391,7 @@ defmodule SymphonyElixir.AgentRunner do
          recipient,
          issue,
          workspace,
-         proof_ledger,
-         plan_progress,
+         runtime,
          worker_host,
          session,
          observer
@@ -387,13 +399,14 @@ defmodule SymphonyElixir.AgentRunner do
     fn message ->
       case RunAudit.append_codex_update(workspace, issue, message) do
         {:ok, %{event_id: event_id} = proof} ->
-          record_observed_proof(proof_ledger, event_id, proof, workspace, worker_host)
+          record_observed_proof(runtime.proof_ledger, event_id, proof, workspace, worker_host)
 
         {:ok, nil} ->
           :ok
       end
 
-      record_native_plan_progress(plan_progress, message)
+      record_native_plan_progress(runtime.plan_progress, message)
+      record_native_goal_status(runtime.goal_status, message)
 
       send_codex_update(recipient, issue, message)
       if is_function(observer, 2), do: observer.(session, message)
@@ -409,6 +422,16 @@ defmodule SymphonyElixir.AgentRunner do
   end
 
   defp record_native_plan_progress(_plan_progress, _message), do: :ok
+
+  defp record_native_goal_status(
+         goal_status,
+         %{payload: %{"method" => "thread/goal/updated", "params" => %{"goal" => %{"status" => status}}}}
+       )
+       when status in ["active", "blocked", "complete"] do
+    Agent.update(goal_status, fn _previous -> status end)
+  end
+
+  defp record_native_goal_status(_goal_status, _message), do: :ok
 
   defp send_codex_update(recipient, %Issue{id: issue_id}, message)
        when is_binary(issue_id) and is_pid(recipient) do
@@ -476,6 +499,7 @@ defmodule SymphonyElixir.AgentRunner do
 
     {:ok, proof_ledger} = Agent.start_link(fn -> %{} end)
     {:ok, plan_progress} = Agent.start_link(fn -> nil end)
+    {:ok, goal_status} = Agent.start_link(fn -> "active" end)
     {:ok, nested_phase_time} = Agent.start_link(fn -> 0 end)
 
     runtime = %{
@@ -483,6 +507,7 @@ defmodule SymphonyElixir.AgentRunner do
       opts: opts,
       proof_ledger: proof_ledger,
       plan_progress: plan_progress,
+      goal_status: goal_status,
       nested_phase_time: nested_phase_time,
       worker_host: worker_host
     }
@@ -547,8 +572,7 @@ defmodule SymphonyElixir.AgentRunner do
                         codex_update_recipient,
                         issue,
                         workspace,
-                        runtime.proof_ledger,
-                        runtime.plan_progress,
+                        runtime,
                         worker_host,
                         session,
                         Keyword.get(runtime.opts, :codex_message_observer)
@@ -914,7 +938,12 @@ defmodule SymphonyElixir.AgentRunner do
                prompt,
                issue,
                approval_policy: "on-request",
-               command_approval_authorizer: &implementation_command_approval?(workspace, &1),
+               command_approval_authorizer:
+                 &implementation_command_approval?(
+                   workspace,
+                   Keyword.fetch!(runtime.opts, :execution_plan),
+                   &1
+                 ),
                sandbox_policy:
                  implementation_sandbox_policy(
                    workspace,
@@ -934,8 +963,7 @@ defmodule SymphonyElixir.AgentRunner do
                    codex_update_recipient,
                    issue,
                    workspace,
-                   runtime.proof_ledger,
-                   runtime.plan_progress,
+                   runtime,
                    runtime.worker_host,
                    app_session,
                    Keyword.get(runtime.opts, :codex_message_observer)
@@ -1032,7 +1060,10 @@ defmodule SymphonyElixir.AgentRunner do
     plan = Keyword.fetch!(runtime.opts, :execution_plan)
     key = Keyword.fetch!(runtime.opts, :execution_ledger_key)
 
-    case ExecutionControl.block_on_exhausted_proof(plan, key, issue, contract) do
+    blocker_opts =
+      Keyword.take(runtime.opts, [:handoff_state, :human_review_publisher, :tracker])
+
+    case ExecutionControl.block_on_exhausted_proof(plan, key, issue, contract, blocker_opts) do
       :none ->
         :ok
 
@@ -1059,7 +1090,7 @@ defmodule SymphonyElixir.AgentRunner do
     with {:ok, repository} <- RepositoryFingerprint.capture(workspace, runtime.worker_host) do
       if repository.clean and repository.base_sha == execution_plan_base_sha(plan),
         do: {:error, :instruction_drift_replan_required},
-        else: publish_instruction_drift_blocker(issue, contract, plan["plan_digest"])
+        else: publish_instruction_drift_blocker(issue, contract, plan["plan_digest"], runtime.opts)
     end
   end
 
@@ -1107,7 +1138,7 @@ defmodule SymphonyElixir.AgentRunner do
 
       {:error, {:instruction_drift_with_changes, old_plan_digest}} ->
         {
-          {:returned, publish_instruction_drift_blocker(issue, contract, old_plan_digest)},
+          {:returned, publish_instruction_drift_blocker(issue, contract, old_plan_digest, planning_opts)},
           "tool"
         }
 
@@ -1184,9 +1215,6 @@ defmodule SymphonyElixir.AgentRunner do
         valid == [] ->
           {:ok, :missing}
 
-        Enum.any?(valid, &(&1["plan"]["contract_digest"] != contract.digest)) ->
-          {:error, :registered_execution_plan_contract_drift}
-
         length(authority_matches) > 1 ->
           {:error, :multiple_registered_execution_plans}
 
@@ -1204,8 +1232,12 @@ defmodule SymphonyElixir.AgentRunner do
             Enum.any?(valid, &(execution_plan_base_sha(&1["plan"]) == repository.base_sha)) ->
           {:ok, :missing}
 
+        Enum.any?(valid, &(&1["plan"]["contract_digest"] != contract.digest)) ->
+          {:error, :registered_execution_plan_contract_drift}
+
         true ->
-          old_plan = List.first(valid)["plan"]
+          old_plan = Enum.find(valid, &(&1["plan"]["contract_digest"] == contract.digest)) || List.first(valid)
+          old_plan = old_plan["plan"]
           {:error, {:instruction_drift_with_changes, old_plan["plan_digest"]}}
       end
     end
@@ -1363,7 +1395,7 @@ defmodule SymphonyElixir.AgentRunner do
     end
   end
 
-  defp publish_instruction_drift_blocker(issue, contract, plan_digest) do
+  defp publish_instruction_drift_blocker(issue, contract, plan_digest, opts) do
     body =
       "## Agent Blocked\n\nInstruction authority changed after implementation changes existed. " <>
         "Symphony will not reinterpret those changes under different doctrine. Human Review is required.\n\n" <>
@@ -1372,7 +1404,8 @@ defmodule SymphonyElixir.AgentRunner do
     case HumanReviewBlocker.publish(
            issue,
            [contract.digest, plan_digest, "instruction-drift"],
-           body
+           body,
+           Keyword.take(opts, [:handoff_state, :human_review_publisher, :tracker])
          ) do
       {:ok, comment_id} -> {:error, {:instruction_drift_human_review, comment_id}}
       {:error, reason} -> {:error, reason}
@@ -1445,7 +1478,7 @@ defmodule SymphonyElixir.AgentRunner do
 
   defp repository_codex_path?(_path), do: false
 
-  defp implementation_command_approval?(workspace, %{
+  defp implementation_command_approval?(workspace, execution_plan, %{
          "params" =>
            %{
              "command" => command,
@@ -1457,10 +1490,10 @@ defmodule SymphonyElixir.AgentRunner do
       is_nil(params["additionalPermissions"]) and
       is_nil(params["networkApprovalContext"]) and
       empty_approval_amendments?(params["proposedNetworkPolicyAmendments"]) and
-      conventional_commit_command?(command)
+      bounded_repository_command?(command, execution_plan_affected_paths(execution_plan))
   end
 
-  defp implementation_command_approval?(_workspace, _payload), do: false
+  defp implementation_command_approval?(_workspace, _execution_plan, _payload), do: false
 
   defp empty_approval_amendments?(nil), do: true
   defp empty_approval_amendments?([]), do: true
@@ -1471,6 +1504,52 @@ defmodule SymphonyElixir.AgentRunner do
       ~r/\Agit commit -m (?:(?:"(?:feat|fix|refactor|docs|test|chore|perf|ci): [A-Za-z0-9][A-Za-z0-9 ._\/:\-]{0,62}")|(?:'(?:feat|fix|refactor|docs|test|chore|perf|ci): [A-Za-z0-9][A-Za-z0-9 ._\/:\-]{0,62}'))\z/,
       command
     )
+  end
+
+  defp bounded_repository_command?(command, affected_paths) do
+    command
+    |> unwrap_shell_command()
+    |> String.split(~r/\s+&&\s+/, trim: true)
+    |> case do
+      [] -> false
+      commands -> Enum.all?(commands, &bounded_repository_command_segment?(&1, affected_paths))
+    end
+  end
+
+  defp unwrap_shell_command(command) do
+    case Regex.run(~r/\A\/bin\/bash -lc '([^']+)'\z/, command, capture: :all_but_first) do
+      [inner] -> inner
+      _other -> command
+    end
+  end
+
+  defp bounded_repository_command_segment?("git diff --staged --check", _affected_paths), do: true
+  defp bounded_repository_command_segment?("git diff --staged --name-only", _affected_paths), do: true
+
+  defp bounded_repository_command_segment?(command, affected_paths) do
+    conventional_commit_command?(command) or
+      Regex.match?(~r/\Agit commit -F \/tmp\/[A-Za-z0-9][A-Za-z0-9._-]{0,127}\z/, command) or
+      bounded_git_add_command?(command, affected_paths)
+  end
+
+  defp bounded_git_add_command?(command, affected_paths) do
+    case Regex.run(~r/\Agit add(?: --)? ((?:[A-Za-z0-9._\/-]+)(?: [A-Za-z0-9._\/-]+)*)\z/, command, capture: :all_but_first) do
+      [paths] ->
+        paths
+        |> String.split(" ", trim: true)
+        |> Enum.all?(&planned_repository_path?(&1, affected_paths))
+
+      _other ->
+        false
+    end
+  end
+
+  defp planned_repository_path?(path, affected_paths) do
+    Path.type(path) == :relative and
+      not Enum.member?(Path.split(path), "..") and
+      Enum.any?(affected_paths, fn planned ->
+        is_binary(planned) and (path == planned or String.starts_with?(path, planned <> "/"))
+      end)
   end
 
   defp execution_tool_executor(app_session, runtime, workspace, issue, contract) do
@@ -1742,6 +1821,15 @@ defmodule SymphonyElixir.AgentRunner do
         handoff_result =
           finish_handoff(workspace, issue, refreshed_issue, task_contract, runtime, elem(turn_numbers, 0))
 
+        handoff_result =
+          maybe_block_native_goal(
+            handoff_result,
+            workspace,
+            issue,
+            task_contract,
+            runtime
+          )
+
         handle_handoff_result(
           handoff_result,
           app_session,
@@ -1762,7 +1850,15 @@ defmodule SymphonyElixir.AgentRunner do
 
   defp timed_continue_with_issue?(workspace, issue, task_contract, runtime) do
     refresh_started_at = RunAudit.now()
-    result = continue_with_issue?(issue, task_contract, runtime.issue_state_fetcher)
+
+    result =
+      continue_with_issue?(
+        issue,
+        task_contract,
+        runtime.issue_state_fetcher,
+        issue_routable_predicate(runtime.opts)
+      )
+
     refresh_completed_at = RunAudit.now()
 
     RunAudit.record_phase(
@@ -1818,13 +1914,13 @@ defmodule SymphonyElixir.AgentRunner do
          workspace,
          _task_contract,
          _codex_update_recipient,
-         _runtime,
+         runtime,
          {turn_number, _max_turns}
        ) do
     Logger.info("Reached agent.max_turns for #{issue_context(refreshed_issue)} with issue still active; returning control to orchestrator")
     RunAudit.append(workspace, refreshed_issue, :codex_max_turns_reached, %{phase: "codex_turn", status: "max_turns_reached", turn_number: turn_number})
 
-    {:ok, completion_info(refreshed_issue, :max_turns_reached)}
+    {:ok, completion_info(refreshed_issue, :max_turns_reached, runtime.opts)}
   end
 
   defp handle_handoff_result(
@@ -1837,6 +1933,59 @@ defmodule SymphonyElixir.AgentRunner do
          _turn_numbers
        ),
        do: result
+
+  defp maybe_block_native_goal({:continue, _refreshed_issue} = result, workspace, issue, contract, runtime) do
+    if Agent.get(runtime.goal_status, & &1) == "blocked" do
+      plan = Keyword.fetch!(runtime.opts, :execution_plan)
+
+      body =
+        "## Agent Blocked\n\nCodex marked the active goal blocked before trusted completion evidence was available. " <>
+          "Symphony stopped continuation to prevent a retry loop. Review the run audit and restore the failed external dependency before redispatching.\n\n" <>
+          "<!-- symphony-native-goal-blocked:v1 plan=#{plan["plan_digest"]} -->"
+
+      blocker_opts =
+        Keyword.take(runtime.opts, [:handoff_state, :human_review_publisher, :tracker])
+
+      case HumanReviewBlocker.publish(
+             issue,
+             [contract.digest, plan["plan_digest"], "native-goal-blocked"],
+             body,
+             blocker_opts
+           ) do
+        {:ok, comment_id} ->
+          handoff_state =
+            Keyword.get_lazy(blocker_opts, :handoff_state, fn ->
+              Config.settings!().tracker.handoff_state
+            end)
+
+          RunAudit.append(workspace, issue, :codex_native_goal_blocked, %{
+            phase: "codex_goal",
+            status: "blocked",
+            comment_id: comment_id,
+            issue_state: handoff_state
+          })
+
+          {:ok,
+           %{
+             continuation: :done,
+             outcome: :human_review_required,
+             blocker_reason: :native_goal_blocked,
+             blocker_comment_id: comment_id,
+             issue_state: handoff_state,
+             issue_active: false,
+             issue_routable: false,
+             issue_labels: issue.labels
+           }}
+
+        {:error, reason} ->
+          {:error, reason}
+      end
+    else
+      result
+    end
+  end
+
+  defp maybe_block_native_goal(result, _workspace, _issue, _contract, _runtime), do: result
 
   defp record_continuation_failure(workspace, issue, reason, turn_number) do
     RunAudit.append(workspace, issue, :codex_continuation_check_failed, %{
@@ -1888,14 +2037,26 @@ defmodule SymphonyElixir.AgentRunner do
   end
 
   defp continue_with_issue?(%Issue{} = issue, issue_state_fetcher) do
-    continue_with_issue?(issue, nil, issue_state_fetcher)
+    continue_with_issue?(issue, nil, issue_state_fetcher, &issue_routable?/1)
   end
 
   defp continue_with_issue?(%Issue{id: issue_id} = issue, contract, issue_state_fetcher)
        when is_binary(issue_id) do
+    continue_with_issue?(issue, contract, issue_state_fetcher, &issue_routable?/1)
+  end
+
+  defp continue_with_issue?(issue, _contract, _issue_state_fetcher), do: {:done, issue}
+
+  defp continue_with_issue?(
+         %Issue{id: issue_id} = issue,
+         contract,
+         issue_state_fetcher,
+         issue_routable_predicate
+       )
+       when is_binary(issue_id) and is_function(issue_routable_predicate, 1) do
     case issue_state_fetcher.([issue_id]) do
       {:ok, [%Issue{} = refreshed_issue | _]} ->
-        if active_issue_state?(refreshed_issue.state) and issue_routable?(refreshed_issue) do
+        if active_issue_state?(refreshed_issue.state) and issue_routable_predicate.(refreshed_issue) do
           continue_with_contract(refreshed_issue, contract)
         else
           {:done, refreshed_issue}
@@ -1909,7 +2070,8 @@ defmodule SymphonyElixir.AgentRunner do
     end
   end
 
-  defp continue_with_issue?(issue, _contract, _issue_state_fetcher), do: {:done, issue}
+  defp continue_with_issue?(issue, _contract, _issue_state_fetcher, _issue_routable_predicate),
+    do: {:done, issue}
 
   defp continue_with_contract(refreshed_issue, nil), do: {:continue, refreshed_issue}
 
@@ -1959,7 +2121,12 @@ defmodule SymphonyElixir.AgentRunner do
         execution_ledger_key: Keyword.get(runtime.opts, :execution_ledger_key),
         nested_phase_time: runtime.nested_phase_time
       ] ++
-        Keyword.take(runtime.opts, [:completion_evidence_validator, :handoff_publisher, :handoff_state])
+        Keyword.take(runtime.opts, [
+          :completion_evidence_validator,
+          :handoff_publisher,
+          :handoff_state,
+          :issue_routable_predicate
+        ])
 
     execution_plan = Keyword.get(runtime.opts, :execution_plan)
     native_plan = Agent.get(runtime.plan_progress, & &1)
@@ -1982,7 +2149,8 @@ defmodule SymphonyElixir.AgentRunner do
           issue,
           refreshed_issue,
           reason,
-          turn_number
+          turn_number,
+          opts
         )
     end
   end
@@ -1996,7 +2164,7 @@ defmodule SymphonyElixir.AgentRunner do
 
   defp validate_execution_progress(_execution_plan, _native_plan), do: :ok
 
-  defp handle_execution_progress_pending(workspace, issue, refreshed_issue, reason, turn_number) do
+  defp handle_execution_progress_pending(workspace, issue, refreshed_issue, reason, turn_number, opts) do
     RunAudit.append(workspace, issue, :execution_plan_progress_pending, %{
       phase: "implementation",
       status: "pending",
@@ -2004,7 +2172,7 @@ defmodule SymphonyElixir.AgentRunner do
       turn_number: turn_number
     })
 
-    if active_issue_state?(refreshed_issue.state) and issue_routable?(refreshed_issue),
+    if active_issue_state?(refreshed_issue.state) and issue_routable?(refreshed_issue, opts),
       do: {:continue, refreshed_issue},
       else: {:error, {:execution_plan_progress_invalid, reason}}
   end
@@ -2087,7 +2255,7 @@ defmodule SymphonyElixir.AgentRunner do
           )
 
         {:error, {:handoff_evidence_invalid, :completion_evidence_missing}} = error ->
-          if active_issue_state?(refreshed_issue.state) and issue_routable?(refreshed_issue) do
+          if active_issue_state?(refreshed_issue.state) and issue_routable?(refreshed_issue, opts) do
             append_handoff_audit(
               workspace,
               issue,
@@ -2259,7 +2427,7 @@ defmodule SymphonyElixir.AgentRunner do
 
     {:ok,
      %{refreshed_issue | state: publication.issue_state}
-     |> completion_info(:done)
+     |> completion_info(:done, opts)
      |> Map.merge(%{
        pull_request_url: evidence.pull_request_url,
        handoff_comment_id: publication.comment_id,
@@ -2288,12 +2456,13 @@ defmodule SymphonyElixir.AgentRunner do
     end)
   end
 
-  defp completion_info(%Issue{} = issue, continuation) when continuation in [:done, :max_turns_reached] do
+  defp completion_info(%Issue{} = issue, continuation, opts)
+       when continuation in [:done, :max_turns_reached] do
     %{
       continuation: continuation,
       issue_state: issue.state,
       issue_active: active_issue_state?(issue.state),
-      issue_routable: issue_routable?(issue),
+      issue_routable: issue_routable?(issue, opts),
       issue_labels: issue.labels
     }
   end
@@ -2309,6 +2478,14 @@ defmodule SymphonyElixir.AgentRunner do
 
   defp issue_routable?(%Issue{} = issue) do
     Issue.routable?(issue, Config.settings!().tracker.required_labels)
+  end
+
+  defp issue_routable?(%Issue{} = issue, opts) do
+    issue_routable_predicate(opts).(issue)
+  end
+
+  defp issue_routable_predicate(opts) do
+    Keyword.get(opts, :issue_routable_predicate, &issue_routable?/1)
   end
 
   defp selected_worker_host(nil, []), do: nil

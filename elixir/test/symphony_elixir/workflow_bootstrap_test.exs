@@ -59,11 +59,13 @@ defmodule SymphonyElixir.WorkflowBootstrapTest do
 
       assert get_in(config, ["team", "repositories", "alpha"]) == %{
                "hooks" => %{"after_create" => "git clone 'git@github.com:example/alpha.git' ."},
+               "repository_id" => "example/alpha",
                "workspace" => %{"root" => "~/Code/bjornjee/worktrees/alpha"}
              }
 
       assert get_in(config, ["team", "repositories", "symphony"]) == %{
                "hooks" => %{"after_create" => "git clone 'git@github.com:bjornjee/symphony.git' ."},
+               "repository_id" => "bjornjee/symphony",
                "workspace" => %{"root" => "~/Code/bjornjee/worktrees/symphony"}
              }
 
@@ -126,6 +128,18 @@ defmodule SymphonyElixir.WorkflowBootstrapTest do
       """)
 
       assert {:error, {:bootstrap_duplicate_workflow_name, "duplicate"}} =
+               WorkflowBootstrap.bootstrap(manifest_path)
+
+      File.write!(manifest_path, """
+      prompt: Coordinate safely.
+      workflows:
+        - name: unsupported
+          output_path: unsupported/workflow.md
+          repository:
+            url: https://example.com/repository.git
+      """)
+
+      assert {:error, {:bootstrap_unsupported_repository_origin, "unsupported"}} =
                WorkflowBootstrap.bootstrap(manifest_path)
     end)
   end

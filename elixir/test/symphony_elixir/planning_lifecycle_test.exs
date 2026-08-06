@@ -97,7 +97,9 @@ defmodule SymphonyElixir.PlanningLifecycleTest do
     assert byte_size(plan["plan_digest"]) == 64
 
     assert_receive {:turn, :primary, primary_opts}
-    assert_receive {:prompt, :primary, _planning_prompt}
+    assert_receive {:prompt, :primary, planning_prompt}
+    assert planning_prompt =~ "case-insensitive when prose capitalization is immaterial"
+    assert planning_prompt =~ "identify the failing clause"
     assert primary_opts[:sandbox_policy] == %{"type" => "readOnly", "networkAccess" => false}
     assert primary_opts[:approval_policy] == "never"
     assert primary_opts[:auto_approve_requests] == false
@@ -114,6 +116,8 @@ defmodule SymphonyElixir.PlanningLifecycleTest do
     assert reviewer_prompt =~ "do not demand duplicate typed proofs"
     assert reviewer_prompt =~ "do not invent an exactly-once mapping rule"
     assert reviewer_prompt =~ "focused static contract tests may be sufficient behavioral proof"
+    assert reviewer_prompt =~ "Reject brittle prose proofs"
+    assert reviewer_prompt =~ "diagnostic output"
     assert reviewer_prompt =~ "isolated automated execution-plan reviewer"
     assert reviewer_turn_opts[:effort] == "medium"
     assert reviewer_turn_opts[:sandbox_policy] == %{"type" => "readOnly", "networkAccess" => false}
@@ -478,6 +482,85 @@ defmodule SymphonyElixir.PlanningLifecycleTest do
       assert prompt =~ "product invariants"
     end
 
+    Agent.stop(counter)
+  end
+
+  test "revises a candidate rejected by deterministic plan validation", ctx do
+    parent = self()
+    {:ok, counter} = Agent.start_link(fn -> %{primary: 0, reviewer: 0} end)
+    [uncovered_criterion | _rest] = Enum.map(ctx.contract.acceptance_criteria, & &1.id)
+
+    run_turn = fn session, prompt, _issue, opts ->
+      revision =
+        Agent.get_and_update(counter, fn counts ->
+          current = Map.fetch!(counts, session.role) + 1
+          {current, Map.put(counts, session.role, current)}
+        end)
+
+      candidate = candidate(ctx, revision)
+
+      if session.role == :primary do
+        send(parent, {:planning_prompt, revision, prompt})
+
+        submitted_candidate =
+          if revision == 1 do
+            update_in(candidate, ["proofs"], fn proofs ->
+              Enum.map(proofs, fn
+                %{"role" => "final"} = proof ->
+                  Map.update!(proof, "criterion_ids", &List.delete(&1, uncovered_criterion))
+
+                proof ->
+                  proof
+              end)
+            end)
+          else
+            candidate
+          end
+
+        opts[:on_message].(%{
+          event: :notification,
+          payload: %{
+            "method" => "turn/plan/updated",
+            "params" => %{"plan" => submitted_candidate["ordered_steps"]}
+          }
+        })
+
+        opts[:tool_executor].("submit_execution_plan", submitted_candidate)
+      else
+        opts[:tool_executor].("submit_plan_review", %{
+          "candidate_digest" => SymphonyElixir.PlanningArtifact.digest(candidate(ctx, 2)),
+          "verdict" => "approve",
+          "blocking_findings" => [],
+          "advisory_findings" => [],
+          "workflow" => ctx.profile.name,
+          "profile_digest" => ctx.profile.digest
+        })
+      end
+
+      {:ok, %{turn_id: "turn-#{session.role}-#{revision}"}}
+    end
+
+    assert {:ok, %{"revision" => 2}} =
+             PlanningLifecycle.run(
+               %{role: :primary, thread_id: "primary-thread"},
+               ctx.workspace,
+               ctx.issue,
+               ctx.contract,
+               ctx.profile,
+               repository_capture: fn _, _ -> {:ok, ctx.repository} end,
+               issue_fetcher: fn _ -> {:ok, [ctx.issue]} end,
+               run_turn: run_turn,
+               start_reviewer_session: fn _, _ ->
+                 {:ok, %{role: :reviewer, thread_id: "review-thread"}}
+               end,
+               stop_session: fn _ -> :ok end
+             )
+
+    assert_receive {:planning_prompt, 1, _prompt}
+    assert_receive {:planning_prompt, 2, correction_prompt}
+    assert correction_prompt =~ "uncovered_criterion"
+    assert correction_prompt =~ uncovered_criterion
+    assert Agent.get(counter, & &1) == %{primary: 2, reviewer: 1}
     Agent.stop(counter)
   end
 

@@ -164,7 +164,7 @@ defmodule SymphonyElixir.PromptBuilder do
     #{plan_progress_instruction(execution_plan)}
     - Commit before the final proof. Any edit or commit invalidates final proof and implementation-review approval.
     - Planned or Full work requires `request_implementation_review`. Two revisions are allowed; a third rejection moves the issue to Human Review.
-    - `publish_pull_request` is the only push/PR path. Its body must contain `## Why`, `## Summary`, and an exact `## Test plan` listing every approved command.
+    - `publish_pull_request` is the only push/PR path. Its body must use the exact headings `#### Context`, `#### TL;DR`, `#### Summary`, `#### Alternatives`, and `#### Test Plan`. Keep Context within 240 characters, italic TL;DR within 120, each bullet within 120, and list every approved command as a checked Test Plan item.
     - Symphony generates completion evidence from trusted external receipts and owns the Linear handoff. Never create or edit completion evidence, the handoff comment, or issue state.
 
     Pinned acceptance criteria:

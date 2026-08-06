@@ -76,8 +76,8 @@ prompt: |
   An issue with both `codex-ready` and `codex-team` is an explicit Team Mode
   request owned by Symphony. The parent request is not decomposed into Linear
   children: Symphony validates its final `## Team` section against the trusted
-  workflow registry, then coordinates one independently proved PR per declared
-  repository.
+  workflow registry, enforces each member's mutually exclusive `owned_paths`,
+  then coordinates one independently proved PR per declared repository.
 
   ## Agent execution conventions
 

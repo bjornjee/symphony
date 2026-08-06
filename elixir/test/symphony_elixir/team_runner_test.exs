@@ -64,6 +64,144 @@ defmodule SymphonyElixir.TeamRunnerTest do
     end
   end
 
+  test "public runner reports a bounded Team failure without crashing the orchestrator worker" do
+    {task, contract} = team_issue_and_contract()
+    parent = self()
+    registry = Map.new(contract.team.repositories, &{&1.workflow, &1.trusted_config})
+
+    assert :ok =
+             TeamRunner.run(task, parent,
+               task_contract: contract,
+               team_repository_registry: registry,
+               coordinator_runner: fn :plan, _context ->
+                 {:error, {:human_input_required, "private coordinator detail"}}
+               end,
+               publisher: fn _status, _summary -> :ok end,
+               transitioner: fn -> :ok end
+             )
+
+    assert_receive {:team_blocked_info, "issue-1", %{reason: "Coordinator requested human input."}},
+                   1_000
+  end
+
+  test "public runner converts an unexpected Team exception into a terminal outcome" do
+    {task, contract} = team_issue_and_contract()
+    parent = self()
+    registry = Map.new(contract.team.repositories, &{&1.workflow, &1.trusted_config})
+
+    assert :ok =
+             TeamRunner.run(task, parent,
+               task_contract: contract,
+               team_repository_registry: registry,
+               coordinator_runner: fn :plan, _context ->
+                 raise Protocol.UndefinedError, protocol: Jason.Encoder, value: {:member_runner_failed, :boom}
+               end,
+               publisher: fn _status, _summary -> :ok end,
+               transitioner: fn -> :ok end
+             )
+
+    assert_receive {:team_blocked_info, "issue-1", %{reason: "Team execution stopped (team_runner_exception)."}},
+                   1_000
+  end
+
+  test "synthetic members keep tracker reads and review exhaustion inside the Team boundary" do
+    {task, contract} = team_issue_and_contract()
+    parent = self()
+
+    coordinator = fn
+      :plan, _context -> {:ok, [["application", "infrastructure"]]}
+      :after_wave, _context -> {:ok, :continue}
+      :final, _context -> {:ok, %{verdict: "pass"}}
+    end
+
+    agent_runner = fn member_issue, recipient, opts ->
+      assert {:ok, [^member_issue]} = opts[:issue_fetcher].([member_issue.id])
+      assert {:ok, [^member_issue]} = opts[:issue_state_fetcher].([member_issue.id])
+      assert opts[:issue_routable_predicate].(member_issue)
+      refute Keyword.has_key?(opts, :publisher)
+      assert {:error, :plan_review_exhausted} = opts[:review_exhausted_handler].(nil, nil, nil, nil)
+
+      assert {:ok, "team-member-blocker"} =
+               opts[:human_review_publisher].(member_issue, ["proof"], "blocked", handoff_state: "Human Review")
+
+      send(parent, {:synthetic_member_checked, member_issue.id})
+
+      send(
+        recipient,
+        {:worker_completion_info, member_issue.id,
+         %{
+           pull_request_url: "https://github.com/example/symphony/pull/1"
+         }}
+      )
+
+      :ok
+    end
+
+    assert {:ok, %{verdict: "pass"}} =
+             TeamRunner.run_with_contract(task, contract,
+               coordinator_runner: coordinator,
+               agent_runner: agent_runner,
+               issue_fetcher: stable_issue_fetcher(task),
+               publisher: fn _status, _summary -> :ok end,
+               transitioner: fn -> :ok end,
+               max_concurrent_agents: 2
+             )
+
+    assert_receive {:synthetic_member_checked, "issue-1:repo:application"}
+    assert_receive {:synthetic_member_checked, "issue-1:repo:infrastructure"}
+  end
+
+  test "synthetic Human Review completions remain member blockers" do
+    {task, contract} = team_issue_and_contract()
+
+    coordinator = fn
+      :plan, _context ->
+        {:ok, [["application", "infrastructure"]]}
+
+      :after_wave, %{blocked: ["application", "infrastructure"]} ->
+        {:ok, %{action: :human, reason: "member proof exhausted"}}
+    end
+
+    agent_runner = fn member_issue, recipient, _opts ->
+      send(
+        recipient,
+        {:worker_completion_info, member_issue.id,
+         %{
+           outcome: :human_review_required,
+           blocker_comment_id: "team-member-blocker",
+           issue_state: "Human Review"
+         }}
+      )
+
+      :ok
+    end
+
+    assert {:error, {:human_input_required, "member proof exhausted"}} =
+             TeamRunner.run_with_contract(task, contract,
+               coordinator_runner: coordinator,
+               agent_runner: agent_runner,
+               issue_fetcher: stable_issue_fetcher(task),
+               publisher: fn _status, _summary -> :ok end,
+               transitioner: fn -> :ok end,
+               max_concurrent_agents: 2
+             )
+  end
+
+  test "synthetic members are scoped to their declared owned paths" do
+    {task, contract} = team_issue_and_contract()
+    application = Enum.find(contract.team.repositories, &(&1.workflow == "application"))
+    infrastructure = Enum.find(contract.team.repositories, &(&1.workflow == "infrastructure"))
+
+    application_issue = TeamRunner.synthetic_member_issue(task, contract, application)
+    infrastructure_issue = TeamRunner.synthetic_member_issue(task, contract, infrastructure)
+
+    assert application_issue.description =~ "In:\n- lib/api.ex"
+    assert application_issue.description =~ "Out:\n- All other repository paths"
+    refute application_issue.description =~ "infra/main.tf"
+    assert application_issue.identifier == "PIN-14-application"
+    assert infrastructure_issue.identifier == "PIN-14-infrastructure"
+  end
+
   test "run_with_contract rejects a contract without a Team section" do
     assert {:ok, ordinary} = TaskContract.from_issue(issue())
     assert {:error, :team_contract_missing} = TeamRunner.run_with_contract(issue(), ordinary, [])
@@ -86,6 +224,43 @@ defmodule SymphonyElixir.TeamRunnerTest do
     assert {:error, :invalid_coordinator_waves} =
              TeamRunner.run_with_contract(task, contract,
                coordinator_runner: fn :plan, _context -> {:ok, []} end,
+               publisher: fn _status, _summary -> :ok end,
+               transitioner: fn -> :ok end
+             )
+  end
+
+  test "initial coordinator state identifies every declared repository as a pending member" do
+    {task, contract} = team_issue_and_contract()
+
+    coordinator = fn :plan, context ->
+      assert context.members == %{
+               "application" => %{status: "pending"},
+               "infrastructure" => %{status: "pending"}
+             }
+
+      assert context.implementors == [
+               %{
+                 workflow: "application",
+                 owned_paths: ["lib/api.ex"],
+                 change: "Add API behavior.",
+                 acceptance: ["Existing callers remain compatible."],
+                 verification: ["mix test"]
+               },
+               %{
+                 workflow: "infrastructure",
+                 owned_paths: ["infra/main.tf"],
+                 change: "Deploy supporting configuration.",
+                 acceptance: ["The application can use the configuration."],
+                 verification: ["terraform validate"]
+               }
+             ]
+
+      {:error, :stop_after_context_assertion}
+    end
+
+    assert {:error, :stop_after_context_assertion} =
+             TeamRunner.run_with_contract(task, contract,
+               coordinator_runner: coordinator,
                publisher: fn _status, _summary -> :ok end,
                transitioner: fn -> :ok end
              )
@@ -174,7 +349,7 @@ defmodule SymphonyElixir.TeamRunnerTest do
       assert opts[:planning_reviewer_role] =~ "principal architect"
       assert opts[:planning_reviewer_role] =~ "Ponytail discipline"
       assert opts[:planning_reviewer_effort] == "high"
-      send(parent, {:member_started, repository.workflow, self()})
+      send(parent, {:member_started, repository.workflow, opts[:worker_host], self()})
       receive do: (:release -> :ok)
       {:ok, %{pull_request_url: "https://github.com/example/#{repository.workflow}/pull/1", proof_fresh: true}}
     end
@@ -188,13 +363,14 @@ defmodule SymphonyElixir.TeamRunnerTest do
           publisher: fn _status, _summary -> :ok end,
           transitioner: fn -> :ok end,
           update_recipient: parent,
-          max_concurrent_agents: 2
+          max_concurrent_agents: 2,
+          team_worker_hosts: ["worker-a", "worker-b"]
         )
       end)
 
     assert_receive {:team_runtime_info, "issue-1", %{request_id: "PIN-14"}}, 1_000
-    assert_receive {:member_started, "application", application_pid}, 1_000
-    assert_receive {:member_started, "infrastructure", infrastructure_pid}, 1_000
+    assert_receive {:member_started, "application", "worker-a", application_pid}, 1_000
+    assert_receive {:member_started, "infrastructure", "worker-b", infrastructure_pid}, 1_000
     send(application_pid, :release)
     send(infrastructure_pid, :release)
 
@@ -396,8 +572,12 @@ defmodule SymphonyElixir.TeamRunnerTest do
     {issue, contract} = team_issue_and_contract()
 
     coordinator = fn
-      :plan, _context -> {:ok, [["application", "infrastructure"]]}
-      :after_wave, %{blocked: ["application"]} -> {:ok, :continue}
+      :plan, _context ->
+        {:ok, [["application", "infrastructure"]]}
+
+      :after_wave, %{blocked: ["application"]} = context ->
+        assert is_binary(Jason.encode!(context))
+        {:ok, :continue}
     end
 
     assert {:error, {:members_blocked, ["application"]}} =
@@ -447,10 +627,12 @@ defmodule SymphonyElixir.TeamRunnerTest do
   defp team_issue_and_contract do
     registry = %{
       "application" => %{
+        "repository_id" => "example/application",
         "workspace" => %{"root" => "/workspaces/application"},
         "hooks" => %{"after_create" => "git clone app ."}
       },
       "infrastructure" => %{
+        "repository_id" => "example/infrastructure",
         "workspace" => %{"root" => "/workspaces/infrastructure"},
         "hooks" => %{"after_create" => "git clone infra ."}
       }
@@ -459,12 +641,16 @@ defmodule SymphonyElixir.TeamRunnerTest do
     team_yaml = """
     repositories:
       - workflow: application
+        owned_paths:
+          - lib/api.ex
         change: Add API behavior.
         acceptance:
           - Existing callers remain compatible.
         verification:
           - mix test
       - workflow: infrastructure
+        owned_paths:
+          - infra/main.tf
         change: Deploy supporting configuration.
         acceptance:
           - The application can use the configuration.

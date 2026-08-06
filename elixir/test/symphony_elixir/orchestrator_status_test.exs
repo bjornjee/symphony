@@ -995,6 +995,78 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
     assert delay_ms <= 10_500
   end
 
+  test "team member activity keeps the parent worker alive" do
+    write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_api_token: nil,
+      codex_stall_timeout_ms: 1_000
+    )
+
+    issue_id = "issue-active-team"
+    orchestrator_name = Module.concat(__MODULE__, :ActiveTeamOrchestrator)
+    {:ok, pid} = Orchestrator.start_link(name: orchestrator_name)
+
+    on_exit(fn ->
+      if Process.alive?(pid) do
+        Process.exit(pid, :normal)
+      end
+    end)
+
+    worker_pid =
+      spawn(fn ->
+        receive do
+          :done -> :ok
+        end
+      end)
+
+    stale_activity_at = DateTime.add(DateTime.utc_now(), -5, :second)
+    fresh_activity_at = DateTime.utc_now()
+    initial_state = :sys.get_state(pid)
+
+    running_entry = %{
+      pid: worker_pid,
+      ref: make_ref(),
+      identifier: "MT-TEAM",
+      issue: %Issue{
+        id: issue_id,
+        identifier: "MT-TEAM",
+        state: "In Progress",
+        url: "https://example.org/issues/MT-TEAM"
+      },
+      session_id: nil,
+      last_codex_message: nil,
+      last_codex_timestamp: stale_activity_at,
+      last_codex_event: nil,
+      started_at: stale_activity_at
+    }
+
+    :sys.replace_state(pid, fn _ ->
+      initial_state
+      |> Map.put(:running, %{issue_id => running_entry})
+      |> Map.put(:claimed, MapSet.put(initial_state.claimed, issue_id))
+    end)
+
+    send(
+      pid,
+      {:team_activity, issue_id,
+       %{
+         agent_id: "repo:application",
+         event: :notification,
+         timestamp: fresh_activity_at
+       }}
+    )
+
+    send(pid, :tick)
+    Process.sleep(100)
+    state = :sys.get_state(pid)
+
+    assert Process.alive?(worker_pid)
+    assert state.running[issue_id].last_codex_timestamp == fresh_activity_at
+    assert state.running[issue_id].last_codex_event == :notification
+    refute Map.has_key?(state.retry_attempts, issue_id)
+
+    send(worker_pid, :done)
+  end
+
   test "orchestrator blocks stalled workers that are waiting on MCP elicitation" do
     write_workflow_file!(Workflow.workflow_file_path(),
       tracker_api_token: nil,
@@ -1178,6 +1250,57 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
     assert %{
              identifier: "MT-INPUT-NORMAL",
              error: "codex turn requires operator input"
+           } = state.blocked[issue_id]
+  end
+
+  test "orchestrator blocks a terminal Team outcome without scheduling a whole-team retry" do
+    write_workflow_file!(Workflow.workflow_file_path(), tracker_api_token: nil)
+
+    issue_id = "issue-team-blocked"
+    orchestrator_name = Module.concat(__MODULE__, :TeamBlockedOrchestrator)
+    {:ok, pid} = Orchestrator.start_link(name: orchestrator_name)
+
+    on_exit(fn ->
+      if Process.alive?(pid) do
+        Process.exit(pid, :normal)
+      end
+    end)
+
+    ref = make_ref()
+    initial_state = :sys.get_state(pid)
+
+    running_entry = %{
+      pid: self(),
+      ref: ref,
+      identifier: "PIN-33",
+      issue: %Issue{id: issue_id, identifier: "PIN-33", state: "In Progress"},
+      session_id: "thread-team-blocked",
+      last_codex_message: nil,
+      last_codex_timestamp: nil,
+      last_codex_event: nil,
+      started_at: DateTime.utc_now()
+    }
+
+    :sys.replace_state(pid, fn _ ->
+      initial_state
+      |> Map.put(:running, %{issue_id => running_entry})
+      |> Map.put(:claimed, MapSet.put(initial_state.claimed, issue_id))
+    end)
+
+    send(pid, {:team_blocked_info, issue_id, %{reason: "Coordinator requested human input."}})
+    _state_after_block = :sys.get_state(pid)
+    send(pid, {:DOWN, ref, :process, self(), :normal})
+    Process.sleep(50)
+    state = :sys.get_state(pid)
+
+    refute Map.has_key?(state.running, issue_id)
+    refute Map.has_key?(state.retry_attempts, issue_id)
+    refute MapSet.member?(state.completed, issue_id)
+    assert MapSet.member?(state.claimed, issue_id)
+
+    assert %{
+             identifier: "PIN-33",
+             error: "Coordinator requested human input."
            } = state.blocked[issue_id]
   end
 
