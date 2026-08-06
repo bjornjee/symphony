@@ -3,11 +3,10 @@ defmodule SymphonyElixir.TeamRunnerBoundaryTest do
 
   import SymphonyElixir.TaskContractFixtures, only: [issue: 1, valid_description: 0]
 
-  alias SymphonyElixir.Codex.ThreadIdentity
   alias SymphonyElixir.Linear.TaskContract
   alias SymphonyElixir.TeamRunner
 
-  test "default coordinator persists and resumes its top-level thread between waves" do
+  test "default coordinator starts fresh per Team run and resumes one thread between waves" do
     test_root =
       Path.join(
         System.tmp_dir!(),
@@ -44,15 +43,24 @@ defmodule SymphonyElixir.TeamRunnerBoundaryTest do
         issue_fetcher: fn [_issue_id] -> {:ok, [task]} end,
         publisher: fn _status, _summary -> :ok end,
         transitioner: fn -> :ok end,
+        update_recipient: self(),
         max_concurrent_agents: 2
       )
 
     assert {:ok, %{verdict: "pass"}} = result
 
-    coordinator_workspace =
-      Path.join([workspace_root, "teams", "#{task.identifier}-team-coordinator"])
+    assert {:ok, %{verdict: "pass"}} =
+             TeamRunner.run_with_contract(task, contract,
+               member_runner: member_runner,
+               issue_fetcher: fn [_issue_id] -> {:ok, [task]} end,
+               publisher: fn _status, _summary -> :ok end,
+               transitioner: fn -> :ok end,
+               max_concurrent_agents: 2
+             )
 
-    assert {:ok, "thread-coordinator"} = ThreadIdentity.read(coordinator_workspace)
+    assert_received {:team_activity, issue_id, %{agent_id: "coordinator", event: :session_started, timestamp: %DateTime{}}}
+
+    assert issue_id == task.id
 
     requests =
       trace_file
@@ -60,16 +68,60 @@ defmodule SymphonyElixir.TeamRunnerBoundaryTest do
       |> String.split("\n", trim: true)
       |> Enum.map(&Jason.decode!/1)
 
-    assert Enum.count(requests, &(&1["method"] == "thread/start")) == 1
-    assert Enum.count(requests, &(&1["method"] == "thread/resume")) == 2
-    assert Enum.count(requests, &(&1["method"] == "thread/name/set")) == 3
+    assert Enum.count(requests, &(&1["method"] == "thread/start")) == 2
+    assert Enum.count(requests, &(&1["method"] == "thread/resume")) == 4
+    assert Enum.count(requests, &(&1["method"] == "thread/name/set")) == 6
 
     assert Enum.all?(Enum.filter(requests, &(&1["method"] == "thread/name/set")), fn request ->
              request["params"]["name"] == "[PIN-14 · team] coordinator"
            end)
   end
 
-  defp fake_codex_script(trace_file) do
+  test "default coordinator treats a plan-time human decision as a terminal outcome" do
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-team-runner-human-#{System.unique_integer([:positive])}"
+      )
+
+    workspace_root = Path.join(test_root, "workspaces")
+    codex_binary = Path.join(test_root, "fake-codex")
+    trace_file = Path.join(test_root, "coordinator.trace")
+    File.mkdir_p!(test_root)
+    on_exit(fn -> File.rm_rf(test_root) end)
+
+    File.write!(
+      codex_binary,
+      fake_codex_script(
+        trace_file,
+        ~s({"action":"human","reason":"The declared work requires operator input."})
+      )
+    )
+
+    File.chmod!(codex_binary, 0o755)
+
+    write_workflow_file!(Workflow.workflow_file_path(),
+      workspace_root: workspace_root,
+      codex_command: "#{codex_binary} app-server"
+    )
+
+    {task, contract} = team_issue_and_contract(workspace_root)
+
+    assert {:error, {:human_input_required, "The declared work requires operator input."}} =
+             TeamRunner.run_with_contract(task, contract,
+               member_runner: fn _repository, _member_issue, _opts ->
+                 flunk("a human decision must not start implementors")
+               end,
+               publisher: fn _status, _summary -> :ok end,
+               transitioner: fn -> :ok end,
+               max_concurrent_agents: 2
+             )
+  end
+
+  defp fake_codex_script(
+         trace_file,
+         plan_payload \\ ~s({"waves":[["application","infrastructure"]]})
+       ) do
     """
     #!/bin/sh
     set -eu
@@ -98,7 +150,7 @@ defmodule SymphonyElixir.TeamRunnerBoundaryTest do
           case "$line" in
             *'Record a global verdict'*) payload='{"verdict":"pass","summary":"Repositories align."}' ;;
             *'completed_wave'*) payload='{"action":"continue"}' ;;
-            *) payload='{"waves":[["application","infrastructure"]]}' ;;
+            *) payload='#{plan_payload}' ;;
           esac
           printf '%s' "$payload" > "$artifact"
           printf '%s\n' '{"id":3,"result":{"turn":{"id":"turn-coordinator"}}}'
@@ -112,10 +164,12 @@ defmodule SymphonyElixir.TeamRunnerBoundaryTest do
   defp team_issue_and_contract(workspace_root) do
     registry = %{
       "application" => %{
+        "repository_id" => "example/application",
         "workspace" => %{"root" => Path.join(workspace_root, "application")},
         "hooks" => %{}
       },
       "infrastructure" => %{
+        "repository_id" => "example/infrastructure",
         "workspace" => %{"root" => Path.join(workspace_root, "infrastructure")},
         "hooks" => %{}
       }
@@ -124,12 +178,16 @@ defmodule SymphonyElixir.TeamRunnerBoundaryTest do
     team_yaml = """
     repositories:
       - workflow: application
+        owned_paths:
+          - lib/api.ex
         change: Add API behavior.
         acceptance:
           - Existing callers remain compatible.
         verification:
           - mix test
       - workflow: infrastructure
+        owned_paths:
+          - infra/main.tf
         change: Deploy supporting configuration.
         acceptance:
           - The application can use the configuration.

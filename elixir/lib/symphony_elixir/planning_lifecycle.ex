@@ -113,20 +113,48 @@ defmodule SymphonyElixir.PlanningLifecycle do
   end
 
   defp run_revision(primary_session, workspace, issue, contract, profile, context, revision, opts) do
-    with {:ok, candidate} <-
-           candidate_for_revision(
-             primary_session,
-             workspace,
-             issue,
-             contract,
-             profile,
-             context,
-             revision,
-             opts
-           ),
-         :ok <- pin_primary_thread(opts) do
-      authority = %{issue: issue, contract: contract, profile: profile, context: context}
-      review_candidate(primary_session, workspace, authority, candidate, revision, opts)
+    case candidate_for_revision(
+           primary_session,
+           workspace,
+           issue,
+           contract,
+           profile,
+           context,
+           revision,
+           opts
+         ) do
+      {:ok, candidate} ->
+        with :ok <- pin_primary_thread(opts) do
+          authority = %{issue: issue, contract: contract, profile: profile, context: context}
+          review_candidate(primary_session, workspace, authority, candidate, revision, opts)
+        end
+
+      {:error, {:invalid_plan_submission, reason}} when revision < @max_revisions ->
+        finding = "Engine validation rejected the prior plan: #{inspect(reason, limit: 20, printable_limit: 1_000)}"
+
+        emit_lifecycle(opts, :execution_plan_revising, %{
+          phase: "revising",
+          status: "started",
+          revision: revision + 1,
+          validation_error: finding
+        })
+
+        run_revision(
+          primary_session,
+          workspace,
+          issue,
+          contract,
+          profile,
+          context,
+          revision + 1,
+          Keyword.put(opts, :review_findings, [finding])
+        )
+
+      {:error, {:invalid_plan_submission, reason}} ->
+        {:error, {:plan_submission_exhausted, reason}}
+
+      {:error, _reason} = error ->
+        error
     end
   end
 
@@ -286,7 +314,7 @@ defmodule SymphonyElixir.PlanningLifecycle do
            {:ok, repository_after} <- capture.(workspace, worker_host),
            :ok <- validate_repository_context(repository_after, context),
            {:ok, candidate} <-
-             PlanningArtifact.persist_candidate(
+             persist_candidate(
                workspace,
                revision,
                submission,
@@ -305,6 +333,20 @@ defmodule SymphonyElixir.PlanningLifecycle do
       end
     after
       Agent.stop(collector)
+    end
+  end
+
+  defp persist_candidate(workspace, revision, submission, context, native_plan, worker_host) do
+    case PlanningArtifact.persist_candidate(
+           workspace,
+           revision,
+           submission,
+           context,
+           native_plan,
+           worker_host
+         ) do
+      {:ok, _candidate} = result -> result
+      {:error, reason} -> {:error, {:invalid_plan_submission, reason}}
     end
   end
 
@@ -687,6 +729,7 @@ defmodule SymphonyElixir.PlanningLifecycle do
     Then call `submit_execution_plan` exactly once. Its ordered_steps must exactly match that final native plan update by step text and order.
     Treat every ordered step as an independently verifiable execution phase. Give it a stable id, only prior-phase dependencies, affected paths, verification profile, proof IDs, criterion IDs, invariants, stop conditions, and evidence requirements.
     Define every command proof with exactly id, phase_id, role, exact command, safe repository-relative working_directory, expected_exit, timeout_ms, and criterion_ids. For a local browser-rendering proof, add type `browser` and browser `{url, ready_text, snapshot_contains}`: command starts only the fixture, url must be an explicit `http://127.0.0.1:<nonprivileged-port>/...` target, ready_text is its literal readiness marker, and snapshot_contains lists the literal accessibility-snapshot assertions. Do not put browser transports, tool names, JavaScript, filenames, or session identifiers in a proof. Every criterion must be covered. Set red_policy to required or waived; waived requires a concrete red_waiver_rationale.
+    Make content proofs test meaning, not incidental formatting: use matching that is case-insensitive when prose capitalization is immaterial, and do not depend on Markdown line wrapping. Every compound proof must identify the failing clause in diagnostic output instead of exiting silently.
 
     #{revision_guidance}
 
@@ -713,6 +756,7 @@ defmodule SymphonyElixir.PlanningLifecycle do
     Review only obligations owned by the approved plan. Symphony separately enforces branch/base identity, cumulative changed-path scope, conventional commits, clean final-head proof freshness, implementation review, and publication; do not demand duplicate typed proofs for those engine-owned gates unless the Linear contract explicitly requires them.
     Criterion IDs may be present on multiple diagnostic proofs. Require every criterion to be covered by at least one successful final or validator proof; do not invent an exactly-once mapping rule, and do not treat an expected failing RED proof as acceptance evidence.
     For repository-local instructional artifacts such as skills or prompts, focused static contract tests may be sufficient behavioral proof. Do not require executing an LLM, building a fake agent runtime, or performing a live external mutation unless the Linear contract explicitly requires that boundary proof.
+    Reject brittle prose proofs that depend on capitalization or Markdown line wrapping when those details are not contractual. Require compound checks to emit diagnostic output that identifies the failing clause.
     Call `submit_plan_review` exactly once with verdict `approve` or `revise`. An approval must have no blocking findings; a revision must have at least one concrete blocking finding.
 
     Linear issue: #{issue.identifier} — #{issue.title}

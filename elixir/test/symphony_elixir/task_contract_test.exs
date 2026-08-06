@@ -185,6 +185,11 @@ defmodule SymphonyElixir.TaskContractTest do
                {"repo:infrastructure", "infrastructure"}
              ]
 
+      assert Enum.map(contract.team.repositories, & &1.owned_paths) == [
+               ["lib/api.ex"],
+               ["infra/main.tf"]
+             ]
+
       assert hd(contract.team.repositories).trusted_config ==
                team_repository_registry()["application"]
     end
@@ -244,6 +249,7 @@ defmodule SymphonyElixir.TaskContractTest do
         """
         repositories:
           - workflow: application
+            owned_paths: []
             change: Add API behavior.
             acceptance: []
             verification: []
@@ -258,8 +264,33 @@ defmodule SymphonyElixir.TaskContractTest do
                )
 
       assert "Team mode requires between 2 and 8 repositories." in errors
+      assert "Team repository application owned_paths must contain at least one safe relative path." in errors
       assert "Team repository application acceptance must contain at least one non-empty item." in errors
       assert "Team repository application verification must contain at least one non-empty item." in errors
+    end
+
+    test "rejects unsafe paths and overlapping ownership within one trusted repository" do
+      unsafe = String.replace(valid_team_yaml(), "      - lib/api.ex", "      - ../secrets")
+
+      assert {:error, unsafe_errors} =
+               TaskContract.from_issue(team_issue(unsafe),
+                 team_repository_registry: team_repository_registry()
+               )
+
+      assert "Team repository application owned_paths must contain at least one safe relative path." in unsafe_errors
+
+      overlapping = String.replace(valid_team_yaml(), "      - infra/main.tf", "      - lib")
+
+      same_repository_registry =
+        team_repository_registry()
+        |> put_in(["infrastructure", "repository_id"], "example/application")
+
+      assert {:error, overlap_errors} =
+               TaskContract.from_issue(team_issue(overlapping),
+                 team_repository_registry: same_repository_registry
+               )
+
+      assert "Team repositories application and infrastructure have overlapping owned_paths in trusted repository example/application: lib/api.ex <> lib" in overlap_errors
     end
 
     test "fails closed on malformed YAML shapes and invalid trusted registry entries" do
@@ -277,6 +308,7 @@ defmodule SymphonyElixir.TaskContractTest do
       repositories:
         - not-a-map
         - workflow: ''
+          owned_paths: not-a-list
           change: 42
           acceptance: not-a-list
           verification:
@@ -293,6 +325,7 @@ defmodule SymphonyElixir.TaskContractTest do
 
       assert "Team repository at index 1 must be a map." in shape_errors
       assert "Team repository at index 2 workflow must be non-empty." in shape_errors
+      assert "Team repository at index 2 owned_paths must contain at least one safe relative path." in shape_errors
       assert "Team repository at index 2 change must be non-empty." in shape_errors
       assert "Team repository at index 2 acceptance must contain at least one non-empty item." in shape_errors
       assert "Team repository at index 2 verification must contain at least one non-empty item." in shape_errors
@@ -305,6 +338,15 @@ defmodule SymphonyElixir.TaskContractTest do
                )
 
       assert "Invalid trusted Team workflow: application" in registry_errors
+
+      missing_identity = update_in(team_repository_registry(), ["application"], &Map.delete(&1, "repository_id"))
+
+      assert {:error, identity_errors} =
+               TaskContract.from_issue(team_issue(valid_team_yaml()),
+                 team_repository_registry: missing_identity
+               )
+
+      assert "Invalid trusted Team workflow: application" in identity_errors
     end
   end
 
@@ -319,12 +361,16 @@ defmodule SymphonyElixir.TaskContractTest do
     """
     repositories:
       - workflow: application
+        owned_paths:
+          - lib/api.ex
         change: Add API behavior.
         acceptance:
           - Existing callers remain compatible.
         verification:
           - mix test
       - workflow: infrastructure
+        owned_paths:
+          - infra/main.tf
         change: Deploy supporting configuration.
         acceptance:
           - The application can use the configuration.
@@ -339,10 +385,12 @@ defmodule SymphonyElixir.TaskContractTest do
   defp team_repository_registry do
     %{
       "application" => %{
+        "repository_id" => "example/application",
         "workspace" => %{"root" => "/workspaces/application"},
         "hooks" => %{"after_create" => "git clone app ."}
       },
       "infrastructure" => %{
+        "repository_id" => "example/infrastructure",
         "workspace" => %{"root" => "/workspaces/infrastructure"},
         "hooks" => %{"after_create" => "git clone infra ."}
       }

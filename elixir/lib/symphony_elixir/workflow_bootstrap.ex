@@ -3,6 +3,8 @@ defmodule SymphonyElixir.WorkflowBootstrap do
   Generates runnable workflow files from a multi-workflow bootstrap manifest.
   """
 
+  alias SymphonyElixir.GitHubRepository
+
   @type generated_workflow :: %{
           name: String.t(),
           output_path: Path.t(),
@@ -110,29 +112,44 @@ defmodule SymphonyElixir.WorkflowBootstrap do
     do: {:error, :bootstrap_workflow_not_a_map}
 
   defp build_repository_registry(workflows, defaults) do
-    workflows
-    |> Enum.reduce_while({:ok, %{}}, fn raw_workflow, {:ok, registry} ->
-      workflow = if is_map(raw_workflow), do: normalize_keys(raw_workflow), else: %{}
-      name = workflow["name"]
-      repository_url = get_in(workflow, ["repository", "url"])
+    Enum.reduce_while(workflows, {:ok, %{}}, &build_repository_registry_entry(&1, &2, defaults))
+  end
 
-      cond do
-        not present_string?(repository_url) ->
-          {:cont, {:ok, registry}}
+  defp build_repository_registry_entry(raw_workflow, {:ok, registry}, defaults) do
+    workflow = if is_map(raw_workflow), do: normalize_keys(raw_workflow), else: %{}
+    name = workflow["name"]
+    repository_url = get_in(workflow, ["repository", "url"])
 
-        Map.has_key?(registry, name) ->
-          {:halt, {:error, {:bootstrap_duplicate_workflow_name, name}}}
+    cond do
+      not present_string?(repository_url) ->
+        {:cont, {:ok, registry}}
 
-        true ->
-          config =
-            defaults
-            |> deep_merge(Map.delete(workflow, "name"))
-            |> deep_merge(derived_config(workflow, defaults))
+      Map.has_key?(registry, name) ->
+        {:halt, {:error, {:bootstrap_duplicate_workflow_name, name}}}
 
-          definition = Map.take(config, ["workspace", "hooks"])
-          {:cont, {:ok, Map.put(registry, name, definition)}}
-      end
-    end)
+      true ->
+        add_repository_registry_entry(registry, workflow, defaults, name, repository_url)
+    end
+  end
+
+  defp add_repository_registry_entry(registry, workflow, defaults, name, repository_url) do
+    config =
+      defaults
+      |> deep_merge(Map.delete(workflow, "name"))
+      |> deep_merge(derived_config(workflow, defaults))
+
+    case GitHubRepository.from_origin(repository_url) do
+      {:ok, repository_id} ->
+        definition =
+          config
+          |> Map.take(["workspace", "hooks"])
+          |> Map.put("repository_id", String.downcase(repository_id))
+
+        {:cont, {:ok, Map.put(registry, name, definition)}}
+
+      {:error, _reason} ->
+        {:halt, {:error, {:bootstrap_unsupported_repository_origin, name}}}
+    end
   end
 
   defp derived_config(workflow, defaults) do

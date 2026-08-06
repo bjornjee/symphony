@@ -18,6 +18,7 @@ team:
     symphony:
       hooks:
         after_create: "git clone 'git@github.com:bjornjee/symphony.git' ."
+      repository_id: "bjornjee/symphony"
       workspace:
         root: "~/Code/bjornjee/worktrees/symphony"
 tracker:
@@ -76,8 +77,8 @@ one focused proof command, decompose before implementation.
 An issue with both `codex-ready` and `codex-team` is an explicit Team Mode
 request owned by Symphony. The parent request is not decomposed into Linear
 children: Symphony validates its final `## Team` section against the trusted
-workflow registry, then coordinates one independently proved PR per declared
-repository.
+workflow registry, enforces each member's mutually exclusive `owned_paths`,
+then coordinates one independently proved PR per declared repository.
 
 ## Agent execution conventions
 

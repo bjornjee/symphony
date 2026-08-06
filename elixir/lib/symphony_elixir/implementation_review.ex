@@ -199,17 +199,26 @@ defmodule SymphonyElixir.ImplementationReview do
        do: {:ok, receipt}
 
   defp handle_verdict(issue, contract, key, 3, %{"verdict" => "revise"} = receipt, opts) do
-    handler = Keyword.get(opts, :exhausted_handler, &publish_exhaustion/4)
+    handler =
+      Keyword.get(opts, :exhausted_handler, fn issue, contract, key, receipt ->
+        publish_exhaustion(issue, contract, key, receipt, opts)
+      end)
+
     handler.(issue, contract, key, receipt)
   end
 
-  defp publish_exhaustion(issue, contract, key, receipt) do
+  defp publish_exhaustion(issue, contract, key, receipt, opts) do
     body =
       "## Agent Blocked\n\nAutomated implementation review requested revision three times. " <>
         "Human Review is required.\n\n" <>
         Enum.map_join(receipt["blocking_findings"], "\n", &"- #{&1}")
 
-    case HumanReviewBlocker.publish(issue, [contract.digest, key, receipt["receipt_digest"]], body) do
+    case HumanReviewBlocker.publish(
+           issue,
+           [contract.digest, key, receipt["receipt_digest"]],
+           body,
+           Keyword.take(opts, [:handoff_state, :human_review_publisher, :tracker])
+         ) do
       {:ok, comment_id} -> {:error, {:implementation_review_exhausted, comment_id}}
       {:error, reason} -> {:error, reason}
     end

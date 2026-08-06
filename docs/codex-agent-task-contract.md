@@ -87,12 +87,16 @@ this final section:
 ## Team
 repositories:
   - workflow: application
+    owned_paths:
+      - lib/application
     change: Add the new API behavior.
     acceptance:
       - Existing callers remain compatible.
     verification:
       - mix test
   - workflow: infrastructure
+    owned_paths:
+      - infrastructure
     change: Deploy the supporting configuration.
     acceptance:
       - The application can use the new configuration.
@@ -103,19 +107,31 @@ invariants:
   - Infrastructure must land before the application is deployed.
 ```
 
-The section declares two to eight unique workflow names. Every repository
-requires a non-empty change, acceptance list, and verification list;
+The workflow names are illustrative, not fixed application/infrastructure
+roles. The section declares two to eight unique workflow names. Every entry
+requires one to 100 safe relative `owned_paths`, a non-empty change, acceptance
+list, and verification list;
 `validation_goal` and `invariants` are also required. The label and section must
 appear together. The issue identifier is the request ID, and agent IDs are
 always `coordinator` and `repo:<workflow>`.
 
 Workflow names resolve only through the trusted `team.repositories` registry
-generated from `workflow-manifest.yml`. Ticket YAML cannot provide repository
-URLs, hooks, commands, credentials, additional repositories, or alternate
-invariants. Each repository runs the existing single-repository proof, review,
+generated from `workflow-manifest.yml`. That registry seals a non-secret
+repository identity in addition to workspace and hook configuration. Ticket
+YAML cannot provide repository URLs, identities, hooks, commands, credentials,
+additional repositories, or alternate invariants. Entries may target the same
+trusted repository through different workflows, but their path ownership must
+be mutually exclusive, including parent/child paths. Each entry runs the
+existing single-repository proof, review,
 PR, and completion-evidence gates in its own checkout and top-level Codex
-thread. Symphony updates one `## Team execution` Linear comment; internal agent
-events remain in the bounded runtime state and dashboard.
+thread. Its synthetic identifier includes the workflow alias, keeping the
+workspace and task branch distinct even when several aliases target one
+repository. Remote workers must be able to push Git branches; Symphony keeps
+GitHub API authentication on the controller for `gh` PR operations. Symphony
+updates one `## Team execution` Linear comment; internal agent events remain in
+the bounded runtime state and dashboard. If a member marks its native goal
+blocked while trusted completion evidence is still missing, Symphony stops
+continuation and surfaces Human Review instead of retrying the blocked turn.
 
 Member planning remains conditional on preactivation classification. Simple
 members execute their sealed direct authorization without manufacturing a plan.

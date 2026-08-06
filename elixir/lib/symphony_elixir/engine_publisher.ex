@@ -10,14 +10,16 @@ defmodule SymphonyElixir.EnginePublisher do
   def publish(workspace, plan, title, body, opts \\ []) do
     worker_host = Keyword.get(opts, :worker_host)
     runner = Keyword.get(opts, :command_runner, &run/4)
+    github_runner = github_command_runner(opts, worker_host, runner)
+    repository_capture = Keyword.get(opts, :repository_capture, &RepositoryFingerprint.capture/2)
 
     with :ok <- validate_content(plan, title, body),
-         {:ok, state} <- RepositoryFingerprint.capture(workspace, worker_host),
+         {:ok, state} <- repository_capture.(workspace, worker_host),
          true <- state.clean || {:error, :publication_requires_clean_tree},
          {:ok, identity} <- repository_identity(workspace, plan, runner, worker_host),
          :ok <- validate_commits(workspace, identity.base_sha, runner, worker_host),
          {:ok, _output} <- git(runner, workspace, worker_host, ["push", "origin", identity.branch]),
-         {:ok, pull_request} <- upsert_pull_request(runner, workspace, worker_host, identity, title, body),
+         {:ok, pull_request} <- upsert_pull_request(github_runner, workspace, identity, title, body),
          :ok <- validate_pull_request_repository(pull_request.url, identity.repository),
          true <- pull_request.state == "OPEN" || {:error, :published_pull_request_not_open},
          true <- not pull_request.is_cross_repository || {:error, :published_cross_repository_pull_request},
@@ -43,11 +45,12 @@ defmodule SymphonyElixir.EnginePublisher do
   def read_pull_request(workspace, plan, url, opts \\ []) do
     worker_host = Keyword.get(opts, :worker_host)
     runner = Keyword.get(opts, :command_runner, &run/4)
+    github_runner = github_command_runner(opts, worker_host, runner)
 
     with {:ok, identity} <- repository_identity(workspace, plan, runner, worker_host),
          :ok <- validate_pull_request_repository(url, identity.repository),
          {:ok, output} <-
-           command(runner, workspace, worker_host, "gh", [
+           command(github_runner, workspace, nil, "gh", [
              "pr",
              "view",
              url,
@@ -80,7 +83,7 @@ defmodule SymphonyElixir.EnginePublisher do
     with :ok <- validate_title(title),
          :ok <- validate_body(body, sections),
          :ok <- reject_self_attribution(title, body) do
-      validate_test_plan(commands, sections["Test plan"])
+      validate_test_plan(commands, sections["Test Plan"])
     end
   end
 
@@ -109,13 +112,14 @@ defmodule SymphonyElixir.EnginePublisher do
   end
 
   defp body_sections(body) do
-    ~r/^## (Why|Summary|Test plan)\s*\n(.*?)(?=^## |\z)/ms
+    ~r/^#### (Context|TL;DR|Summary|Alternatives|Test Plan)\s*\n(.*?)(?=^#### |\z)/ms
     |> Regex.scan(body, capture: :all_but_first)
     |> Map.new(fn [heading, content] -> {heading, String.trim(content)} end)
   end
 
   defp valid_body_sections?(sections) do
-    Map.keys(sections) |> Enum.sort() == Enum.sort(["Why", "Summary", "Test plan"]) and
+    Map.keys(sections) |> Enum.sort() ==
+      Enum.sort(["Context", "TL;DR", "Summary", "Alternatives", "Test Plan"]) and
       Enum.all?(sections, fn {_heading, content} -> content != "" end)
   end
 
@@ -152,14 +156,14 @@ defmodule SymphonyElixir.EnginePublisher do
     end
   end
 
-  defp upsert_pull_request(runner, workspace, worker_host, identity, title, body) do
+  defp upsert_pull_request(runner, workspace, identity, title, body) do
     args = ["pr", "list", "--repo", identity.repository, "--head", identity.branch, "--state", "open", "--limit", "2", "--json", pull_request_fields()]
 
-    with {:ok, output} <- command(runner, workspace, worker_host, "gh", args),
+    with {:ok, output} <- command(runner, workspace, nil, "gh", args),
          {:ok, pulls} when is_list(pulls) <- Jason.decode(output),
-         {:ok, url} <- ensure_one_pull_request(pulls, runner, workspace, worker_host, identity, title, body),
+         {:ok, url} <- ensure_one_pull_request(pulls, runner, workspace, identity, title, body),
          {:ok, readback} <-
-           command(runner, workspace, worker_host, "gh", [
+           command(runner, workspace, nil, "gh", [
              "pr",
              "view",
              url,
@@ -177,9 +181,9 @@ defmodule SymphonyElixir.EnginePublisher do
     end
   end
 
-  defp ensure_one_pull_request([], runner, workspace, worker_host, identity, title, body) do
+  defp ensure_one_pull_request([], runner, workspace, identity, title, body) do
     with {:ok, output} <-
-           command(runner, workspace, worker_host, "gh", [
+           command(runner, workspace, nil, "gh", [
              "pr",
              "create",
              "--repo",
@@ -198,14 +202,14 @@ defmodule SymphonyElixir.EnginePublisher do
     end
   end
 
-  defp ensure_one_pull_request([%{"url" => url}], runner, workspace, worker_host, identity, title, body) do
+  defp ensure_one_pull_request([%{"url" => url}], runner, workspace, identity, title, body) do
     with {:ok, _output} <-
-           command(runner, workspace, worker_host, "gh", ["pr", "edit", url, "--repo", identity.repository, "--title", title, "--body", body]) do
+           command(runner, workspace, nil, "gh", ["pr", "edit", url, "--repo", identity.repository, "--title", title, "--body", body]) do
       {:ok, url}
     end
   end
 
-  defp ensure_one_pull_request(pulls, _runner, _workspace, _worker_host, _identity, _title, _body),
+  defp ensure_one_pull_request(pulls, _runner, _workspace, _identity, _title, _body),
     do: {:error, {:multiple_pull_requests_for_branch, length(pulls)}}
 
   defp decode_pull_request(%{
@@ -262,6 +266,25 @@ defmodule SymphonyElixir.EnginePublisher do
   defp run(_workspace, worker_host, executable, args) do
     command = Enum.map_join([executable | args], " ", &shell_escape/1)
     SSH.run(worker_host, command, stderr_to_stdout: true)
+  end
+
+  defp run_controller(_workspace, _worker_host, executable, args) do
+    case System.find_executable(executable) do
+      nil -> {:error, {:executable_unavailable, executable}}
+      path -> {:ok, System.cmd(path, args, stderr_to_stdout: true)}
+    end
+  end
+
+  defp github_command_runner(opts, worker_host, runner) do
+    case Keyword.fetch(opts, :github_command_runner) do
+      {:ok, github_runner} ->
+        github_runner
+
+      :error ->
+        if is_binary(worker_host) and not Keyword.has_key?(opts, :command_runner),
+          do: &run_controller/4,
+          else: runner
+    end
   end
 
   defp plan_proofs(%{"candidate" => %{"proofs" => proofs}}), do: proofs

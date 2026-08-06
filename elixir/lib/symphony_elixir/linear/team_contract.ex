@@ -4,18 +4,20 @@ defmodule SymphonyElixir.Linear.TeamContract do
   """
 
   @allowed_keys ~w(repositories validation_goal invariants)
-  @repository_allowed_keys ~w(workflow change acceptance verification)
+  @repository_allowed_keys ~w(workflow owned_paths change acceptance verification)
   @min_repositories 2
   @max_repositories 8
+  @max_owned_paths 100
 
   defmodule Repository do
     @moduledoc false
 
-    defstruct [:agent_id, :workflow, :change, :acceptance, :verification, :trusted_config]
+    defstruct [:agent_id, :workflow, :owned_paths, :change, :acceptance, :verification, :trusted_config]
 
     @type t :: %__MODULE__{
             agent_id: String.t(),
             workflow: String.t(),
+            owned_paths: [Path.t()],
             change: String.t(),
             acceptance: [String.t()],
             verification: [String.t()],
@@ -46,6 +48,7 @@ defmodule SymphonyElixir.Linear.TeamContract do
           repository_count_errors(raw_repositories) ++
           repository_errors ++
           duplicate_workflow_errors(repositories) ++
+          overlapping_ownership_errors(repositories) ++
           required_string_errors(decoded, "validation_goal", "Team validation_goal must be non-empty.") ++
           string_list_errors(decoded, "invariants", "Team invariants must contain at least one non-empty item.")
 
@@ -108,6 +111,11 @@ defmodule SymphonyElixir.Linear.TeamContract do
           "Team repository at index #{index} workflow must be non-empty."
         ) ++
         unknown_workflow_errors(workflow, trusted_config) ++
+        owned_path_errors(
+          repository,
+          "owned_paths",
+          "Team repository #{display} owned_paths must contain at least one safe relative path."
+        ) ++
         required_string_errors(
           repository,
           "change",
@@ -131,6 +139,7 @@ defmodule SymphonyElixir.Linear.TeamContract do
        %Repository{
          agent_id: "repo:" <> workflow,
          workflow: workflow,
+         owned_paths: normalize_string_list(repository["owned_paths"]),
          change: normalize_string(repository["change"]),
          acceptance: normalize_string_list(repository["acceptance"]),
          verification: normalize_string_list(repository["verification"]),
@@ -160,9 +169,61 @@ defmodule SymphonyElixir.Linear.TeamContract do
     end
   end
 
+  defp overlapping_ownership_errors(repositories) do
+    repositories
+    |> Enum.group_by(&repository_id/1)
+    |> Enum.reject(fn {repository_id, _repositories} -> repository_id == nil end)
+    |> Enum.flat_map(fn {repository_id, same_repository} ->
+      same_repository
+      |> Enum.with_index()
+      |> Enum.flat_map(fn {left, left_index} ->
+        same_repository
+        |> Enum.drop(left_index + 1)
+        |> Enum.flat_map(fn right ->
+          case overlapping_path(left.owned_paths, right.owned_paths) do
+            nil ->
+              []
+
+            {left_path, right_path} ->
+              [
+                "Team repositories #{left.workflow} and #{right.workflow} have overlapping " <>
+                  "owned_paths in trusted repository #{repository_id}: #{left_path} <> #{right_path}"
+              ]
+          end
+        end)
+      end)
+    end)
+  end
+
+  defp repository_id(%Repository{trusted_config: config}) when is_map(config) do
+    case Map.get(config, "repository_id") do
+      repository_id when is_binary(repository_id) and repository_id != "" -> repository_id
+      _other -> nil
+    end
+  end
+
+  defp repository_id(_repository), do: nil
+
+  defp overlapping_path(left_paths, right_paths) do
+    Enum.find_value(left_paths, &overlap_with(&1, right_paths))
+  end
+
+  defp overlap_with(left_path, right_paths) do
+    Enum.find_value(right_paths, fn right_path ->
+      if path_contains?(left_path, right_path) or path_contains?(right_path, left_path),
+        do: {left_path, right_path}
+    end)
+  end
+
+  defp path_contains?(parent, child), do: parent == child or String.starts_with?(child, parent <> "/")
+
   defp unknown_workflow_errors("", _trusted_config), do: []
   defp unknown_workflow_errors(workflow, nil), do: ["Unknown Team workflow: #{workflow}"]
-  defp unknown_workflow_errors(_workflow, trusted_config) when is_map(trusted_config), do: []
+
+  defp unknown_workflow_errors(_workflow, %{"repository_id" => repository_id})
+       when is_binary(repository_id) and repository_id != "",
+       do: []
+
   defp unknown_workflow_errors(workflow, _trusted_config), do: ["Invalid trusted Team workflow: #{workflow}"]
 
   defp unsupported_keys(map, allowed_keys, prefix) do
@@ -188,6 +249,29 @@ defmodule SymphonyElixir.Linear.TeamContract do
       _other ->
         [error]
     end
+  end
+
+  defp owned_path_errors(map, key, error) do
+    case map[key] do
+      values when is_list(values) and length(values) in 1..@max_owned_paths ->
+        normalized = normalize_string_list(values)
+
+        if length(normalized) == length(values) and length(Enum.uniq(normalized)) == length(values) and
+             Enum.all?(normalized, &safe_relative_path?/1),
+           do: [],
+           else: [error]
+
+      _other ->
+        [error]
+    end
+  end
+
+  defp safe_relative_path?(path) do
+    segments = Path.split(path)
+
+    Path.type(path) == :relative and path == Path.join(segments) and path != "." and
+      not String.contains?(path, ["\\", <<0>>, "*", "?", "[", "]"]) and
+      Enum.all?(segments, &(&1 not in [".", ".."]))
   end
 
   defp normalize_string(value) when is_binary(value), do: String.trim(value)
