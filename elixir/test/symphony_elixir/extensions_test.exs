@@ -446,6 +446,27 @@ defmodule SymphonyElixir.ExtensionsTest do
     assert {:error, :comment_read_failed} = Adapter.fetch_comment("issue-1", "comment-1")
   end
 
+  test "linear adapter accepts Linear-normalized comment UUID casing" do
+    Application.put_env(:symphony_elixir, :linear_client_module, FakeLinearClient)
+
+    Process.put(
+      {FakeLinearClient, :graphql_result},
+      {:ok,
+       %{
+         "data" => %{
+           "comment" => %{
+             "id" => "6ea006fd-cfa2-41e1-ae29-8647539e1a60",
+             "body" => "handoff",
+             "issue" => %{"id" => "issue-1"}
+           }
+         }
+       }}
+    )
+
+    assert {:ok, %{id: "6ea006fd-cfa2-41e1-ae29-8647539e1a60", body: "handoff"}} =
+             Adapter.fetch_comment("issue-1", "6EA006FD-CFA2-41E1-AE29-8647539E1A60")
+  end
+
   test "linear adapter label cleanup is idempotent when labels are missing" do
     Application.put_env(:symphony_elixir, :linear_client_module, FakeLinearClient)
 

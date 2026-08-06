@@ -172,12 +172,16 @@ defmodule SymphonyElixir.Linear.Adapter do
   defp decode_comment(nil, _issue_id, _comment_id), do: {:ok, nil}
 
   defp decode_comment(
-         %{"id" => comment_id, "body" => body, "issue" => %{"id" => issue_id}},
+         %{"id" => actual_comment_id, "body" => body, "issue" => %{"id" => issue_id}},
          issue_id,
-         comment_id
+         expected_comment_id
        )
-       when is_binary(body) do
-    {:ok, %{id: comment_id, body: body}}
+       when is_binary(actual_comment_id) and is_binary(body) do
+    if String.downcase(actual_comment_id) == String.downcase(expected_comment_id) do
+      {:ok, %{id: actual_comment_id, body: body}}
+    else
+      {:error, :comment_read_failed}
+    end
   end
 
   defp decode_comment(_comment, _issue_id, _comment_id), do: {:error, :comment_read_failed}
