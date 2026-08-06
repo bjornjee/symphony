@@ -68,6 +68,17 @@ defmodule SymphonyElixir.TeamBusTest do
              TeamBus.send_event(bus, "coordinator", "repo:unknown", "update", "unknown")
   end
 
+  test "records one UTC timestamp for each accepted event", %{bus: bus} do
+    assert {:ok, %{timestamp: %DateTime{} = timestamp}} =
+             TeamBus.send_event(bus, "coordinator", "repo:application", "update", "Ready for review.")
+
+    assert timestamp.time_zone == "Etc/UTC"
+    assert [event] = TeamBus.snapshot(bus).events
+    assert event.timestamp == timestamp
+    assert TeamBus.snapshot(bus).agents["coordinator"].latest_event.timestamp == timestamp
+    assert TeamBus.snapshot(bus).agents["repo:application"].latest_event.timestamp == timestamp
+  end
+
   test "bounds message bytes and retains only the latest 100 events", %{bus: bus} do
     assert {:error, :message_too_large} =
              TeamBus.send_event(bus, "coordinator", "repo:application", "update", String.duplicate("x", 4_097))

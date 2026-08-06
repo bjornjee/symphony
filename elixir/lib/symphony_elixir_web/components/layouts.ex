@@ -64,20 +64,55 @@ defmodule SymphonyElixirWeb.Layouts do
 
                 this.el.addEventListener("click", this.copyHandler);
 
+                this.localTimeFormatter = new Intl.DateTimeFormat("en-GB", {
+                  day: "2-digit",
+                  month: "short",
+                  hour: "2-digit",
+                  minute: "2-digit",
+                  second: "2-digit",
+                  hourCycle: "h23",
+                  timeZoneName: "shortOffset"
+                });
+                this.localTimeZone = this.localTimeFormatter.resolvedOptions().timeZone;
+                this.localizeTimestamps = function () {
+                  this.el.querySelectorAll("[data-local-timestamp]").forEach(function (element) {
+                    var iso = element.getAttribute("datetime");
+                    if (!iso) return;
+
+                    var date = new Date(iso);
+                    if (Number.isNaN(date.getTime())) return;
+
+                    var parts = Object.fromEntries(
+                      this.localTimeFormatter
+                        .formatToParts(date)
+                        .filter(function (part) { return part.type !== "literal"; })
+                        .map(function (part) { return [part.type, part.value]; })
+                    );
+
+                    element.textContent =
+                      parts.day + " " + parts.month + " · " +
+                      parts.hour + ":" + parts.minute + ":" + parts.second + " " +
+                      parts.timeZoneName;
+                    element.title = iso + " · " + this.localTimeZone;
+                  }.bind(this));
+                }.bind(this);
+                this.localizeTimestamps();
+
                 this.updateLogFollowState = function () {
-                  var log = this.el.querySelector("#agent-detail-log");
-                  var indicator = this.el.querySelector("[data-log-follow-state]");
+                  var log = this.el.querySelector("[data-follow-log]");
+                  var indicator = this.el.querySelector("[data-follow-state]");
                   if (!log || !indicator) return;
 
                   var following =
                     log.scrollHeight - log.clientHeight - log.scrollTop <= 24;
+                  indicator.dataset.followState = following ? "following" : "paused";
                   indicator.dataset.logFollowState = following ? "following" : "paused";
                   indicator.textContent = following ? "Following" : "Paused";
                 }.bind(this);
 
                 this.logScrollHandler = this.updateLogFollowState;
                 this.bindLogScroll = function () {
-                  var log = this.el.querySelector("#agent-detail-log");
+                  var log = this.el.querySelector("[data-follow-log]");
                   if (this.logElement === log) return;
 
                   if (this.logElement) {
@@ -93,24 +128,26 @@ defmodule SymphonyElixirWeb.Layouts do
                 }.bind(this);
 
                 this.bindLogScroll();
-                var log = this.el.querySelector("#agent-detail-log");
+                var log = this.el.querySelector("[data-follow-log]");
                 if (log) log.scrollTop = log.scrollHeight;
                 this.updateLogFollowState();
-                var detail = this.el.querySelector("#agent-detail");
-                this.selectedAgentId = detail ? detail.dataset.selectedAgent : null;
+                this.readingContext = this.el.dataset.readingContext || null;
               },
               beforeUpdate: function () {
-                var log = this.el.querySelector("#agent-detail-log");
-                var detail = this.el.querySelector("#agent-detail");
+                var log = this.el.querySelector("[data-follow-log]");
                 this.logScrollTop = log ? log.scrollTop : null;
                 this.logShouldFollow = log
                   ? log.scrollHeight - log.clientHeight - log.scrollTop <= 24
                   : false;
                 this.openDisclosureIds = Array.from(
-                  this.el.querySelectorAll(".detail-disclosure[open][id]"),
+                  this.el.querySelectorAll(".detail-disclosure[open][id], .member-disclosure[open][id]"),
                   function (disclosure) { return disclosure.id; }
                 );
-                this.selectedAgentId = detail ? detail.dataset.selectedAgent : null;
+                this.disclosureIds = Array.from(
+                  this.el.querySelectorAll(".detail-disclosure[id], .member-disclosure[id]"),
+                  function (disclosure) { return disclosure.id; }
+                );
+                this.readingContext = this.el.dataset.readingContext || null;
                 this.focusedId =
                   this.el.contains(document.activeElement) && document.activeElement.id
                     ? document.activeElement.id
@@ -120,34 +157,39 @@ defmodule SymphonyElixirWeb.Layouts do
                 var logScrollTop = this.logScrollTop;
                 var logShouldFollow = this.logShouldFollow;
                 var openDisclosureIds = this.openDisclosureIds || [];
+                var disclosureIds = this.disclosureIds || [];
                 var focusedId = this.focusedId;
 
                 window.requestAnimationFrame(function () {
-                  var log = this.el.querySelector("#agent-detail-log");
-                  var detail = this.el.querySelector("#agent-detail");
-                  var selectedAgentId = detail ? detail.dataset.selectedAgent : null;
-                  var sameAgent = selectedAgentId === this.selectedAgentId;
+                  var log = this.el.querySelector("[data-follow-log]");
+                  var readingContext = this.el.dataset.readingContext || null;
+                  var sameContext = readingContext === this.readingContext;
 
-                  if (sameAgent) {
-                    this.el.querySelectorAll(".detail-disclosure[id]").forEach(function (disclosure) {
-                      disclosure.open = openDisclosureIds.includes(disclosure.id);
-                    });
+                  if (sameContext) {
+                    this.el
+                      .querySelectorAll(".detail-disclosure[id], .member-disclosure[id]")
+                      .forEach(function (disclosure) {
+                        if (disclosureIds.includes(disclosure.id)) {
+                          disclosure.open = openDisclosureIds.includes(disclosure.id);
+                        }
+                      });
                   }
 
                   if (log && logScrollTop !== null) {
                     log.scrollTop =
-                      logShouldFollow || !sameAgent
+                      logShouldFollow || !sameContext
                         ? log.scrollHeight
                         : logScrollTop;
                   }
                   this.bindLogScroll();
                   this.updateLogFollowState();
+                  this.localizeTimestamps();
 
-                  var focused = sameAgent && focusedId ? document.getElementById(focusedId) : null;
+                  var focused = sameContext && focusedId ? document.getElementById(focusedId) : null;
                   if (focused && document.activeElement !== focused) {
                     focused.focus({preventScroll: true});
                   }
-                  this.selectedAgentId = selectedAgentId;
+                  this.readingContext = readingContext;
                 }.bind(this));
               },
               destroyed: function () {

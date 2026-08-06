@@ -7,6 +7,7 @@ defmodule SymphonyElixirWeb.Presenter do
 
   @audit_tail_bytes 64 * 1_024
   @audit_event_limit 50
+  @team_event_limit 100
   @authorization_header ~r/\b(authorization\s*:\s*)(?:(?:bearer|basic)\s+)?[^\s,;]+/i
   @bearer_token ~r/\b(bearer\s+)[A-Za-z0-9._~+\/=-]+/i
   @secret_assignment ~r/\b((?:[A-Za-z0-9_-]*(?:api[_-]?key|token|secret|password|signature)[A-Za-z0-9_-]*)\s*[=:]\s*)(?:"[^"]*"|'[^']*'|[^\s&;,]+)/i
@@ -158,12 +159,20 @@ defmodule SymphonyElixirWeb.Presenter do
       end)
       |> Enum.sort_by(& &1.agent_id)
 
+    events =
+      team
+      |> Map.get(:events, [])
+      |> Enum.take(-@team_event_limit)
+      |> Enum.map(&meaningful_team_event/1)
+      |> Enum.reject(&is_nil/1)
+
     %{
       request_id: team[:request_id],
       issue_id: team[:issue_id],
       identifier: team[:identifier],
       agents: agents,
-      latest_event: team |> Map.get(:events, []) |> List.last() |> meaningful_team_event()
+      events: events,
+      latest_event: List.last(events)
     }
   end
 
@@ -172,6 +181,7 @@ defmodule SymphonyElixirWeb.Presenter do
   defp meaningful_team_event(event) when is_map(event) do
     %{
       id: event[:id],
+      timestamp: iso8601(event[:timestamp]),
       sender: event[:sender],
       recipient: event[:recipient],
       kind: event[:kind],
