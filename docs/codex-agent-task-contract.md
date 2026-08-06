@@ -107,10 +107,11 @@ invariants:
   - Infrastructure must land before the application is deployed.
 ```
 
-The workflow names are illustrative, not fixed application/infrastructure
-roles. The section declares two to eight unique workflow names. Every entry
-requires one to 100 safe relative `owned_paths`, a non-empty change, acceptance
-list, and verification list;
+The section supports arbitrary trusted registry names and declares two to eight
+unique workflow names. `application` and `infrastructure` are illustrative
+examples rather than reserved names. Every entry requires one to 100 safe
+relative `owned_paths`, a non-empty change, acceptance list, and verification
+list;
 `validation_goal` and `invariants` are also required. The label and section must
 appear together. The issue identifier is the request ID, and agent IDs are
 always `coordinator` and `repo:<workflow>`.
@@ -121,17 +122,19 @@ repository identity in addition to workspace and hook configuration. Ticket
 YAML cannot provide repository URLs, identities, hooks, commands, credentials,
 additional repositories, or alternate invariants. Entries may target the same
 trusted repository through different workflows, but their path ownership must
-be mutually exclusive, including parent/child paths. Each entry runs the
-existing single-repository proof, review,
-PR, and completion-evidence gates in its own checkout and top-level Codex
-thread. Its synthetic identifier includes the workflow alias, keeping the
-workspace and task branch distinct even when several aliases target one
-repository. Remote workers must be able to push Git branches; Symphony keeps
-GitHub API authentication on the controller for `gh` PR operations. Symphony
-updates one `## Team execution` Linear comment; internal agent events remain in
-the bounded runtime state and dashboard. If a member marks its native goal
-blocked while trusted completion evidence is still missing, Symphony stops
-continuation and surfaces Human Review instead of retrying the blocked turn.
+be mutually exclusive, including parent/child paths. Same-repository
+implementors use distinct workflow aliases and isolated workspaces; sharing a
+repository never shares checkout or execution state. Each entry runs the
+existing single-repository proof, review, PR, and completion-evidence gates in
+its own checkout and top-level Codex thread. Its synthetic identifier includes
+the workflow alias, keeping the workspace and task branch distinct even when
+several aliases target one repository. Remote workers must be able to push Git
+branches; Symphony keeps GitHub API authentication on the controller for `gh`
+PR operations. Symphony updates one `## Team execution` Linear comment;
+internal agent events remain in the bounded runtime state and dashboard. If a
+member marks its native goal blocked while trusted completion evidence is still
+missing, Symphony stops continuation and surfaces Human Review instead of
+retrying the blocked turn.
 
 Member planning remains conditional on preactivation classification. Simple
 members execute their sealed direct authorization without manufacturing a plan.

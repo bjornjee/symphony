@@ -12,6 +12,7 @@ defmodule SymphonyElixir.TeamBus do
 
   @type event :: %{
           id: pos_integer(),
+          timestamp: DateTime.t(),
           request_id: String.t(),
           sender: String.t(),
           recipient: String.t(),
@@ -118,6 +119,7 @@ defmodule SymphonyElixir.TeamBus do
          :ok <- validate_event(kind, message) do
       event = %{
         id: state.next_event_id,
+        timestamp: DateTime.utc_now() |> DateTime.truncate(:second),
         request_id: state.request_id,
         sender: sender,
         recipient: recipient,

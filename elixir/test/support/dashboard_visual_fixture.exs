@@ -6,6 +6,7 @@ defmodule SymphonyElixir.DashboardVisualFixture.Orchestrator do
   use GenServer
 
   @name __MODULE__
+  @team_event_base ~U[2026-08-06 07:00:00Z]
 
   def start_link(_opts), do: GenServer.start_link(__MODULE__, :ok, name: @name)
   def set_state(state), do: GenServer.call(@name, {:set_state, state})
@@ -27,7 +28,8 @@ defmodule SymphonyElixir.DashboardVisualFixture.Orchestrator do
 
   def handle_call(:snapshot, _from, %{mode: :loading} = state) do
     Process.sleep(1_200)
-    {:reply, snapshot(:mixed, state), state}
+    next_state = %{state | mode: :mixed}
+    {:reply, snapshot(:mixed, next_state), next_state}
   end
 
   def handle_call(:snapshot, _from, state), do: {:reply, snapshot(state.mode, state), state}
@@ -38,7 +40,7 @@ defmodule SymphonyElixir.DashboardVisualFixture.Orchestrator do
 
   def handle_call({:set_state, mode}, _from, state) do
     next_state = %{state | mode: mode}
-    :ok = SymphonyElixirWeb.ObservabilityPubSub.broadcast_update()
+    if mode != :loading, do: SymphonyElixirWeb.ObservabilityPubSub.broadcast_update()
     {:reply, :ok, next_state}
   end
 
@@ -233,6 +235,7 @@ defmodule SymphonyElixir.DashboardVisualFixture.Orchestrator do
           last_codex_timestamp: DateTime.add(now, -45, :second)
         }
       ],
+      teams: team_fixtures(),
       codex_totals: %{
         input_tokens: 42_100 + state.revision,
         output_tokens: 3_201,
@@ -248,10 +251,174 @@ defmodule SymphonyElixir.DashboardVisualFixture.Orchestrator do
       running: [],
       retrying: [],
       blocked: [],
+      teams: [],
       codex_totals: %{input_tokens: 0, output_tokens: 0, total_tokens: 0, seconds_running: 0.0},
       rate_limits: nil
     }
   end
+
+  defp team_fixtures do
+    [
+      %{
+        request_id: "PIN-42",
+        issue_id: "issue-team-42",
+        identifier: "PIN-42",
+        agents: %{
+          "coordinator" => %{
+            agent_id: "coordinator",
+            role: "coordinator",
+            repository: nil,
+            status: "waiting",
+            thread_id: "thread-pin-42-coordinator",
+            latest_session_id: "session-pin-42-coordinator",
+            workspace: "/tmp/symphony/teams/PIN-42",
+            pr_url: nil,
+            latest_event: %{
+              id: 100,
+              timestamp: team_event_timestamp(100),
+              sender: "coordinator",
+              recipient: "repo:web",
+              kind: "request",
+              message: "Confirm the navigation states before the final review."
+            }
+          },
+          "repo:api" => %{
+            agent_id: "repo:api",
+            role: "implementer",
+            repository: "api",
+            status: "running",
+            thread_id: "thread-pin-42-api",
+            latest_session_id: "session-pin-42-api",
+            workspace: "/tmp/symphony/api/PIN-42",
+            pr_url: nil,
+            latest_event: %{
+              id: 97,
+              timestamp: team_event_timestamp(97),
+              sender: "repo:api",
+              recipient: "coordinator",
+              kind: "update",
+              message: "The bounded activity endpoint is passing its targeted checks."
+            }
+          },
+          "repo:application" => %{
+            agent_id: "repo:application",
+            role: "implementer",
+            repository: "application",
+            status: "completed",
+            thread_id: "thread-pin-42-application",
+            latest_session_id: "session-pin-42-application",
+            workspace: "/tmp/symphony/application/PIN-42",
+            pr_url: "https://github.com/bjornjee/symphony/pull/42",
+            latest_event: %{
+              id: 99,
+              timestamp: team_event_timestamp(99),
+              sender: "repo:application",
+              recipient: "coordinator",
+              kind: "handoff",
+              message: "Application changes are ready for coordinated review."
+            }
+          },
+          "repo:web" => %{
+            agent_id: "repo:web",
+            role: "implementer",
+            repository: "web",
+            status: "blocked",
+            thread_id: "thread-pin-42-web",
+            latest_session_id: "session-pin-42-web",
+            workspace: "/tmp/symphony/web/PIN-42",
+            pr_url: nil,
+            latest_event: %{
+              id: 101,
+              timestamp: team_event_timestamp(101),
+              sender: "repo:web",
+              recipient: "coordinator",
+              kind: "blocker",
+              message: "Navigation review is needed before the web handoff can continue."
+            }
+          }
+        },
+        events: team_events()
+      },
+      %{
+        request_id: "PIN-51",
+        issue_id: "issue-team-51",
+        identifier: "PIN-51",
+        agents: %{
+          "coordinator" => %{
+            agent_id: "coordinator",
+            role: "coordinator",
+            repository: nil,
+            status: "running",
+            thread_id: "thread-pin-51-coordinator",
+            latest_session_id: "session-pin-51-coordinator",
+            workspace: "/tmp/symphony/teams/PIN-51",
+            pr_url: nil,
+            latest_event: nil
+          },
+          "repo:elixir" => %{
+            agent_id: "repo:elixir",
+            role: "implementer",
+            repository: "elixir",
+            status: "running",
+            thread_id: "thread-pin-51-elixir",
+            latest_session_id: "session-pin-51-elixir",
+            workspace: "/tmp/symphony/elixir/PIN-51",
+            pr_url: nil,
+            latest_event: nil
+          }
+        },
+        events: []
+      }
+    ]
+  end
+
+  defp team_events do
+    Enum.map(1..101, fn id ->
+      cond do
+        id == 101 ->
+          %{
+            id: id,
+            timestamp: team_event_timestamp(id),
+            sender: "repo:web",
+            recipient: "coordinator",
+            kind: "blocker",
+            message: "Navigation review is needed before the web handoff can continue."
+          }
+
+        rem(id, 4) == 0 ->
+          %{
+            id: id,
+            timestamp: team_event_timestamp(id),
+            sender: "repo:application",
+            recipient: "coordinator",
+            kind: "handoff",
+            message: "Application shared a verified implementation update."
+          }
+
+        rem(id, 3) == 0 ->
+          %{
+            id: id,
+            timestamp: team_event_timestamp(id),
+            sender: "repo:api",
+            recipient: "repo:web",
+            kind: "update",
+            message: "API contract details are ready for the web integration."
+          }
+
+        true ->
+          %{
+            id: id,
+            timestamp: team_event_timestamp(id),
+            sender: "coordinator",
+            recipient: "repo:application",
+            kind: "request",
+            message: "Coordinator requested a concise progress report."
+          }
+      end
+    end)
+  end
+
+  defp team_event_timestamp(id), do: DateTime.add(@team_event_base, id, :second)
 
   defp running_entry(state, opts) do
     now = DateTime.utc_now()

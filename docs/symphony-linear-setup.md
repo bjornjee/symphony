@@ -31,6 +31,49 @@ make symphony-workflow
 make symphony-workflow-check
 ```
 
+### Same-repository Team Mode aliases
+
+`workflow-manifest.yml` is the trusted source for the `team.repositories`
+registry. Operators may give multiple workflow entries unique names while they
+target the same repository. Each alias must use distinct workspace roots that
+are explicitly configured. The derived default uses the repository name, so
+aliases for one repository would otherwise resolve to the same root and lose
+workspace isolation.
+
+For example, two documentation implementors can share the repository URL while
+keeping their generated workflow files and workspaces separate:
+
+```yaml
+workflows:
+  - name: symphony-setup-docs
+    output_path: workflows/symphony-setup-docs/workflow.md
+    repository:
+      url: git@github.com:bjornjee/symphony.git
+    workspace:
+      root: /workspaces/symphony-setup-docs
+  - name: symphony-docker-docs
+    output_path: workflows/symphony-docker-docs/workflow.md
+    repository:
+      url: git@github.com:bjornjee/symphony.git
+    workspace:
+      root: /workspaces/symphony-docker-docs
+```
+
+When Symphony runs in Docker, every configured root must be writable and
+visible inside the worker container. Mount each host-backed root, or its
+distinct parent directory, at the path used in the manifest; do not configure
+two aliases to share a workspace directory.
+
+Workspace isolation does not prevent merge conflicts. Before dispatch, assign
+exactly one declared documentation file to each implementor, and ensure those
+file declarations are disjoint. Avoid overlapping file ownership: if two
+members need the same file, sequence that work instead of running them as
+parallel aliases.
+
+Repository URLs, hooks, credentials, and workspace roots are trusted operator
+configuration. A Team ticket may name registered workflow aliases, but it
+cannot provide or override any of those values.
+
 ## Run
 
 Start Symphony in the foreground against the generated dogfood workflow:
