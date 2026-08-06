@@ -1101,6 +1101,18 @@ defmodule SymphonyElixir.ExtensionsTest do
 
     on_exit(fn -> File.rm(audit_events_path) end)
 
+    team_events =
+      Enum.map(1..101, fn id ->
+        %{
+          id: id,
+          timestamp: DateTime.add(~U[2026-08-06 07:00:00Z], id, :second),
+          sender: if(rem(id, 2) == 0, do: "repo:application", else: "coordinator"),
+          recipient: if(rem(id, 2) == 0, do: "coordinator", else: "repo:application"),
+          kind: if(rem(id, 3) == 0, do: "handoff", else: "update"),
+          message: if(id == 1, do: "Dropped oldest team event", else: "Team event #{id}")
+        }
+      end)
+
     snapshot =
       static_snapshot()
       |> update_in([:running, Access.at(0)], fn running ->
@@ -1134,6 +1146,7 @@ defmodule SymphonyElixir.ExtensionsTest do
               pr_url: "https://github.com/example/application/pull/42",
               latest_event: %{
                 id: 1,
+                timestamp: ~U[2026-08-06 07:00:01Z],
                 sender: "repo:application",
                 recipient: "coordinator",
                 kind: "handoff",
@@ -1141,7 +1154,7 @@ defmodule SymphonyElixir.ExtensionsTest do
               }
             }
           },
-          events: []
+          events: team_events
         }
       ])
 
@@ -1161,6 +1174,9 @@ defmodule SymphonyElixir.ExtensionsTest do
 
     {:ok, view, html} = live(build_conn(), "/")
     assert html =~ "Operations Dashboard"
+    assert html =~ ~s(aria-label="Primary navigation")
+    assert html =~ ~s(href="/teams")
+    assert html =~ "Open team"
     assert html =~ "MT-HTTP"
     assert html =~ "MT-RETRY"
     assert html =~ "MT-BLOCKED"
@@ -1172,10 +1188,8 @@ defmodule SymphonyElixir.ExtensionsTest do
     assert html =~ "turn blocked: waiting for user input"
     assert html =~ "Teams"
     assert html =~ "PIN-42"
-    assert html =~ "repo:application"
-    assert html =~ "thread-application"
-    assert html =~ "Application PR is ready."
-    assert html =~ ~s(href="https://github.com/example/application/pull/42")
+    assert html =~ "Team event 101"
+    refute html =~ "thread-application"
     assert html =~ ~s(id="agent-detail-runtime")
     assert html =~ "<dt>Runtime</dt>"
     refute html =~ ~r/id="agent-detail-runtime"[^>]*>\d+m \d+s/
@@ -1205,6 +1219,44 @@ defmodule SymphonyElixir.ExtensionsTest do
     refute html =~ "Transport"
     assert html =~ "status-badge-live"
     assert html =~ "status-badge-offline"
+
+    payload = Presenter.state_payload(orchestrator_name, 50)
+    [team_payload] = payload.teams
+    assert length(team_payload.events) == 100
+    assert hd(team_payload.events).id == 2
+    assert hd(team_payload.events).timestamp == "2026-08-06T07:00:02Z"
+    assert List.last(team_payload.events).id == 101
+
+    {:ok, _teams_view, teams_html} = live(build_conn(), "/teams")
+    assert teams_html =~ ~s(aria-current="page">Teams)
+    assert teams_html =~ "Active team requests"
+    assert teams_html =~ "View activity"
+    assert teams_html =~ ~s(href="/teams/PIN-42")
+
+    {:ok, team_view, team_html} = live(build_conn(), "/teams/PIN-42")
+    assert team_html =~ "Member event log"
+    assert team_html =~ "Latest bounded messages between team members."
+    assert team_html =~ "100 events"
+    assert team_html =~ ~s(datetime="2026-08-06T07:00:02Z")
+    assert team_html =~ ~s(data-local-timestamp)
+    refute team_html =~ "#002"
+    refute team_html =~ "Dropped oldest team event"
+    assert team_html =~ ~s(id="team-member-coordinator")
+    assert team_html =~ ~s(id="team-member-repo-application")
+    assert team_html =~ ~s(aria-pressed="false")
+    refute team_html =~ ~s(id="team-member-details")
+
+    team_html =
+      team_view
+      |> element("#team-member-repo-application")
+      |> render_click()
+
+    assert team_html =~ ~s(data-selected-member="repo:application")
+    assert team_html =~ ~s(id="team-member-details")
+    assert team_html =~ "thread-application"
+    assert team_html =~ "Team event 2"
+    assert team_html =~ "Team event 3"
+    assert team_html =~ ~s(class="team-event team-event-related")
 
     updated_snapshot =
       put_in(snapshot.running, [

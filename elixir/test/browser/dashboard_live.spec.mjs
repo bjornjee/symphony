@@ -85,6 +85,11 @@ async function captureState(page, state, viewport) {
   }
 }
 
+async function captureFlow(page, step, viewport) {
+  const viewportName = viewport.width <= 680 ? "mobile" : "desktop";
+  await captureState(page, `${step}-${viewportName}`, viewport);
+}
+
 async function gotoReady(page, request) {
   await setFixtureState(request, "mixed");
   await page.goto("/", {waitUntil: "domcontentloaded"});
@@ -93,7 +98,7 @@ async function gotoReady(page, request) {
 }
 
 async function tabTo(page, targetId) {
-  for (let index = 0; index < 12; index += 1) {
+  for (let index = 0; index < 24; index += 1) {
     await page.keyboard.press("Tab");
     const activeId = await page.evaluate(() => document.activeElement?.id || "");
     if (activeId === targetId) return;
@@ -129,6 +134,14 @@ test("dashboard states and live interactions remain observable", async ({page, r
     await page.setViewportSize({width: viewport.width, height: viewport.height});
 
     await gotoReady(page, request);
+    await expect(page.getByRole("navigation", {name: "Primary navigation"})).toBeVisible();
+    await expect(page.locator(".team-preview-row")).toHaveCount(2);
+    await expect(page.getByRole("link", {name: /Review blocker/})).toBeVisible();
+    await expect(page.getByText("Needs attention", {exact: true}).first()).toBeVisible();
+    await page.evaluate(() => window.scrollTo(0, 0));
+    expect(await page.evaluate(() => window.scrollY)).toBe(0);
+    await captureFlow(page, "step-01-operations", viewport);
+
     await expect(page.locator("#agent-issue-running")).toBeVisible();
     await expect(page.locator(".fleet-summary")).not.toContainText("Runtime");
     await expect(page.getByText("Tokens", {exact: true})).toHaveCount(0);
@@ -163,7 +176,9 @@ test("dashboard states and live interactions remain observable", async ({page, r
       return {background: style.backgroundColor, fontFamily: style.fontFamily};
     });
 
-    expect(activitySurface.background).toBe("rgb(255, 255, 255)");
+    expect(activitySurface.background).toMatch(
+      /^(?:rgb\(255, 255, 255\)|oklab\(1 0 0\)|oklch\(1 0 0\))$/
+    );
     expect(activitySurface.fontFamily).not.toContain("SFMono");
 
     const issueLinkHeight = await page
@@ -193,6 +208,102 @@ test("dashboard states and live interactions remain observable", async ({page, r
       ).toBeLessThan(viewport.height);
     }
     await captureState(page, "running", viewport);
+
+    await page.getByRole("link", {name: "Teams", exact: true}).click();
+    await expect(page).toHaveURL(/\/teams$/);
+    await expect(page.getByRole("heading", {name: "Active team requests"})).toBeVisible();
+    await expect(page.locator(".team-index-row")).toHaveCount(2);
+    await expect(page.getByRole("link", {name: /Review blocker/})).toBeVisible();
+    await expect(page.getByRole("link", {name: /View activity/})).toBeVisible();
+    await expectNoHorizontalOverflow(page);
+    await captureFlow(page, "step-02-teams", viewport);
+
+    await page.getByRole("link", {name: /Review blocker/}).click();
+    await expect(page).toHaveURL(/\/teams\/PIN-42$/);
+    await expect(page.getByRole("heading", {name: "Member event log"})).toBeVisible();
+    await expect(page.locator("#team-event-log .team-event")).toHaveCount(100);
+    await expect(page.locator("#team-event-log time[data-local-timestamp]")).toHaveCount(100);
+    await expect(page.locator("#team-event-log .team-event").first()).toHaveAttribute(
+      "data-event-id",
+      "2"
+    );
+    await expect(page.locator("#team-event-log .team-event").last()).toHaveAttribute(
+      "data-event-id",
+      "101"
+    );
+    await expect(page.locator("#team-event-log time").first()).toHaveAttribute(
+      "datetime",
+      "2026-08-06T07:00:02Z"
+    );
+    await expect(page.locator("#team-event-log time").first()).toContainText(
+      "06 Aug · 15:00:02 GMT+8"
+    );
+    await expect(page.locator("#team-event-log")).not.toContainText("#002");
+    await expect(page.locator("#team-event-log")).toHaveAttribute("aria-live", "off");
+    const eventContentRhythm = await page
+      .locator("#team-event-log .team-event-content")
+      .first()
+      .evaluate((element) => {
+        const kind = element.querySelector(".team-event-kind").getBoundingClientRect();
+        const message = element.querySelector(".team-event-message").getBoundingClientRect();
+        return {
+          display: getComputedStyle(element).display,
+          separation: Math.round(message.left - kind.right)
+        };
+      });
+    expect(eventContentRhythm.display).toBe("grid");
+    expect(eventContentRhythm.separation).toBeGreaterThanOrEqual(8);
+    await expectNoHorizontalOverflow(page);
+    await captureFlow(page, "step-03-team-activity", viewport);
+
+    await page.locator("#team-member-repo-application").click();
+    await expect(page.locator("#team-detail")).toHaveAttribute(
+      "data-selected-member",
+      "repo:application"
+    );
+    await expect(page.locator("#team-event-log .team-event")).toHaveCount(100);
+    await expect(page.locator("#team-event-log .team-event-related")).not.toHaveCount(100);
+    await expect(page.locator("#team-member-details")).toContainText(
+      "thread-pin-42-application"
+    );
+    await expect(page.locator("#team-member-details")).toHaveAttribute("open", "");
+    await expectNoHorizontalOverflow(page);
+    await captureFlow(page, "step-04-member-focus", viewport);
+
+    await page.goto("/teams/PIN-MISSING", {waitUntil: "domcontentloaded"});
+    await expect(page.getByRole("heading", {name: "Team unavailable"})).toBeVisible();
+    await expect(page.getByRole("link", {name: "Back to Teams"})).toBeVisible();
+    await expectNoHorizontalOverflow(page);
+    await captureState(page, "team-missing", viewport);
+
+    await setFixtureState(request, "mixed");
+    await page.goto("/teams/PIN-51", {waitUntil: "domcontentloaded"});
+    await expect(page.getByRole("heading", {name: "Member event log"})).toBeVisible();
+    await expect(page.getByText("No member events are available for this team yet.")).toBeVisible();
+    await expect(page.locator("#team-event-log .team-event")).toHaveCount(0);
+    await expectNoHorizontalOverflow(page);
+    await captureState(page, "team-eventless", viewport);
+
+    await setFixtureState(request, "empty");
+    await page.goto("/teams", {waitUntil: "domcontentloaded"});
+    await expect(page.getByRole("heading", {name: "No active teams"})).toBeVisible();
+    await expectNoHorizontalOverflow(page);
+    await captureState(page, "team-empty", viewport);
+
+    await setFixtureState(request, "error");
+    await page.goto("/teams", {waitUntil: "domcontentloaded"});
+    await expect(page.getByRole("heading", {name: "Snapshot unavailable"})).toBeVisible();
+    await expectNoHorizontalOverflow(page);
+    await captureState(page, "team-error", viewport);
+
+    await setFixtureState(request, "loading");
+    await page.goto("/teams", {waitUntil: "domcontentloaded"});
+    await expect(page.getByRole("heading", {name: "Loading runtime status"})).toBeVisible();
+    await expectNoHorizontalOverflow(page);
+    await captureState(page, "team-loading", viewport);
+    await expect(page.locator("#dashboard-root")).toHaveAttribute("data-dashboard-state", "ready");
+
+    await gotoReady(page, request);
     await page.locator("#agent-detail-log").scrollIntoViewIfNeeded();
     await captureState(page, "live-log", viewport);
 
@@ -413,6 +524,11 @@ Preservation gate state: PASS
 | --- | --- | --- |
 | Desktop render 1440x900 | PASS | All ten named states rendered without horizontal overflow. |
 | Narrow render 390x844 | PASS | All ten named states rendered within the viewport. |
+| Global navigation | PASS | Operations and Teams remained visible with correct current-page semantics. |
+| Team index intent | PASS | Each team exposed one View activity or Review blocker action. |
+| Team chronology | PASS | PIN-42 rendered the newest 100 events from #002 through #101 without page overflow. |
+| Member focus | PASS | Application selection highlighted related rows while all 100 events remained present. |
+| Team failure states | PASS | Empty, missing, eventless, loading, and runtime-error Team states rendered with recovery copy at both viewports. |
 | Keyboard-only selection | PASS | Tab reached retrying agent and Enter selected it. |
 | Visible focus | PASS | Computed focus outline was ${focusStyle.width} ${focusStyle.style} ${focusStyle.color}. |
 | Keyboard log reading | PASS | Tab focused the named log region and Page Up scrolled older output. |

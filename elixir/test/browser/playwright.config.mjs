@@ -18,6 +18,7 @@ export default defineConfig({
     baseURL: `http://127.0.0.1:${fixturePort}`,
     headless: true,
     locale: "en-US",
+    timezoneId: "Asia/Singapore",
     reducedMotion: "reduce",
     screenshot: "off",
     trace: "off"
