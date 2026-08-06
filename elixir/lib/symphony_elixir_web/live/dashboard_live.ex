@@ -119,6 +119,45 @@ defmodule SymphonyElixirWeb.DashboardLive do
             </div>
           </section>
 
+          <section :if={@payload.teams != []} class="team-groups" aria-labelledby="team-groups-title">
+            <div class="panel-heading">
+              <div>
+                <p class="panel-kicker">Requests</p>
+                <h2 id="team-groups-title">Teams</h2>
+              </div>
+              <span class="agent-total numeric"><%= length(@payload.teams) %></span>
+            </div>
+
+            <article :for={team <- @payload.teams} class="team-group" data-request-id={team.request_id}>
+              <h3><%= team.request_id %></h3>
+              <div class="team-agent-list">
+                <div :for={agent <- team.agents} class="team-agent">
+                  <span class="team-agent-id"><%= agent.agent_id %></span>
+                  <span class="team-agent-field" data-label="Role">
+                    <%= agent.role %><%= if agent.repository, do: " · #{agent.repository}" %>
+                  </span>
+                  <span class="team-agent-field" data-label="Status"><%= agent.phase || agent.status %></span>
+                  <span class="team-agent-field" data-label="Thread"><%= agent.thread_id || "thread pending" %></span>
+                  <span class="team-agent-field" data-label="Session">
+                    <%= agent.latest_session_id || "session pending" %>
+                  </span>
+                  <span class="team-agent-field" data-label="Workspace"><%= agent.workspace || "workspace pending" %></span>
+                  <a
+                    :if={agent.pr_url}
+                    class="team-agent-field"
+                    data-label="Change"
+                    href={agent.pr_url}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                  >PR</a>
+                  <span :if={agent.latest_event} class="team-agent-event" data-label="Latest event">
+                    <%= agent.latest_event.message %>
+                  </span>
+                </div>
+              </div>
+            </article>
+          </section>
+
           <div class="agent-workspace">
             <aside class="agent-overview" aria-labelledby="agent-overview-title">
               <div class="panel-heading">

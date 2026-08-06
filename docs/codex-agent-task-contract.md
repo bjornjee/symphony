@@ -77,6 +77,63 @@ When `tracker.claim_state` is configured, Symphony moves a dispatchable issue to
 that state before starting Codex. The production workflows use `In Progress` so
 Linear reflects the handoff immediately.
 
+## Team Mode
+
+Add both `codex-ready` and `codex-team` to opt into one bounded,
+multi-repository execution. A Team issue keeps the normal v1 sections and adds
+this final section:
+
+```yaml
+## Team
+repositories:
+  - workflow: application
+    change: Add the new API behavior.
+    acceptance:
+      - Existing callers remain compatible.
+    verification:
+      - mix test
+  - workflow: infrastructure
+    change: Deploy the supporting configuration.
+    acceptance:
+      - The application can use the new configuration.
+    verification:
+      - terraform validate
+validation_goal: The application and infrastructure changes work together.
+invariants:
+  - Infrastructure must land before the application is deployed.
+```
+
+The section declares two to eight unique workflow names. Every repository
+requires a non-empty change, acceptance list, and verification list;
+`validation_goal` and `invariants` are also required. The label and section must
+appear together. The issue identifier is the request ID, and agent IDs are
+always `coordinator` and `repo:<workflow>`.
+
+Workflow names resolve only through the trusted `team.repositories` registry
+generated from `workflow-manifest.yml`. Ticket YAML cannot provide repository
+URLs, hooks, commands, credentials, additional repositories, or alternate
+invariants. Each repository runs the existing single-repository proof, review,
+PR, and completion-evidence gates in its own checkout and top-level Codex
+thread. Symphony updates one `## Team execution` Linear comment; internal agent
+events remain in the bounded runtime state and dashboard.
+
+Member planning remains conditional on preactivation classification. Simple
+members execute their sealed direct authorization without manufacturing a plan.
+Planned members block before implementation on a fresh, read-only, high-effort
+principal-architect review that applies Ponytail discipline while protecting
+the contract and product invariants.
+
+The coordinator may sequence declared repositories into parallel waves,
+reorder only work that has not started, retry one blocked member once, or ask
+for human input. Symphony revalidates the labels and pinned contract digest
+before every wave. Completion requires fresh passing evidence and a PR from
+every member plus a passing final verdict against the parent acceptance
+criteria, validation goal, and invariants.
+
+`codex-team` is the rollout switch. To roll back Symphony while Team issues are
+active, first remove `codex-ready` from every active Team issue and wait for the
+current wave boundary; only then deploy a version without Team Mode support.
+
 ## Agent Execution
 
 Symphony owns scheduling, preactivation classification and review, and the
@@ -87,7 +144,9 @@ low-risk `feature` or `chore` may execute directly only when
 its conventional title matches the workflow, `Scope.In` names one path, there
 is one acceptance criterion, `Verification` contains one exact backtick-delimited
 command, and no risky or decomposition signal is present.
-All other tasks receive native planning and medium-effort automated review.
+All other tasks receive native planning and automated review. Ordinary tasks
+use the default medium-effort reviewer; planned Team members use the
+high-effort principal-architect profile described above.
 `Planning: full` in `Notes For Agent` always selects the reviewed path.
 
 Agents must:

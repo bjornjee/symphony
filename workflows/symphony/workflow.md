@@ -13,6 +13,13 @@ hooks:
   after_create: "git clone 'git@github.com:bjornjee/symphony.git' ."
 polling:
   interval_ms: 30000
+team:
+  repositories:
+    symphony:
+      hooks:
+        after_create: "git clone 'git@github.com:bjornjee/symphony.git' ."
+      workspace:
+        root: "~/Code/bjornjee/worktrees/symphony"
 tracker:
   active_states: ["Todo", "In Progress", "Merging", "Rework"]
   api_key: "$LINEAR_API_KEY"
@@ -65,6 +72,12 @@ and add `codex-review` when Linear tooling permits labels.
 
 If the issue has `codex-decompose`, or if the scope is too broad for one PR and
 one focused proof command, decompose before implementation.
+
+An issue with both `codex-ready` and `codex-team` is an explicit Team Mode
+request owned by Symphony. The parent request is not decomposed into Linear
+children: Symphony validates its final `## Team` section against the trusted
+workflow registry, then coordinates one independently proved PR per declared
+repository.
 
 ## Agent execution conventions
 
@@ -171,7 +184,8 @@ Do not implement risky work until the invariant contract exists in the workpad.
 
 ## Decomposition
 
-Decompose instead of implementing when the issue spans repos, needs design
+Except for an explicit `codex-team` request, decompose instead of implementing
+when the issue spans repos, needs design
 first, contains multiple independent deliverables, cannot be verified with one
 focused proof command, likely needs multiple PRs, or mixes feature work with
 cleanup, migration, or investigation.

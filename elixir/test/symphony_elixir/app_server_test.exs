@@ -25,6 +25,87 @@ defmodule SymphonyElixir.AppServerTest do
     assert :ok = AppServer.stop_session(session)
   end
 
+  test "app server names a thread and steers an active turn through its owning receive loop" do
+    test_root = test_root("thread-name-steer")
+    workspace_root = Path.join(test_root, "workspaces")
+    workspace = Path.join(workspace_root, "PIN-42")
+    codex_binary = Path.join(test_root, "fake-codex")
+    trace_file = Path.join(test_root, "thread-name-steer.trace")
+    File.mkdir_p!(workspace)
+
+    File.write!(codex_binary, """
+    #!/bin/sh
+    count=0
+    while IFS= read -r line; do
+      count=$((count + 1))
+      printf '%s\n' "$line" >> "#{trace_file}"
+      case "$count" in
+        1) printf '%s\n' '{"id":1,"result":{}}' ;;
+        3) printf '%s\n' '{"id":2,"result":{"thread":{"id":"thread-team"},"instructionSources":[]}}' ;;
+        4) printf '%s\n' '{"id":21,"result":{}}' ;;
+        5) printf '%s\n' '{"id":3,"result":{"turn":{"id":"turn-team"}}}' ;;
+        6)
+          printf '%s\n' '{"id":22,"result":{"turnId":"turn-team"}}'
+          printf '%s\n' '{"method":"turn/completed"}'
+          ;;
+      esac
+    done
+    """)
+
+    File.chmod!(codex_binary, 0o755)
+
+    write_workflow_file!(Workflow.workflow_file_path(),
+      workspace_root: workspace_root,
+      codex_command: "#{codex_binary} app-server"
+    )
+
+    on_exit(fn -> File.rm_rf(test_root) end)
+    parent = self()
+
+    owner =
+      spawn_link(fn ->
+        {:ok, session} = AppServer.start_session(workspace)
+        :ok = AppServer.set_thread_name(session, "[PIN-42 · team] coordinator")
+        send(parent, {:session_ready, session})
+
+        issue = %Issue{id: "issue-42", identifier: "PIN-42", title: "Coordinate repositories"}
+
+        result =
+          AppServer.run_turn(session, "Coordinate the next wave.", issue,
+            on_message: fn
+              %{event: :session_started} = message -> send(parent, {:turn_started, message})
+              _message -> :ok
+            end
+          )
+
+        send(parent, {:turn_result, result})
+        AppServer.stop_session(session)
+      end)
+
+    assert_receive {:session_ready, session}, 1_000
+    assert session.owner == owner
+    assert_receive {:turn_started, %{turn_id: "turn-team"}}, 1_000
+    assert :ok = AppServer.steer_turn(session, "turn-team", "Repository handoff is ready.")
+    assert_receive {:turn_result, {:ok, %{thread_id: "thread-team", turn_id: "turn-team"}}}, 1_000
+
+    requests =
+      trace_file
+      |> File.read!()
+      |> String.split("\n", trim: true)
+      |> Enum.map(&Jason.decode!/1)
+
+    assert Enum.find(requests, &(&1["method"] == "thread/name/set"))["params"] == %{
+             "threadId" => "thread-team",
+             "name" => "[PIN-42 · team] coordinator"
+           }
+
+    assert Enum.find(requests, &(&1["method"] == "turn/steer"))["params"] == %{
+             "threadId" => "thread-team",
+             "expectedTurnId" => "turn-team",
+             "input" => [%{"type" => "text", "text" => "Repository handoff is ready."}]
+           }
+  end
+
   test "app server distinguishes configured capabilities from runtime-usable browser paths" do
     test_root = test_root("capability-diagnostics")
     workspace_root = Path.join(test_root, "workspaces")

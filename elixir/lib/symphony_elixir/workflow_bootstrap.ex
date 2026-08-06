@@ -60,13 +60,23 @@ defmodule SymphonyElixir.WorkflowBootstrap do
         {:error, :bootstrap_prompt_missing}
 
       true ->
-        workflows
-        |> Enum.map(&build_workflow(&1, defaults, to_string(prompt), Path.dirname(manifest_path)))
-        |> collect_results()
+        with {:ok, repository_registry} <- build_repository_registry(workflows, defaults) do
+          workflows
+          |> Enum.map(
+            &build_workflow(
+              &1,
+              defaults,
+              to_string(prompt),
+              Path.dirname(manifest_path),
+              repository_registry
+            )
+          )
+          |> collect_results()
+        end
     end
   end
 
-  defp build_workflow(workflow, defaults, prompt, manifest_dir) when is_map(workflow) do
+  defp build_workflow(workflow, defaults, prompt, manifest_dir, repository_registry) when is_map(workflow) do
     workflow = normalize_keys(workflow)
     name = workflow["name"]
     output_path = workflow["output_path"]
@@ -83,6 +93,7 @@ defmodule SymphonyElixir.WorkflowBootstrap do
           defaults
           |> deep_merge(Map.delete(workflow, "name"))
           |> deep_merge(derived_config(workflow, defaults))
+          |> deep_merge(%{"team" => %{"repositories" => repository_registry}})
           |> Map.delete("output_path")
 
         {:ok,
@@ -95,7 +106,34 @@ defmodule SymphonyElixir.WorkflowBootstrap do
     end
   end
 
-  defp build_workflow(_workflow, _defaults, _prompt, _manifest_dir), do: {:error, :bootstrap_workflow_not_a_map}
+  defp build_workflow(_workflow, _defaults, _prompt, _manifest_dir, _repository_registry),
+    do: {:error, :bootstrap_workflow_not_a_map}
+
+  defp build_repository_registry(workflows, defaults) do
+    workflows
+    |> Enum.reduce_while({:ok, %{}}, fn raw_workflow, {:ok, registry} ->
+      workflow = if is_map(raw_workflow), do: normalize_keys(raw_workflow), else: %{}
+      name = workflow["name"]
+      repository_url = get_in(workflow, ["repository", "url"])
+
+      cond do
+        not present_string?(repository_url) ->
+          {:cont, {:ok, registry}}
+
+        Map.has_key?(registry, name) ->
+          {:halt, {:error, {:bootstrap_duplicate_workflow_name, name}}}
+
+        true ->
+          config =
+            defaults
+            |> deep_merge(Map.delete(workflow, "name"))
+            |> deep_merge(derived_config(workflow, defaults))
+
+          definition = Map.take(config, ["workspace", "hooks"])
+          {:cont, {:ok, Map.put(registry, name, definition)}}
+      end
+    end)
+  end
 
   defp derived_config(workflow, defaults) do
     repository = Map.get(workflow, "repository", %{})

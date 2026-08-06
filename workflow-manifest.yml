@@ -73,6 +73,12 @@ prompt: |
   If the issue has `codex-decompose`, or if the scope is too broad for one PR and
   one focused proof command, decompose before implementation.
 
+  An issue with both `codex-ready` and `codex-team` is an explicit Team Mode
+  request owned by Symphony. The parent request is not decomposed into Linear
+  children: Symphony validates its final `## Team` section against the trusted
+  workflow registry, then coordinates one independently proved PR per declared
+  repository.
+
   ## Agent execution conventions
 
   Symphony owns scheduling, app-server goal setup, workflow selection, and
@@ -178,7 +184,8 @@ prompt: |
 
   ## Decomposition
 
-  Decompose instead of implementing when the issue spans repos, needs design
+  Except for an explicit `codex-team` request, decompose instead of implementing
+  when the issue spans repos, needs design
   first, contains multiple independent deliverables, cannot be verified with one
   focused proof command, likely needs multiple PRs, or mixes feature work with
   cleanup, migration, or investigation.

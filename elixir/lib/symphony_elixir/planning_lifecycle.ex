@@ -325,6 +325,8 @@ defmodule SymphonyElixir.PlanningLifecycle do
     stop_session = Keyword.get(opts, :stop_session, &AppServer.stop_session/1)
     worker_host = Keyword.get(opts, :worker_host)
     base_on_message = Keyword.get(opts, :on_message, fn _message -> :ok end)
+    reviewer_role = Keyword.get(opts, :planning_reviewer_role, "isolated automated execution-plan reviewer")
+    reviewer_effort = Keyword.get(opts, :planning_reviewer_effort, "medium")
 
     with {:ok, repository_before} <- capture.(workspace, worker_host),
          :ok <- validate_repository_context(repository_before, context),
@@ -344,11 +346,11 @@ defmodule SymphonyElixir.PlanningLifecycle do
         })
 
         turn_result =
-          run_turn.(reviewer_session, review_prompt(issue, contract, profile, candidate), issue,
+          run_turn.(reviewer_session, review_prompt(issue, contract, profile, candidate, reviewer_role), issue,
             sandbox_policy: @read_only_policy,
             approval_policy: @deny_approvals,
             auto_approve_requests: false,
-            effort: "medium",
+            effort: reviewer_effort,
             on_message: planning_message_handler(collector, base_on_message),
             tool_executor: submission_executor(collector, "submit_plan_review", :submission)
           )
@@ -702,9 +704,9 @@ defmodule SymphonyElixir.PlanningLifecycle do
     |> String.trim()
   end
 
-  defp review_prompt(issue, contract, profile, candidate) do
+  defp review_prompt(issue, contract, profile, candidate, reviewer_role) do
     """
-    You are Symphony's isolated automated execution-plan reviewer. Review only; do not edit files, request approval, ask the operator, or call external mutation APIs.
+    You are Symphony's #{reviewer_role}. Review only; do not edit files, request approval, ask the operator, or call external mutation APIs.
     Check contract and acceptance-criteria alignment, bounded scope, execution context, scale safety, workflow gates, typed proof sufficiency and safety, unsupported assumptions, rollback, and risky-work invariants.
     Reject phases that are not independently verifiable, depend on later work, omit meaningful stop conditions, hide scope in a broad path, or cannot map their objective to the final native plan.
     Verify every repository path named in a proof command exists at the pinned base unless that phase or an earlier phase explicitly creates that exact affected path. Reject stale or misspelled paths, and reject baseline or pre-change proofs that reference future files.

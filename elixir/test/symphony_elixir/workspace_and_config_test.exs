@@ -5,6 +5,18 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
   alias SymphonyElixir.Config.Schema.{Codex, StringOrMap}
   alias SymphonyElixir.Linear.Client
 
+  test "config schema retains the trusted Team repository registry" do
+    repositories = %{
+      "application" => %{
+        "workspace" => %{"root" => "/workspaces/application"},
+        "hooks" => %{"after_create" => "git clone app ."}
+      }
+    }
+
+    assert {:ok, settings} = Schema.parse(%{"team" => %{"repositories" => repositories}})
+    assert settings.team.repositories == repositories
+  end
+
   test "workspace bootstrap can be implemented in after_create hook" do
     test_root =
       Path.join(
@@ -38,6 +50,74 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
     after
       File.rm_rf(test_root)
     end
+  end
+
+  test "team repository workspaces isolate two Git fixtures and task branches" do
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-team-repository-isolation-#{System.unique_integer([:positive])}"
+      )
+
+    try do
+      application_source = create_git_fixture!(test_root, "application", "application\n")
+      infrastructure_source = create_git_fixture!(test_root, "infrastructure", "infrastructure\n")
+      application_root = Path.join(test_root, "application-workspaces")
+      infrastructure_root = Path.join(test_root, "infrastructure-workspaces")
+      File.mkdir_p!(application_root)
+      File.mkdir_p!(infrastructure_root)
+
+      application_config = %{
+        "workspace" => %{"root" => application_root},
+        "hooks" => %{"after_create" => "git clone --depth 1 #{application_source} ."}
+      }
+
+      infrastructure_config = %{
+        "workspace" => %{"root" => infrastructure_root},
+        "hooks" => %{"after_create" => "git clone --depth 1 #{infrastructure_source} ."}
+      }
+
+      assert {:ok, application_workspace} =
+               Workspace.create_for_repository("PIN-42", application_config)
+
+      assert {:ok, infrastructure_workspace} =
+               Workspace.create_for_repository("PIN-42", infrastructure_config)
+
+      refute application_workspace == infrastructure_workspace
+      assert File.read!(Path.join(application_workspace, "README.md")) == "application\n"
+      assert File.read!(Path.join(infrastructure_workspace, "README.md")) == "infrastructure\n"
+
+      assert {_, 0} = System.cmd("git", ["-C", application_workspace, "switch", "-c", "feat/PIN-42-application"])
+      assert {_, 0} = System.cmd("git", ["-C", infrastructure_workspace, "switch", "-c", "feat/PIN-42-infrastructure"])
+
+      assert {"feat/PIN-42-application\n", 0} =
+               System.cmd("git", ["-C", application_workspace, "branch", "--show-current"])
+
+      assert {"feat/PIN-42-infrastructure\n", 0} =
+               System.cmd("git", ["-C", infrastructure_workspace, "branch", "--show-current"])
+
+      assert {application_git_dir, 0} =
+               System.cmd("git", ["-C", application_workspace, "rev-parse", "--absolute-git-dir"])
+
+      assert {infrastructure_git_dir, 0} =
+               System.cmd("git", ["-C", infrastructure_workspace, "rev-parse", "--absolute-git-dir"])
+
+      refute String.trim(application_git_dir) == String.trim(infrastructure_git_dir)
+    after
+      File.rm_rf(test_root)
+    end
+  end
+
+  defp create_git_fixture!(test_root, name, readme) do
+    repository = Path.join(test_root, name)
+    File.mkdir_p!(repository)
+    File.write!(Path.join(repository, "README.md"), readme)
+    System.cmd("git", ["-C", repository, "init", "-b", "main"])
+    System.cmd("git", ["-C", repository, "config", "user.name", "Test User"])
+    System.cmd("git", ["-C", repository, "config", "user.email", "test@example.com"])
+    System.cmd("git", ["-C", repository, "add", "README.md"])
+    System.cmd("git", ["-C", repository, "commit", "-m", "initial"])
+    repository
   end
 
   test "workspace path is deterministic per issue identifier" do

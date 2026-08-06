@@ -114,6 +114,7 @@ defmodule SymphonyElixir.PlanningLifecycleTest do
     assert reviewer_prompt =~ "do not demand duplicate typed proofs"
     assert reviewer_prompt =~ "do not invent an exactly-once mapping rule"
     assert reviewer_prompt =~ "focused static contract tests may be sufficient behavioral proof"
+    assert reviewer_prompt =~ "isolated automated execution-plan reviewer"
     assert reviewer_turn_opts[:effort] == "medium"
     assert reviewer_turn_opts[:sandbox_policy] == %{"type" => "readOnly", "networkAccess" => false}
     assert reviewer_turn_opts[:approval_policy] == "never"
@@ -156,7 +157,9 @@ defmodule SymphonyElixir.PlanningLifecycleTest do
                repository_capture: fn _, _ -> {:ok, ctx.repository} end,
                issue_fetcher: fn [_id] -> {:ok, [issue]} end,
                run_turn: fn _, _, _, _ -> flunk("simple task must not start a planning turn") end,
-               start_reviewer_session: fn _, _ -> flunk("simple task must not start a reviewer") end
+               start_reviewer_session: fn _, _ -> flunk("simple task must not start a reviewer") end,
+               planning_reviewer_role: "independent principal architect",
+               planning_reviewer_effort: "high"
              )
 
     assert plan["execution_mode"] == "simple"
@@ -411,9 +414,10 @@ defmodule SymphonyElixir.PlanningLifecycleTest do
   end
 
   test "permits exactly two revisions before approving the third candidate", ctx do
+    parent = self()
     {:ok, counter} = Agent.start_link(fn -> %{primary: 0, reviewer: 0} end)
 
-    run_turn = fn session, _prompt, _issue, opts ->
+    run_turn = fn session, prompt, _issue, opts ->
       revision =
         Agent.get_and_update(counter, fn counts ->
           current = Map.fetch!(counts, session.role) + 1
@@ -430,6 +434,7 @@ defmodule SymphonyElixir.PlanningLifecycleTest do
 
         opts[:tool_executor].("submit_execution_plan", candidate)
       else
+        send(parent, {:reviewer_profile, prompt, opts[:effort]})
         verdict = if revision < 3, do: "revise", else: "approve"
 
         opts[:tool_executor].("submit_plan_review", %{
@@ -458,10 +463,21 @@ defmodule SymphonyElixir.PlanningLifecycleTest do
                start_reviewer_session: fn _, _ ->
                  {:ok, %{role: :reviewer, thread_id: "review-thread"}}
                end,
-               stop_session: fn _ -> :ok end
+               stop_session: fn _ -> :ok end,
+               planning_reviewer_role: "independent principal architect. Be critical and surgical. Apply Ponytail discipline to find the simplest elegant solution while protecting product invariants",
+               planning_reviewer_effort: "high"
              )
 
     assert Agent.get(counter, & &1) == %{primary: 3, reviewer: 3}
+
+    for _revision <- 1..3 do
+      assert_receive {:reviewer_profile, prompt, "high"}
+      assert prompt =~ "independent principal architect"
+      assert prompt =~ "Apply Ponytail discipline"
+      assert prompt =~ "simplest elegant solution"
+      assert prompt =~ "product invariants"
+    end
+
     Agent.stop(counter)
   end
 

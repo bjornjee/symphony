@@ -189,7 +189,9 @@ defmodule SymphonyElixir.AgentRunner do
     Logger.info("Starting worker attempt for #{issue_context(issue)} worker_host=#{worker_host_for_log(worker_host)}")
     worker_started_at = RunAudit.now()
 
-    case Workspace.create_for_issue(issue, worker_host) do
+    workspace_creator = Keyword.get(opts, :workspace_creator, &Workspace.create_for_issue/2)
+
+    case workspace_creator.(issue, worker_host) do
       {:ok, workspace} ->
         task_contract = Keyword.fetch!(opts, :task_contract)
 
@@ -245,7 +247,9 @@ defmodule SymphonyElixir.AgentRunner do
   defp run_with_workspace(workspace, issue, codex_update_recipient, opts, worker_host) do
     RunAudit.append(workspace, issue, :before_run_hook_started, %{phase: "workspace", status: "started"})
 
-    case Workspace.run_before_run_hook(workspace, issue, worker_host) do
+    before_run_hook_runner = Keyword.get(opts, :before_run_hook_runner, &Workspace.run_before_run_hook/3)
+
+    case before_run_hook_runner.(workspace, issue, worker_host) do
       :ok ->
         RunAudit.append(workspace, issue, :before_run_hook_completed, %{phase: "workspace", status: "completed"})
         run_codex_turns(workspace, issue, codex_update_recipient, opts, worker_host)
@@ -370,7 +374,16 @@ defmodule SymphonyElixir.AgentRunner do
   defp normalize_run_result({:ok, _completion_info}), do: :ok
   defp normalize_run_result({:error, _reason} = error), do: error
 
-  defp codex_message_handler(recipient, issue, workspace, proof_ledger, plan_progress, worker_host) do
+  defp codex_message_handler(
+         recipient,
+         issue,
+         workspace,
+         proof_ledger,
+         plan_progress,
+         worker_host,
+         session,
+         observer
+       ) do
     fn message ->
       case RunAudit.append_codex_update(workspace, issue, message) do
         {:ok, %{event_id: event_id} = proof} ->
@@ -383,6 +396,7 @@ defmodule SymphonyElixir.AgentRunner do
       record_native_plan_progress(plan_progress, message)
 
       send_codex_update(recipient, issue, message)
+      if is_function(observer, 2), do: observer.(session, message)
     end
   end
 
@@ -477,190 +491,199 @@ defmodule SymphonyElixir.AgentRunner do
     RunAudit.append(workspace, issue, :codex_app_server_starting, %{phase: "codex_app_server", status: "started"})
 
     try do
-      case start_codex_session(workspace, worker_host) do
+      case start_codex_session(workspace, worker_host, opts) do
         {:ok, session} ->
-          RunAudit.append(workspace, issue, :codex_app_server_started, %{
-            phase: "codex_app_server",
-            status: "completed",
-            thread_id: session.thread_id
-          })
+          case maybe_name_thread(session, opts) do
+            :ok ->
+              RunAudit.append(workspace, issue, :codex_app_server_started, %{
+                phase: "codex_app_server",
+                status: "completed",
+                thread_id: session.thread_id
+              })
 
-          try do
-            capability_diagnostics_resolver =
-              Keyword.get(
-                runtime.opts,
-                :capability_diagnostics_resolver,
-                &AppServer.capability_diagnostics/1
-              )
-
-            {:ok, capability_diagnostics} = capability_diagnostics_resolver.(session)
-            record_capability_diagnostics(workspace, issue, capability_diagnostics)
-            send_worker_capability_info(codex_update_recipient, issue, capability_diagnostics)
-
-            runtime =
-              runtime
-              |> Map.put(:thread_id, session.thread_id)
-              |> Map.update!(:opts, &Keyword.put(&1, :capability_diagnostics, capability_diagnostics))
-
-            with {:ok, instruction_authority} <-
-                   InstructionAuthority.capture(session.instruction_sources, worker_host) do
-              context_loaded_at = RunAudit.now()
-
-              RunAudit.record_phase(
-                workspace,
-                issue,
-                "context_loading",
-                context_started_at,
-                context_loaded_at,
-                "tool"
-              )
-
-              planning_opts =
-                runtime.opts
-                |> Keyword.put(:worker_host, worker_host)
-                |> Keyword.put(:instruction_authority, instruction_authority)
-                |> Keyword.put(:pin_primary_thread, fn ->
-                  case ThreadIdentity.pin(workspace, session.thread_id, worker_host) do
-                    {:ok, _thread_id} -> :ok
-                    {:error, _reason} = error -> error
-                  end
-                end)
-                |> Keyword.put(
-                  :on_message,
-                  codex_message_handler(
-                    codex_update_recipient,
-                    issue,
-                    workspace,
-                    runtime.proof_ledger,
-                    runtime.plan_progress,
-                    worker_host
+              try do
+                capability_diagnostics_resolver =
+                  Keyword.get(
+                    runtime.opts,
+                    :capability_diagnostics_resolver,
+                    &AppServer.capability_diagnostics/1
                   )
-                )
-                |> Keyword.put(:lifecycle_event, fn event, attrs ->
-                  RunAudit.append(workspace, issue, event, attrs)
 
-                  send_codex_update(codex_update_recipient, issue, %{
-                    event: :workflow_phase,
-                    timestamp: DateTime.utc_now(),
-                    phase: attrs[:phase],
-                    status: attrs[:status],
-                    revision: attrs[:revision],
-                    verdict: attrs[:verdict]
-                  })
-                end)
+                {:ok, capability_diagnostics} = capability_diagnostics_resolver.(session)
+                record_capability_diagnostics(workspace, issue, capability_diagnostics)
+                send_worker_capability_info(codex_update_recipient, issue, capability_diagnostics)
 
-              planning_runner =
-                Keyword.get(runtime.opts, :planning_lifecycle_runner, &PlanningLifecycle.run/6)
-
-              task_branch_ensurer =
-                Keyword.get(runtime.opts, :task_branch_ensurer, &TaskBranch.ensure/5)
-
-              with {:ok, execution_plan} <-
-                     execution_plan_for_run_with_timing(
-                       planning_runner,
-                       session,
-                       workspace,
-                       issue,
-                       task_contract,
-                       Keyword.fetch!(runtime.opts, :workflow_profile),
-                       instruction_authority,
-                       planning_opts
-                     ),
-                   :ok <- pin_thread_before_goal(execution_plan, workspace, session, worker_host),
-                   ledger_key <- execution_ledger_key(execution_plan, issue),
-                   :ok <-
-                     persist_execution_authority(
-                       ledger_key,
-                       execution_plan,
-                       instruction_authority,
-                       session,
-                       issue
-                     ),
-                   :ok <- record_execution_plan_approved(workspace, issue, session, execution_plan),
-                   :ok <- set_goal_and_record(workspace, issue, session, task_contract, execution_plan),
-                   {:ok, _thread_id} <- ThreadIdentity.pin(workspace, session.thread_id, worker_host),
-                   {:ok, task_branch} <-
-                     task_branch_ensurer.(
-                       workspace,
-                       issue,
-                       execution_plan["workflow"],
-                       execution_plan_base_sha(execution_plan),
-                       worker_host
-                     ),
-                   :ok <-
-                     resume_exhausted_proof_budget(
-                       workspace,
-                       issue,
-                       execution_plan,
-                       ledger_key,
-                       worker_host
-                     ) do
-                RunAudit.append(workspace, issue, :task_branch_ready, %{
-                  phase: "implementation",
-                  status: "completed",
-                  branch: task_branch,
-                  base_sha: execution_plan_base_sha(execution_plan)
-                })
-
-                Agent.update(runtime.proof_ledger, fn _planning_proofs -> %{} end)
-                Agent.update(runtime.plan_progress, fn _planning_plan -> nil end)
-
-                runtime = %{
+                runtime =
                   runtime
-                  | opts:
-                      runtime.opts
-                      |> Keyword.put(:execution_plan, execution_plan)
-                      |> Keyword.put(:execution_ledger_key, ledger_key)
-                      |> Keyword.put(:instruction_authority, instruction_authority)
-                }
+                  |> Map.put(:thread_id, session.thread_id)
+                  |> Map.update!(:opts, &Keyword.put(&1, :capability_diagnostics, capability_diagnostics))
 
-                implementation_started_at = RunAudit.now()
-                Agent.update(runtime.nested_phase_time, fn _previous -> 0 end)
+                with {:ok, instruction_authority} <-
+                       InstructionAuthority.capture(session.instruction_sources, worker_host) do
+                  context_loaded_at = RunAudit.now()
 
-                implementation_outcome =
-                  capture_workspace_outcome(fn ->
-                    do_run_codex_turns(
-                      session,
+                  RunAudit.record_phase(
+                    workspace,
+                    issue,
+                    "context_loading",
+                    context_started_at,
+                    context_loaded_at,
+                    "tool"
+                  )
+
+                  planning_opts =
+                    runtime.opts
+                    |> Keyword.put(:worker_host, worker_host)
+                    |> Keyword.put(:instruction_authority, instruction_authority)
+                    |> Keyword.put(:pin_primary_thread, fn ->
+                      case ThreadIdentity.pin(workspace, session.thread_id, worker_host) do
+                        {:ok, _thread_id} -> :ok
+                        {:error, _reason} = error -> error
+                      end
+                    end)
+                    |> Keyword.put(
+                      :on_message,
+                      codex_message_handler(
+                        codex_update_recipient,
+                        issue,
+                        workspace,
+                        runtime.proof_ledger,
+                        runtime.plan_progress,
+                        worker_host,
+                        session,
+                        Keyword.get(runtime.opts, :codex_message_observer)
+                      )
+                    )
+                    |> Keyword.put(:lifecycle_event, fn event, attrs ->
+                      RunAudit.append(workspace, issue, event, attrs)
+
+                      send_codex_update(codex_update_recipient, issue, %{
+                        event: :workflow_phase,
+                        timestamp: DateTime.utc_now(),
+                        phase: attrs[:phase],
+                        status: attrs[:status],
+                        revision: attrs[:revision],
+                        verdict: attrs[:verdict]
+                      })
+                    end)
+
+                  planning_runner =
+                    Keyword.get(runtime.opts, :planning_lifecycle_runner, &PlanningLifecycle.run/6)
+
+                  task_branch_ensurer =
+                    Keyword.get(runtime.opts, :task_branch_ensurer, &TaskBranch.ensure/5)
+
+                  with {:ok, execution_plan} <-
+                         execution_plan_for_run_with_timing(
+                           planning_runner,
+                           session,
+                           workspace,
+                           issue,
+                           task_contract,
+                           Keyword.fetch!(runtime.opts, :workflow_profile),
+                           instruction_authority,
+                           planning_opts
+                         ),
+                       :ok <- pin_thread_before_goal(execution_plan, workspace, session, worker_host),
+                       ledger_key <- execution_ledger_key(execution_plan, issue),
+                       :ok <-
+                         persist_execution_authority(
+                           ledger_key,
+                           execution_plan,
+                           instruction_authority,
+                           session,
+                           issue
+                         ),
+                       :ok <- record_execution_plan_approved(workspace, issue, session, execution_plan),
+                       :ok <- set_goal_and_record(workspace, issue, session, task_contract, execution_plan),
+                       {:ok, _thread_id} <- ThreadIdentity.pin(workspace, session.thread_id, worker_host),
+                       {:ok, task_branch} <-
+                         task_branch_ensurer.(
+                           workspace,
+                           issue,
+                           execution_plan["workflow"],
+                           execution_plan_base_sha(execution_plan),
+                           worker_host
+                         ),
+                       :ok <-
+                         resume_exhausted_proof_budget(
+                           workspace,
+                           issue,
+                           execution_plan,
+                           ledger_key,
+                           worker_host
+                         ) do
+                    RunAudit.append(workspace, issue, :task_branch_ready, %{
+                      phase: "implementation",
+                      status: "completed",
+                      branch: task_branch,
+                      base_sha: execution_plan_base_sha(execution_plan)
+                    })
+
+                    Agent.update(runtime.proof_ledger, fn _planning_proofs -> %{} end)
+                    Agent.update(runtime.plan_progress, fn _planning_plan -> nil end)
+
+                    runtime = %{
+                      runtime
+                      | opts:
+                          runtime.opts
+                          |> Keyword.put(:execution_plan, execution_plan)
+                          |> Keyword.put(:execution_ledger_key, ledger_key)
+                          |> Keyword.put(:instruction_authority, instruction_authority)
+                    }
+
+                    implementation_started_at = RunAudit.now()
+                    Agent.update(runtime.nested_phase_time, fn _previous -> 0 end)
+
+                    implementation_outcome =
+                      capture_workspace_outcome(fn ->
+                        do_run_codex_turns(
+                          session,
+                          workspace,
+                          issue,
+                          task_contract,
+                          codex_update_recipient,
+                          runtime,
+                          {1, max_turns}
+                        )
+                      end)
+
+                    implementation_completed_at = RunAudit.now()
+                    excluded_duration_ms = Agent.get(runtime.nested_phase_time, & &1)
+
+                    RunAudit.record_phase(
                       workspace,
                       issue,
-                      task_contract,
-                      codex_update_recipient,
-                      runtime,
-                      {1, max_turns}
+                      "implementation",
+                      implementation_started_at,
+                      implementation_completed_at,
+                      "model",
+                      %{excluded_duration_ms: excluded_duration_ms}
                     )
-                  end)
 
-                implementation_completed_at = RunAudit.now()
-                excluded_duration_ms = Agent.get(runtime.nested_phase_time, & &1)
+                    implementation_outcome
+                    |> return_or_raise()
+                    |> then(&update_goal_for_result(session, workspace, issue, &1))
+                  else
+                    {:error, reason} = error ->
+                      RunAudit.append(workspace, issue, :codex_goal_failed, %{
+                        phase: "codex_goal",
+                        status: "failed",
+                        reason: reason,
+                        thread_id: session.thread_id
+                      })
 
-                RunAudit.record_phase(
-                  workspace,
-                  issue,
-                  "implementation",
-                  implementation_started_at,
-                  implementation_completed_at,
-                  "model",
-                  %{excluded_duration_ms: excluded_duration_ms}
-                )
-
-                implementation_outcome
-                |> return_or_raise()
-                |> then(&update_goal_for_result(session, workspace, issue, &1))
-              else
-                {:error, reason} = error ->
-                  RunAudit.append(workspace, issue, :codex_goal_failed, %{
-                    phase: "codex_goal",
-                    status: "failed",
-                    reason: reason,
-                    thread_id: session.thread_id
-                  })
-
-                  error
+                      error
+                  end
+                end
+              after
+                RunAudit.append(workspace, issue, :codex_app_server_stopping, %{phase: "codex_app_server", status: "stopping"})
+                AppServer.stop_session(session)
               end
-            end
-          after
-            RunAudit.append(workspace, issue, :codex_app_server_stopping, %{phase: "codex_app_server", status: "stopping"})
-            AppServer.stop_session(session)
+
+            {:error, _reason} = error ->
+              AppServer.stop_session(session)
+              error
           end
 
         {:error, reason} = error ->
@@ -800,27 +823,30 @@ defmodule SymphonyElixir.AgentRunner do
     end
   end
 
-  defp start_codex_session(workspace, worker_host) do
+  defp start_codex_session(workspace, worker_host, opts) do
+    dynamic_tools =
+      PlanningArtifact.candidate_tool_specs() ++
+        ExecutionControl.tool_specs() ++
+        DeliveryControl.tool_specs() ++ Keyword.get(opts, :extra_dynamic_tools, [])
+
+    session_opts = [worker_host: worker_host, dynamic_tools: dynamic_tools]
+
     case ThreadIdentity.read(workspace, worker_host) do
       :missing ->
-        AppServer.start_session(workspace,
-          worker_host: worker_host,
-          dynamic_tools:
-            PlanningArtifact.candidate_tool_specs() ++
-              ExecutionControl.tool_specs() ++ DeliveryControl.tool_specs()
-        )
+        AppServer.start_session(workspace, session_opts)
 
       {:ok, thread_id} ->
-        AppServer.start_session(workspace,
-          worker_host: worker_host,
-          thread_id: thread_id,
-          dynamic_tools:
-            PlanningArtifact.candidate_tool_specs() ++
-              ExecutionControl.tool_specs() ++ DeliveryControl.tool_specs()
-        )
+        AppServer.start_session(workspace, Keyword.put(session_opts, :thread_id, thread_id))
 
       {:error, _reason} = error ->
         error
+    end
+  end
+
+  defp maybe_name_thread(session, opts) do
+    case Keyword.get(opts, :thread_name) do
+      nil -> :ok
+      name when is_binary(name) -> AppServer.set_thread_name(session, name)
     end
   end
 
@@ -902,6 +928,7 @@ defmodule SymphonyElixir.AgentRunner do
                    issue,
                    task_contract
                  ),
+               effort: Keyword.get(runtime.opts, :reasoning_effort),
                on_message:
                  codex_message_handler(
                    codex_update_recipient,
@@ -909,7 +936,9 @@ defmodule SymphonyElixir.AgentRunner do
                    workspace,
                    runtime.proof_ledger,
                    runtime.plan_progress,
-                   runtime.worker_host
+                   runtime.worker_host,
+                   app_session,
+                   Keyword.get(runtime.opts, :codex_message_observer)
                  )
              ) do
           {:ok, turn_session} ->
@@ -1454,39 +1483,44 @@ defmodule SymphonyElixir.AgentRunner do
       started_at = RunAudit.now()
 
       result =
-        if tool in ["request_implementation_review", "publish_pull_request"] do
-          DeliveryControl.execute_tool(
-            workspace,
-            issue,
-            contract,
-            plan,
-            key,
-            tool,
-            arguments,
-            Keyword.put(runtime.opts, :worker_host, runtime.worker_host)
-          )
-        else
-          ExecutionControl.execute_tool(
-            plan,
-            key,
-            workspace,
-            tool,
-            arguments,
-            worker_host: runtime.worker_host,
-            command_executor: fn directory, command, command_opts ->
-              AppServer.run_command(app_session, directory, command, command_opts)
-            end,
-            browser_executor: fn directory, command, browser, command_opts ->
-              AppServer.run_browser_proof(
-                app_session,
-                directory,
-                command,
-                browser,
-                Keyword.put(command_opts, :browser_path, browser_path)
-              )
-            end
-          )
-          |> dynamic_tool_result()
+        cond do
+          tool == "team_send" and is_function(Keyword.get(runtime.opts, :team_tool_executor), 2) ->
+            Keyword.fetch!(runtime.opts, :team_tool_executor).(tool, arguments)
+
+          tool in ["request_implementation_review", "publish_pull_request"] ->
+            DeliveryControl.execute_tool(
+              workspace,
+              issue,
+              contract,
+              plan,
+              key,
+              tool,
+              arguments,
+              Keyword.put(runtime.opts, :worker_host, runtime.worker_host)
+            )
+
+          true ->
+            ExecutionControl.execute_tool(
+              plan,
+              key,
+              workspace,
+              tool,
+              arguments,
+              worker_host: runtime.worker_host,
+              command_executor: fn directory, command, command_opts ->
+                AppServer.run_command(app_session, directory, command, command_opts)
+              end,
+              browser_executor: fn directory, command, browser, command_opts ->
+                AppServer.run_browser_proof(
+                  app_session,
+                  directory,
+                  command,
+                  browser,
+                  Keyword.put(command_opts, :browser_path, browser_path)
+                )
+              end
+            )
+            |> dynamic_tool_result()
         end
 
       record_execution_tool_event(
