@@ -103,8 +103,11 @@ invariants:
   - Infrastructure must land before the application is deployed.
 ```
 
-The section declares two to eight unique workflow names. Every repository
-requires a non-empty change, acceptance list, and verification list;
+The section supports arbitrary trusted registry names and declares two to eight
+unique workflow names.
+`application` and `infrastructure` are illustrative examples rather than
+reserved names. Every repository requires a non-empty change, acceptance list,
+and verification list;
 `validation_goal` and `invariants` are also required. The label and section must
 appear together. The issue identifier is the request ID, and agent IDs are
 always `coordinator` and `repo:<workflow>`.
@@ -112,10 +115,12 @@ always `coordinator` and `repo:<workflow>`.
 Workflow names resolve only through the trusted `team.repositories` registry
 generated from `workflow-manifest.yml`. Ticket YAML cannot provide repository
 URLs, hooks, commands, credentials, additional repositories, or alternate
-invariants. Each repository runs the existing single-repository proof, review,
-PR, and completion-evidence gates in its own checkout and top-level Codex
-thread. Symphony updates one `## Team execution` Linear comment; internal agent
-events remain in the bounded runtime state and dashboard.
+invariants. Same-repository implementors require distinct workflow aliases and
+isolated workspaces; sharing a repository does not merge their checkouts or
+execution state. Each repository runs the existing single-repository proof,
+review, PR, and completion-evidence gates in its own checkout and top-level
+Codex thread. Symphony updates one `## Team execution` Linear comment; internal
+agent events remain in the bounded runtime state and dashboard.
 
 Member planning remains conditional on preactivation classification. Simple
 members execute their sealed direct authorization without manufacturing a plan.
